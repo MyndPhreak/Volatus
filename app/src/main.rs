@@ -8,6 +8,7 @@
 
 mod elevate;
 mod model;
+mod nav;
 mod tree_view;
 
 use model::{Event, ScanState, Summary, banner_text, error_message, format_size, group_digits, next};
