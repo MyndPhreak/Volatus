@@ -5,7 +5,7 @@ mod common;
 use common::ntfs::{ROOT, dir, file, volume};
 use common::{TempDir, make_placeholder};
 use scan::mft::scan_device;
-use scan::{Method, ScanOptions, Tree, scan, scan_with};
+use scan::{Method, ScanOptions, Tree, scan_with};
 use std::fs;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
@@ -140,7 +140,9 @@ fn live_whole_volume_mft_scan_is_consistent() {
     let (tx, _rx) = channel();
     let no = AtomicBool::new(false);
 
-    let (tree, stats) = scan(&root, tx, &no)
+    // Forced MFT: unelevated, this fails fast instead of walking the whole drive.
+    let forced = ScanOptions { method: Some(Method::Mft), ..ScanOptions::default() };
+    let (tree, stats) = scan_with(&root, tx, &no, &forced)
         .expect("whole-volume scan failed: run this test from an elevated (Administrator) prompt");
 
     assert_eq!(stats.method, Method::Mft, "precondition: the MFT path ran (run elevated, NTFS)");
