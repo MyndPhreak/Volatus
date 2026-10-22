@@ -220,6 +220,7 @@ dependencies = [
  "scan",
  "slint",
  "slint-build",
+ "treemap",
  "window-vibrancy",
 ]
 

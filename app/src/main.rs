@@ -7,6 +7,7 @@
 //! If Mica is not available (Windows 10), the window falls back to the opaque Fluent background.
 
 mod model;
+mod tree_view;
 
 use model::{Event, ScanState, Summary, banner_text, error_message, next};
 use scan::{Progress, ScanError};

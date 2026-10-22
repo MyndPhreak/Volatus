@@ -6,6 +6,7 @@ build = "build.rs"
 
 [dependencies]
 scan = { path = "../scan" }
+treemap = { path = "../treemap" }
 slint = { version = "1.18.1", features = ["raw-window-handle-06"] }
 window-vibrancy = "0.8"
 rfd = "0.15"
