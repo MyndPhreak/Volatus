@@ -11,9 +11,9 @@ mod model;
 mod nav;
 mod tree_view;
 
-use model::{Event, ScanControl, ScanState, Summary, banner_text, error_message, format_size, group_digits};
+use model::{Event, ScanControl, ScanState, Summary, banner_text, error_message, format_size, group_digits, offer_elevation};
 use nav::{Dir, TreeMove};
-use scan::{Method, NodeId, Progress, ScanError, Tree};
+use scan::{NodeId, Progress, ScanError, Tree};
 use slint::{
     ComponentHandle, Image, Model, ModelNotify, ModelRc, ModelTracker, Rgba8Pixel, SharedPixelBuffer, SharedString,
     Timer, TimerMode, VecModel, Weak,
@@ -104,6 +104,8 @@ struct Session {
     map_size: (f32, f32),
     /// Id of the latest treemap layout request. Results of older requests are dropped.
     layout_seq: u64,
+    /// Root of the latest scan, as typed. Decides whether "Restart as administrator" is offered.
+    scan_root: PathBuf,
 }
 
 thread_local! {
@@ -112,6 +114,7 @@ thread_local! {
         loaded: None,
         map_size: (0.0, 0.0),
         layout_seq: 0,
+        scan_root: PathBuf::new(),
     });
     /// Starts one relayout after the window stops changing the treemap size.
     static RESIZE_TIMER: Timer = Timer::default();
@@ -131,7 +134,10 @@ fn show_state(ui: &MainWindow) {
     ui.set_scanning(matches!(state, ScanState::Scanning { .. }));
     ui.set_banner_is_error(matches!(state, ScanState::Error(_)));
     ui.set_banner(banner_text(&state).into());
-    ui.set_show_elevate(matches!(&state, ScanState::Done(s) if s.method == Method::Walk) && !elevate::is_admin());
+    let root = SESSION.with_borrow(|s| s.scan_root.clone());
+    // A root that cannot be resolved is not a drive root (same rule as `scan::scan_with`).
+    let root = std::fs::canonicalize(&root).unwrap_or(root);
+    ui.set_show_elevate(matches!(&state, ScanState::Done(s) if offer_elevation(s.method, &root, elevate::is_admin())));
 }
 
 fn with_loaded<R>(f: impl FnOnce(&mut Loaded) -> R) -> Option<R> {
@@ -302,6 +308,7 @@ fn start_scan(ui: &MainWindow, path: &str) {
     let Some((generation, cancel)) = SESSION.with_borrow_mut(|s| s.scan.start()) else {
         return;
     };
+    SESSION.with_borrow_mut(|s| s.scan_root = PathBuf::from(path));
     show_state(ui);
     clear(ui);
     ui.set_elevate_note(SharedString::new());
