@@ -2,6 +2,7 @@
 //! helpers and treemap hit-testing. Plain functions, no Slint types, so it is unit tested.
 
 use scan::{NodeId, Tree};
+use std::cmp::Ordering;
 use std::collections::HashSet;
 use treemap::Rect;
 
@@ -32,60 +33,152 @@ pub struct ViewState {
 
 impl ViewState {
     /// Root expanded, sorted by size, largest first.
-    pub fn new(_root: NodeId) -> Self {
-        unimplemented!("ViewState::new")
+    pub fn new(root: NodeId) -> Self {
+    let mut expanded = HashSet::new();
+    expanded.insert(root);
+    Self { expanded, key: SortKey::Size, descending: true }
     }
 
     /// Same key flips the direction. A new key starts ascending for Name, descending otherwise.
-    pub fn sort_by(&mut self, _key: SortKey) {
-        unimplemented!("ViewState::sort_by")
+    pub fn sort_by(&mut self, key: SortKey) {
+    if self.key == key {
+        self.descending = !self.descending;
+    } else {
+        self.key = key;
+        self.descending = key != SortKey::Name;
+    }
     }
 
     /// Expands a collapsed folder, collapses an expanded one. Files are ignored.
-    pub fn toggle(&mut self, _tree: &Tree, _node: NodeId) {
-        unimplemented!("ViewState::toggle")
+    pub fn toggle(&mut self, tree: &Tree, node: NodeId) {
+    if tree.node(node).first_child.is_none() {
+        return;
+    }
+    if !self.expanded.remove(&node) {
+        self.expanded.insert(node);
+    }
     }
 
     /// Expands every ancestor of `node` so its row is visible.
-    pub fn reveal(&mut self, _tree: &Tree, _node: NodeId) {
-        unimplemented!("ViewState::reveal")
+    pub fn reveal(&mut self, tree: &Tree, node: NodeId) {
+    let mut cur = tree.node(node).parent;
+    while let Some(p) = cur {
+        self.expanded.insert(p);
+        cur = tree.node(p).parent;
+    }
     }
 }
 
 /// Number of files under each node, indexed by `NodeId.0`. A file counts as 1 for itself.
-pub fn file_counts(_tree: &Tree) -> Vec<u64> {
-    unimplemented!("file_counts")
+pub fn file_counts(tree: &Tree) -> Vec<u64> {
+// Breadth-first order lists every parent before its children; folding it backwards
+// rolls counts up without recursion.
+let mut order = vec![tree.root()];
+let mut i = 0;
+while i < order.len() {
+    let n = order[i];
+    order.extend(tree.children(n));
+    i += 1;
+}
+let len = order.iter().map(|n| n.0 as usize + 1).max().unwrap_or(0);
+let mut counts = vec![0u64; len];
+for &n in order.iter().rev() {
+    let node = tree.node(n);
+    if !node.is_dir {
+        counts[n.0 as usize] = 1;
+    }
+    if let Some(p) = node.parent {
+        counts[p.0 as usize] += counts[n.0 as usize];
+    }
+}
+counts
 }
 
 /// Visible rows, depth first, starting at the tree root. Only expanded folders are walked.
-pub fn flatten(_tree: &Tree, _counts: &[u64], _view: &ViewState) -> Vec<Row> {
-    unimplemented!("flatten")
+pub fn flatten(tree: &Tree, counts: &[u64], view: &ViewState) -> Vec<Row> {
+let mut rows = Vec::new();
+let mut stack = vec![(tree.root(), 0u32)];
+while let Some((node, depth)) = stack.pop() {
+    let has_children = tree.node(node).first_child.is_some();
+    let expanded = has_children && view.expanded.contains(&node);
+    rows.push(Row { node, depth, expanded, has_children });
+    if expanded {
+        let mut kids: Vec<NodeId> = tree.children(node).collect();
+        kids.sort_by(|&a, &b| compare(tree, counts, view, a, b));
+        // Pushed in reverse so the first child pops first.
+        stack.extend(kids.into_iter().rev().map(|k| (k, depth + 1)));
+    }
+}
+rows
 }
 
 /// Position of `node` in `rows`.
-pub fn row_index(_rows: &[Row], _node: NodeId) -> Option<usize> {
-    unimplemented!("row_index")
+pub fn row_index(rows: &[Row], node: NodeId) -> Option<usize> {
+rows.iter().position(|r| r.node == node)
 }
 
 /// `part` as a share of `total`, one decimal: `33.3%`. A zero total gives `0.0%`.
-pub fn format_percent(_part: u64, _total: u64) -> String {
-    unimplemented!("format_percent")
+pub fn format_percent(part: u64, total: u64) -> String {
+if total == 0 {
+    return "0.0%".into();
+}
+// Tenths of a percent, rounded half up, in u128 so sizes near u64::MAX cannot overflow.
+let tenths = (u128::from(part) * 1000 + u128::from(total) / 2) / u128::from(total);
+format!("{}.{}%", tenths / 10, tenths % 10)
 }
 
 /// The rect under the point, if any. Left and top edges are inside, right and bottom are not.
-pub fn hit_test(_rects: &[Rect], _x: f64, _y: f64) -> Option<NodeId> {
-    unimplemented!("hit_test")
+pub fn hit_test(rects: &[Rect], x: f64, y: f64) -> Option<NodeId> {
+rects.iter().find(|r| x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h).map(|r| r.node)
 }
 
 /// Bounding box `(x, y, w, h)` of every rect at or under `selected`. `None` if none is drawn.
-pub fn selection_bounds(_tree: &Tree, _rects: &[Rect], _selected: NodeId) -> Option<(f64, f64, f64, f64)> {
-    unimplemented!("selection_bounds")
+pub fn selection_bounds(tree: &Tree, rects: &[Rect], selected: NodeId) -> Option<(f64, f64, f64, f64)> {
+let under = |mut n: NodeId| loop {
+    if n == selected {
+        return true;
+    }
+    match tree.node(n).parent {
+        Some(p) => n = p,
+        None => return false,
+    }
+};
+let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+let mut any = false;
+for r in rects.iter().filter(|r| under(r.node)) {
+    any = true;
+    x0 = x0.min(r.x);
+    y0 = y0.min(r.y);
+    x1 = x1.max(r.x + r.w);
+    y1 = y1.max(r.y + r.h);
+}
+any.then_some((x0, y0, x1 - x0, y1 - y0))
 }
 
 /// The folder to zoom into when `leaf` is picked: the child of `view_root` on the path to
 /// `leaf`, if that child is a folder. `None` if the leaf is a direct file of `view_root`.
-pub fn drill_target(_tree: &Tree, _view_root: NodeId, _leaf: NodeId) -> Option<NodeId> {
-    unimplemented!("drill_target")
+pub fn drill_target(tree: &Tree, view_root: NodeId, leaf: NodeId) -> Option<NodeId> {
+let mut cur = leaf;
+loop {
+    let parent = tree.node(cur).parent?;
+    if parent == view_root {
+        return tree.node(cur).is_dir.then_some(cur);
+    }
+    cur = parent;
+}
+}
+
+/// Order of two siblings: the chosen column, flipped if descending, then name, then id.
+fn compare(tree: &Tree, counts: &[u64], view: &ViewState, a: NodeId, b: NodeId) -> Ordering {
+    let name = |n: NodeId| tree.name(n).chars().flat_map(char::to_lowercase);
+    let primary = match view.key {
+        SortKey::Name => name(a).cmp(name(b)),
+        // Siblings share a parent, so share of parent orders like size.
+        SortKey::Size | SortKey::Percent => tree.node(a).size.cmp(&tree.node(b).size),
+        SortKey::Files => counts[a.0 as usize].cmp(&counts[b.0 as usize]),
+    };
+    let primary = if view.descending { primary.reverse() } else { primary };
+    primary.then_with(|| name(a).cmp(name(b))).then(a.cmp(&b))
 }
 
 #[cfg(test)]
@@ -142,7 +235,7 @@ mod tests {
         let a = find(&t, t.root(), "a");
         let sub = find(&t, a, "sub");
         let c = find(&t, t.root(), "c");
-        assert_eq!(counts[t.root().0 as usize], 5);
+        assert_eq!(counts[t.root().0 as usize], 6);
         assert_eq!(counts[a.0 as usize], 3);
         assert_eq!(counts[sub.0 as usize], 1);
         assert_eq!(counts[c.0 as usize], 1);
