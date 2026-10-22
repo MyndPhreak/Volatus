@@ -220,12 +220,17 @@ pub const MFT_LCN_B: u64 = 10;
 
 /// NTFS boot sector: 512 B/sector, 8 sectors/cluster, `$MFT` at `MFT_LCN_A`, 1024-byte records.
 pub fn boot_sector(total_clusters: u64) -> Vec<u8> {
+    boot_sector_with(total_clusters, 8)
+}
+
+/// NTFS boot sector with `spc` 512-byte sectors per cluster.
+fn boot_sector_with(total_clusters: u64, spc: u8) -> Vec<u8> {
     let mut b = vec![0u8; 512];
     b[0..3].copy_from_slice(&[0xEB, 0x52, 0x90]);
     b[3..11].copy_from_slice(b"NTFS    ");
     put16(&mut b, 0x0B, 512);
-    b[0x0D] = 8;
-    put64(&mut b, 0x28, total_clusters * 8);
+    b[0x0D] = spc;
+    put64(&mut b, 0x28, total_clusters * u64::from(spc));
     put64(&mut b, 0x30, MFT_LCN_A);
     put64(&mut b, 0x38, 2);
     b[0x40] = (-10i8) as u8; // 2^10 = 1024-byte records
@@ -248,21 +253,36 @@ pub fn volume(records: &[(u64, Vec<u8>)]) -> Vec<u8> {
 }
 
 pub fn volume_with(records: &[(u64, Vec<u8>)], opts: Volume) -> Vec<u8> {
-    let per_cluster = (CLUSTER / RECORD) as u64;
+    build(records, opts.short_runs, CLUSTER)
+}
+
+/// Record that `volume_512` splits across its two `$MFT` runs: its first 512 bytes end run A,
+/// its last 512 bytes start run B.
+pub const STRADDLE_512: u64 = 12;
+
+/// Like `volume`, with 512-byte clusters and an odd first run, so record `STRADDLE_512` is
+/// split across the two `$MFT` runs. Record numbers up to `FIRST_USER + 8` only.
+pub fn volume_512(records: &[(u64, Vec<u8>)]) -> Vec<u8> {
+    assert!(records.iter().all(|(n, _)| *n <= FIRST_USER + 8), "volume_512 holds records 0..=24 only");
+    build(records, 0, 512)
+}
+
+fn build(records: &[(u64, Vec<u8>)], short_runs: u64, cluster: usize) -> Vec<u8> {
     let max = records.iter().map(|(n, _)| *n).max().unwrap_or(0).max(FIRST_USER + 8);
-    let clusters = (max + 1).div_ceil(per_cluster);
-    let a = clusters / 2;
+    let size = ((max + 1) * RECORD as u64).next_multiple_of(cluster as u64);
+    let clusters = size / cluster as u64;
+    // Clusters smaller than a record: an odd split puts one record across the two runs.
+    let a = if cluster < RECORD { (clusters / 2) | 1 } else { clusters / 2 };
     let b = clusters - a;
     assert!(MFT_LCN_B + b <= MFT_LCN_A, "fixture $MFT fragments overlap");
-    let size = clusters * CLUSTER as u64;
-    let run_list = runs(&[(MFT_LCN_A, a), (MFT_LCN_B, b - opts.short_runs)]);
+    if cluster < RECORD {
+        assert_eq!(a * cluster as u64 / RECORD as u64, STRADDLE_512, "fixture straddle record moved");
+    }
+    let run_list = runs(&[(MFT_LCN_A, a), (MFT_LCN_B, b - short_runs)]);
     let mft = record(
         IN_USE,
         0,
-        &[
-            file_name(ROOT, "$MFT", WIN32_DOS),
-            nonresident_attr(0x80, "", 0, 0, size, size, None, &run_list),
-        ],
+        &[file_name(ROOT, "$MFT", WIN32_DOS), nonresident_attr(0x80, "", 0, 0, size, size, None, &run_list)],
     );
     let mut all: Vec<(u64, Vec<u8>)> = vec![(0, mft)];
     if !records.iter().any(|(n, _)| *n == ROOT) {
@@ -271,13 +291,18 @@ pub fn volume_with(records: &[(u64, Vec<u8>)], opts: Volume) -> Vec<u8> {
     all.extend(records.iter().cloned());
 
     let total_clusters = MFT_LCN_A + a + 4;
-    let mut img = vec![0u8; total_clusters as usize * CLUSTER];
-    img[..512].copy_from_slice(&boot_sector(total_clusters));
+    let mut img = vec![0u8; total_clusters as usize * cluster];
+    img[..512].copy_from_slice(&boot_sector_with(total_clusters, (cluster / 512) as u8));
+    // Each record is copied in pieces of at most one cluster, each to its own LCN.
+    let piece = cluster.min(RECORD);
     for (n, bytes) in all {
-        let vcn = n / per_cluster;
-        let lcn = if vcn < a { MFT_LCN_A + vcn } else { MFT_LCN_B + (vcn - a) };
-        let at = lcn as usize * CLUSTER + (n % per_cluster) as usize * RECORD;
-        img[at..at + RECORD].copy_from_slice(&bytes);
+        for k in (0..RECORD).step_by(piece) {
+            let v = n as usize * RECORD + k;
+            let vcn = (v / cluster) as u64;
+            let lcn = if vcn < a { MFT_LCN_A + vcn } else { MFT_LCN_B + (vcn - a) };
+            let at = lcn as usize * cluster + v % cluster;
+            img[at..at + piece].copy_from_slice(&bytes[k..k + piece]);
+        }
     }
     img
 }

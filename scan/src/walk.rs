@@ -14,7 +14,7 @@
 
 use crate::mft::{NAME_SURROGATE, u32_at, u64_at};
 use crate::rollup::{RawEntry, rollup};
-use crate::{Method, Progress, ScanError, ScanStats, Tree};
+use crate::{Method, Phases, Progress, ScanError, ScanStats, Tree};
 use rayon::prelude::*;
 use std::collections::HashSet;
 use std::ffi::OsString;
@@ -229,6 +229,8 @@ pub fn walk(
         skipped: out.skipped + rolled.skipped,
         elapsed: started.elapsed(),
         method: Method::Walk,
+        phases: Phases::default(),
+        threads: 0,
     };
     Ok((rolled.tree, stats))
 }

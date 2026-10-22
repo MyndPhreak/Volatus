@@ -85,6 +85,44 @@ pub struct ScanStats {
     pub skipped: u64,
     pub elapsed: Duration,
     pub method: Method,
+    /// Time spent in each part of the scan.
+    pub phases: Phases,
+    /// Worker threads the scan ran on (the rayon pool size).
+    pub threads: usize,
+}
+
+/// Time spent in each part of a scan. On the MFT path `read` and `parse` run at the same time,
+/// so their sum can exceed the total.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Phases {
+    /// Opening the volume and reading the boot sector and `$MFT` record 0. Zero for the walker.
+    pub open: Duration,
+    /// Busy time reading `$MFT` (MFT path) or listing directories (walker).
+    pub read: Duration,
+    /// Busy time parsing FILE records. Zero for the walker.
+    pub parse: Duration,
+    /// Linking parents and rolling up sizes.
+    pub rollup: Duration,
+}
+
+/// Default bytes per `$MFT` read.
+pub const DEFAULT_CHUNK: usize = 4 << 20;
+
+/// Tuning knobs. `Default` gives the values `scan` uses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScanOptions {
+    /// Bytes per `$MFT` read. Rounded down to whole records and clusters, at least one of each.
+    pub chunk: usize,
+    /// Worker threads. `None` = rayon's global pool (one per logical CPU).
+    pub threads: Option<usize>,
+    /// Scanner to run. `None` = the MFT, falling back to the walker.
+    pub method: Option<Method>,
+}
+
+impl Default for ScanOptions {
+    fn default() -> Self {
+        unimplemented!("ScanOptions::default")
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -126,4 +164,16 @@ pub fn scan(
         Err(_) => walk::walk(root, &progress, cancel),
         done => done,
     }
+}
+
+/// `scan` with tuning knobs. `opts.method` set to one scanner runs only that one, with no
+/// fallback; `opts.threads` runs the scan on its own thread pool of that size.
+pub fn scan_with(
+    root: &Path,
+    progress: Sender<Progress>,
+    cancel: &AtomicBool,
+    opts: &ScanOptions,
+) -> Result<(Tree, ScanStats), ScanError> {
+    let _ = (root, progress, cancel, opts);
+    unimplemented!("scan_with")
 }

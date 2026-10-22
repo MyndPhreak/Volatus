@@ -9,7 +9,7 @@
 //! same). A file with several hard links is one entry, under its first non-DOS name.
 
 use crate::rollup::{RawEntry, Rolled, rollup};
-use crate::{Method, NodeId, Progress, ScanError, ScanStats, Tree};
+use crate::{Method, NodeId, Phases, Progress, ScanError, ScanStats, Tree};
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::io::{self, Read, Seek, SeekFrom};
@@ -486,8 +486,24 @@ pub fn scan_device<R: Read + Seek>(
         skipped: skipped + rolled.skipped,
         elapsed: started.elapsed(),
         method: Method::Mft,
+        phases: Phases::default(),
+        threads: 0,
     };
     Ok((rolled.tree, stats))
+}
+
+/// `scan_device` reading `chunk` bytes per call (rounded down to whole records and clusters,
+/// at least one of each), with reading and parsing overlapped. The caller picks the thread pool.
+pub fn scan_device_with<R: Read + Seek + Send>(
+    dev: &mut R,
+    sub: &Path,
+    root_name: &str,
+    progress: &Sender<Progress>,
+    cancel: &AtomicBool,
+    chunk: usize,
+) -> Result<(Tree, ScanStats), ScanError> {
+    let _ = (dev, sub, root_name, progress, cancel, chunk);
+    unimplemented!("scan_device_with")
 }
 
 /// MFT scan of `root` on its local volume. Fails (and `scan` falls back to the walker) when

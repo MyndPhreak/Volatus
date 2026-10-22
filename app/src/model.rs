@@ -336,7 +336,15 @@ mod tests {
     // ---- Summary ----
     #[test]
     fn summary_new_copies_stats_and_total() {
-        let stats = ScanStats { files: 4, dirs: 2, skipped: 1, elapsed: Duration::from_secs(3), method: Method::Walk };
+        let stats = ScanStats {
+            files: 4,
+            dirs: 2,
+            skipped: 1,
+            elapsed: Duration::from_secs(3),
+            method: Method::Walk,
+            phases: Default::default(),
+            threads: 1,
+        };
         let s = Summary::new(&stats, 99);
         assert_eq!(
             s,
