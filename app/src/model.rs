@@ -132,6 +132,14 @@ impl ScanControl {
         self.state = next(std::mem::replace(&mut self.state, ScanState::Idle), event);
         true
     }
+
+    /// Applies `Finished(summary)` from scan `generation` and gives `result` back for the window
+    /// to show. `None`, and no change, if that scan is not current: a late result is never shown.
+    #[allow(dead_code)] // stub: post_done calls it in the implementation commit
+    pub fn finish<T>(&mut self, generation: u64, summary: Summary, result: T) -> Option<T> {
+        let _ = (generation, summary, result);
+        unimplemented!("ScanControl::finish")
+    }
 }
 
 /// Binary units, one decimal above 1 KB: `1.5 MB`.
@@ -593,6 +601,41 @@ mod tests {
 
         assert!(applied);
         assert_eq!(c.state(), &ScanState::Scanning { files: 10, dirs: 3 });
+    }
+
+    // ---- ScanControl::finish: the post_done guard ----
+    #[test]
+    fn scan_control_finish_after_cancel_returns_no_result() {
+        let mut c = ScanControl::default();
+        let (g, _) = c.start().unwrap();
+        c.cancel();
+
+        let shown = c.finish(g, summary(Method::Walk, 0), "tree");
+
+        assert_eq!((shown, c.state()), (None, &ScanState::Cancelled));
+    }
+
+    #[test]
+    fn scan_control_finish_from_an_old_scan_returns_no_result_and_keeps_the_new_scan() {
+        let mut c = ScanControl::default();
+        let (old, _) = c.start().unwrap();
+        c.cancel();
+        c.start().unwrap();
+
+        let shown = c.finish(old, summary(Method::Walk, 0), "old tree");
+
+        assert_eq!((shown, c.state()), (None, &ScanState::Scanning { files: 0, dirs: 0 }));
+    }
+
+    #[test]
+    fn scan_control_finish_current_scan_returns_the_result_and_moves_to_done() {
+        let mut c = ScanControl::default();
+        let (g, _) = c.start().unwrap();
+        let sum = summary(Method::Mft, 0);
+
+        let shown = c.finish(g, sum.clone(), "tree");
+
+        assert_eq!((shown, c.state()), (Some("tree"), &ScanState::Done(sum)));
     }
 
     #[test]
