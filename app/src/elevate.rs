@@ -22,21 +22,21 @@ pub fn quote_arg(path: &str) -> String {
 /// Command line for the elevated copy. `--` comes before the folder, so a folder named like a
 /// flag is still read as a folder. `--timing` is carried over when set.
 pub fn relaunch_args(scan_path: &str, timing: bool) -> String {
-    let _ = (scan_path, timing);
-    todo!("relaunch_args")
+    let flag = if timing { "--timing " } else { "" };
+    format!("{flag}-- {}", quote_arg(scan_path))
 }
 
 fn wide(s: &std::ffi::OsStr) -> Vec<u16> {
     s.encode_wide().chain(std::iter::once(0)).collect()
 }
 
-/// Starts an elevated copy of this exe with `scan_path` as its argument.
+/// Starts an elevated copy of this exe that scans `scan_path` (and times, if `timing`).
 /// `Err` if the user declines the UAC prompt or the launch fails: the caller keeps running.
-pub fn restart_as_admin(scan_path: &str) -> Result<(), String> {
+pub fn restart_as_admin(scan_path: &str, timing: bool) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let verb = wide("runas".as_ref());
     let file = wide(exe.as_os_str());
-    let args = wide(quote_arg(scan_path).as_ref());
+    let args = wide(relaunch_args(scan_path, timing).as_ref());
     // SAFETY: all strings are NUL terminated and outlive the call.
     let result = unsafe {
         ShellExecuteW(std::ptr::null_mut(), verb.as_ptr(), file.as_ptr(), args.as_ptr(), null(), SW_SHOWNORMAL)

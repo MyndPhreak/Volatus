@@ -107,6 +107,13 @@ For a cold number, restart Windows, open an elevated PowerShell and run **one** 
 (`bench.exe C:\ --method mft --runs 1`). Restart again and run the other once. Do not compare a
 cold run with a warm run.
 
+## Timing in the app (`--timing`)
+
+Start the app with `--timing` (before or after the folder). After a scan the banner ends with
+`Timing: scan 5.3 s, after scan 0.2 s, total 5.5 s.` and the same line goes to stderr.
+"scan" is the scan itself. "after scan" is the work until the treemap is shown. "total" is the
+time from the Scan click. "Restart as administrator" keeps the flag.
+
 ## Results
 
 M3 run by the user, 2026-10-22: `docsench.ps1 -Drive C -Rounds 5 -Sweep`, elevated. Ryzen 9

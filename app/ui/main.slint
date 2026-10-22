@@ -60,6 +60,8 @@ export component MainWindow inherits Window {
     in property <[string]> drives;
     in property <bool> scanning;
     in property <string> banner;
+    // True while the folder dialog is open.
+    in property <bool> browsing;
     in property <bool> banner-is-error;
     in-out property <string> path;
 
@@ -147,7 +149,7 @@ export component MainWindow inherits Window {
             }
             Button {
                 text: "Browse";
-                enabled: !root.scanning;
+                enabled: !root.scanning && !root.browsing;
                 clicked => { root.browse(); }
             }
         }

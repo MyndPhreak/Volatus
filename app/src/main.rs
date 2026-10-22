@@ -13,7 +13,11 @@ mod model;
 mod nav;
 mod tree_view;
 
-use model::{Event, ScanControl, ScanState, Summary, banner_text, error_message, format_size, group_digits, offer_elevation};
+use browse::BrowseState;
+use model::{
+    Event, ScanControl, ScanState, Summary, append_timing, banner_text, error_message, format_size, format_timing,
+    group_digits, offer_elevation,
+};
 use nav::{Dir, TreeMove};
 use scan::{NodeId, Progress, ScanError, Tree};
 use slint::{
@@ -24,7 +28,7 @@ use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, mpsc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tree_view::{Row, SortKey, ViewState};
 use treemap::Rect;
 
@@ -97,6 +101,18 @@ struct Loaded {
     rects: Vec<Rect>,
 }
 
+/// Timings of the latest scan, kept only when the app starts with `--timing`.
+struct TimingRun {
+    /// When the Scan click reached `start_scan`.
+    clicked: Instant,
+    /// When `scan::scan` returned. Set when the scan result is installed.
+    scan_returned: Option<Instant>,
+    /// `scan::scan` time, from the scan statistics.
+    scan: Duration,
+    /// The finished line. Set once, when the first treemap of the scan is shown.
+    line: Option<String>,
+}
+
 /// UI-thread state. Events from worker threads are applied here via `invoke_from_event_loop`.
 struct Session {
     /// State, id and stop flag of the current scan. Events from an older scan are dropped.
@@ -108,6 +124,12 @@ struct Session {
     layout_seq: u64,
     /// Root of the latest scan, as typed. Decides whether "Restart as administrator" is offered.
     scan_root: PathBuf,
+    /// Browse dialog state: at most one dialog at a time.
+    browse: BrowseState,
+    /// `--timing` was given. Also passed on by "Restart as administrator".
+    timing: bool,
+    /// Timings of the latest scan. `None` unless `timing` is set and a scan started.
+    run: Option<TimingRun>,
 }
 
 thread_local! {
@@ -117,6 +139,9 @@ thread_local! {
         map_size: (0.0, 0.0),
         layout_seq: 0,
         scan_root: PathBuf::new(),
+        browse: BrowseState::default(),
+        timing: false,
+        run: None,
     });
     /// Starts one relayout after the window stops changing the treemap size.
     static RESIZE_TIMER: Timer = Timer::default();
@@ -139,7 +164,9 @@ fn show_state(ui: &MainWindow) {
     // A root that cannot be resolved is not a drive root (same rule as `scan::scan_with`).
     let root = std::fs::canonicalize(&root).unwrap_or(root);
     let offer = matches!(&state, ScanState::Done(s) if offer_elevation(s.method, &root, elevate::is_admin()));
-    ui.set_banner(banner_text(&state, offer).into());
+    let line = SESSION.with_borrow(|s| s.run.as_ref().and_then(|r| r.line.clone()));
+    let line = line.filter(|_| matches!(state, ScanState::Done(_)));
+    ui.set_banner(append_timing(banner_text(&state, offer), line.as_deref()).into());
     ui.set_show_elevate(offer);
 }
 
@@ -223,6 +250,24 @@ fn show_layout(ui: &MainWindow, root: NodeId, rects: Vec<Rect>, image: Option<Sh
     ui.set_treemap_can_go_up(can_go_up);
     ui.set_treemap_title(title.into());
     sync_selection(ui);
+    note_treemap_shown(ui);
+}
+
+/// With `--timing`: when the first treemap of a finished scan is shown, completes the timing line,
+/// prints it to stderr and adds it to the banner. Later layouts of the same scan change nothing.
+fn note_treemap_shown(ui: &MainWindow) {
+    let line = SESSION.with_borrow_mut(|s| {
+        let run = s.run.as_mut().filter(|r| r.line.is_none())?;
+        let returned = run.scan_returned?;
+        let now = Instant::now();
+        let line = format_timing(run.scan, now - returned, now - run.clicked);
+        run.line = Some(line.clone());
+        Some(line)
+    });
+    if let Some(line) = line {
+        eprintln!("{line}");
+        show_state(ui);
+    }
 }
 
 /// Selects `node` in the tree and the treemap and scrolls the tree to it.
@@ -287,11 +332,18 @@ fn post(ui: &Weak<MainWindow>, generation: u64, event: Event) {
 
 /// Like `post` for `Finished`, and installs the scanned tree in the window. Both are dropped if
 /// a newer scan has started or the scan was cancelled (`ScanControl::finish` decides).
-fn post_done(ui: &Weak<MainWindow>, generation: u64, data: Data, summary: Summary) {
+/// `returned` is when `scan::scan` returned; it starts the post-scan time of `--timing`.
+fn post_done(ui: &Weak<MainWindow>, generation: u64, data: Data, summary: Summary, returned: Instant) {
     let ui = ui.clone();
     let _ = slint::invoke_from_event_loop(move || {
         let Some(ui) = ui.upgrade() else { return };
+        let scan = summary.elapsed;
         if let Some(data) = SESSION.with_borrow_mut(|s| s.scan.finish(generation, summary, data)) {
+            SESSION.with_borrow_mut(|s| {
+                if let Some(run) = s.run.as_mut() {
+                    (run.scan_returned, run.scan) = (Some(returned), scan);
+                }
+            });
             install(&ui, Arc::new(data));
             show_state(&ui);
         }
@@ -311,7 +363,10 @@ fn start_scan(ui: &MainWindow, path: &str) {
     let Some((generation, cancel)) = SESSION.with_borrow_mut(|s| s.scan.start()) else {
         return;
     };
-    SESSION.with_borrow_mut(|s| s.scan_root = PathBuf::from(path));
+    SESSION.with_borrow_mut(|s| {
+        s.scan_root = PathBuf::from(path);
+        s.run = s.timing.then(|| TimingRun { clicked: Instant::now(), scan_returned: None, scan: Duration::ZERO, line: None });
+    });
     show_state(ui);
     clear(ui);
     ui.set_elevate_note(SharedString::new());
@@ -337,10 +392,11 @@ fn start_scan(ui: &MainWindow, path: &str) {
 
     std::thread::spawn(move || match scan::scan(&root, tx, &cancel) {
         Ok((tree, stats)) => {
+            let returned = Instant::now();
             let summary = Summary::new(&stats, tree.node(tree.root()).size);
             // Counted here, not on the UI thread: it visits every node.
             let counts = tree_view::file_counts(&tree);
-            post_done(&weak, generation, Data { tree, counts }, summary);
+            post_done(&weak, generation, Data { tree, counts }, summary, returned);
         }
         Err(ScanError::Cancelled) => post(&weak, generation, Event::Cancelled),
         Err(e) => post(&weak, generation, Event::Failed(error_message(&e))),
@@ -546,7 +602,7 @@ fn wire_tree_and_treemap(ui: &MainWindow) {
         let weak = ui.as_weak();
         move || {
             let Some(ui) = weak.upgrade() else { return };
-            match elevate::restart_as_admin(ui.get_path().trim()) {
+            match elevate::restart_as_admin(ui.get_path().trim(), SESSION.with_borrow(|s| s.timing)) {
                 Ok(()) => {
                     let _ = slint::quit_event_loop();
                 }
@@ -561,7 +617,44 @@ fn wire_tree_and_treemap(ui: &MainWindow) {
     });
 }
 
+/// Opens the folder dialog without blocking the UI thread. The dialog belongs to the window.
+/// A press while a dialog is open does nothing.
+fn start_browse(ui: &MainWindow) {
+    if !SESSION.with_borrow_mut(|s| s.browse.try_open()) {
+        return;
+    }
+    sync_browsing(ui);
+    let dialog = rfd::AsyncFileDialog::new().set_parent(&ui.window().window_handle()).pick_folder();
+    let weak = ui.as_weak();
+    let task = slint::spawn_local(async move {
+        let picked = dialog.await.map(|f| f.path().to_path_buf());
+        if let Some(ui) = weak.upgrade() {
+            finish_browse(&ui, picked);
+        }
+    });
+    if let Err(e) = task {
+        eprintln!("Could not open the folder dialog: {e}");
+        finish_browse(ui, None);
+    }
+}
+
+/// The dialog closed. A chosen folder goes into the path box; a cancelled dialog changes nothing.
+fn finish_browse(ui: &MainWindow, picked: Option<PathBuf>) {
+    if let Some(dir) = SESSION.with_borrow_mut(|s| s.browse.finish(picked)) {
+        ui.set_path(dir.to_string_lossy().as_ref().into());
+        ui.invoke_reset_drive();
+    }
+    sync_browsing(ui);
+}
+
+/// Disables the Browse button while a dialog is open.
+fn sync_browsing(ui: &MainWindow) {
+    ui.set_browsing(SESSION.with_borrow(|s| s.browse.is_open()));
+}
+
 fn main() {
+    let args = cli::parse_args(std::env::args().skip(1));
+    SESSION.with_borrow_mut(|s| s.timing = args.timing);
     let ui = MainWindow::new().expect("create window");
     ui.set_drives(ModelRc::new(VecModel::from(drive_roots())));
     ui.set_banner(banner_text(&ScanState::Idle, false).into());
@@ -584,10 +677,8 @@ fn main() {
     ui.on_browse({
         let weak = ui.as_weak();
         move || {
-            let Some(ui) = weak.upgrade() else { return };
-            if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-                ui.set_path(dir.to_string_lossy().as_ref().into());
-                ui.invoke_reset_drive();
+            if let Some(ui) = weak.upgrade() {
+                start_browse(&ui);
             }
         }
     });
@@ -605,7 +696,7 @@ fn main() {
     })
     .expect("queue Mica setup");
     // Started by "Restart as administrator": scan the folder that was open.
-    if let Some(path) = std::env::args().nth(1) {
+    if let Some(path) = args.path {
         ui.set_path(path.as_str().into());
         start_scan(&ui, &path);
     }

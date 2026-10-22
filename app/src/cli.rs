@@ -12,8 +12,19 @@ pub struct Args {
 /// Parses the arguments after the program name. `--timing` is the only flag. `--` ends the
 /// flags: what follows is a folder, even if it starts with `--`. Another `--word` is ignored.
 pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Args {
-    let _ = args;
-    todo!("parse_args")
+    let mut out = Args::default();
+    let mut flags_ended = false;
+    for arg in args {
+        match arg.as_str() {
+            "--" if !flags_ended => flags_ended = true,
+            "--timing" if !flags_ended => out.timing = true,
+            _ if !flags_ended && arg.starts_with("--") => {}
+            _ => {
+                out.path.get_or_insert(arg);
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]

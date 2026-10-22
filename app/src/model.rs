@@ -187,14 +187,16 @@ pub fn format_elapsed(d: Duration) -> String {
 /// "Timing: scan 5.3 s, after scan 0.2 s, total 5.5 s." `scan` is the scan itself, `after` the
 /// work from the end of the scan until the treemap is shown, `total` the time from the Scan click.
 pub fn format_timing(scan: Duration, after: Duration, total: Duration) -> String {
-    let _ = (scan, after, total);
-    todo!("format_timing")
+    let (scan, after, total) = (format_elapsed(scan), format_elapsed(after), format_elapsed(total));
+    format!("Timing: scan {scan}, after scan {after}, total {total}.")
 }
 
 /// The banner with the timing line after it. Without a line the banner is unchanged.
 pub fn append_timing(banner: String, timing: Option<&str>) -> String {
-    let _ = timing;
-    todo!("append_timing {banner}")
+    match timing {
+        Some(line) => format!("{banner} {line}"),
+        None => banner,
+    }
 }
 
 /// Short, plain message for a failed scan. Never empty.

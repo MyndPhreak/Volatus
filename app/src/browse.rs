@@ -13,18 +13,18 @@ pub struct BrowseState {
 impl BrowseState {
     /// True while a dialog is open. The Browse button is disabled then.
     pub fn is_open(&self) -> bool {
-        todo!("is_open")
+        self.open
     }
 
     /// A press of Browse. True if the caller must open a dialog; false if one is already open.
     pub fn try_open(&mut self) -> bool {
-        todo!("try_open")
+        !std::mem::replace(&mut self.open, true)
     }
 
     /// The dialog closed with `picked` (`None` if cancelled). Returns the path to apply, if any.
     /// A result with no open dialog is dropped.
     pub fn finish(&mut self, picked: Option<PathBuf>) -> Option<PathBuf> {
-        todo!("finish")
+        std::mem::replace(&mut self.open, false).then_some(picked).flatten()
     }
 }
 
