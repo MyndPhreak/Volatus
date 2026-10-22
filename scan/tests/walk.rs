@@ -1,0 +1,115 @@
+mod common;
+
+use common::TempDir;
+use scan::{Method, ScanError, scan};
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::channel;
+
+fn run(dir: &Path, cancel: &AtomicBool) -> Result<(scan::Tree, scan::ScanStats), ScanError> {
+    let (tx, _rx) = channel();
+    scan(dir, tx, cancel)
+}
+
+#[test]
+fn scan_known_tree_totals_match() {
+    let t = TempDir::new();
+    t.file("a.bin", 100);
+    t.file("sub/b.bin", 2000);
+    t.file("sub/deep/c.bin", 30);
+
+    let (tree, stats) = run(t.path(), &AtomicBool::new(false)).unwrap();
+
+    assert_eq!(tree.node(tree.root()).size, 2130);
+    assert_eq!((stats.files, stats.dirs, stats.skipped), (3, 3, 0));
+    assert_eq!(stats.method, Method::Walk);
+}
+
+#[test]
+fn scan_reports_progress() {
+    let t = TempDir::new();
+    t.file("a.bin", 1);
+    t.file("sub/b.bin", 1);
+    let (tx, rx) = channel();
+
+    scan(t.path(), tx, &AtomicBool::new(false)).unwrap();
+
+    let last = rx.try_iter().last().expect("at least one progress message");
+    assert_eq!((last.files, last.dirs), (2, 2));
+}
+
+#[test]
+fn scan_cancel_flag_set_returns_cancelled() {
+    let t = TempDir::new();
+    t.file("a.bin", 1);
+    t.file("sub/b.bin", 1);
+    let cancel = AtomicBool::new(false);
+    cancel.store(true, Ordering::Relaxed);
+
+    let result = run(t.path(), &cancel);
+
+    assert!(matches!(result, Err(ScanError::Cancelled)));
+}
+
+#[test]
+fn scan_root_missing_returns_io_error() {
+    let t = TempDir::new();
+
+    let result = run(&t.path().join("nope"), &AtomicBool::new(false));
+
+    assert!(matches!(result, Err(ScanError::Io(_))));
+}
+
+#[test]
+fn scan_junction_is_not_followed() {
+    let t = TempDir::new();
+    t.file("real/big.bin", 5000);
+    let out = Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(t.path().join("link"))
+        .arg(t.path().join("real"))
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "mklink failed: {out:?}");
+
+    let (tree, stats) = run(t.path(), &AtomicBool::new(false)).unwrap();
+
+    assert_eq!(tree.node(tree.root()).size, 5000);
+    assert_eq!(stats.files, 2, "big.bin plus the junction entry itself");
+}
+
+/// Denies list-directory to the current user; restores on drop so cleanup works.
+struct Denied(PathBuf, String);
+
+impl Denied {
+    fn new(path: PathBuf) -> Self {
+        let user = std::env::var("USERNAME").unwrap();
+        let out = Command::new("icacls")
+            .arg(&path)
+            .args(["/deny", &format!("{user}:(RD)")])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "icacls deny failed: {out:?}");
+        Denied(path, user)
+    }
+}
+
+impl Drop for Denied {
+    fn drop(&mut self) {
+        let _ = Command::new("icacls").arg(&self.0).args(["/remove:d", &self.1]).output();
+    }
+}
+
+#[test]
+fn scan_unreadable_dir_counts_skipped_and_continues() {
+    let t = TempDir::new();
+    t.file("ok/a.bin", 40);
+    t.file("locked/secret.bin", 999);
+    let _guard = Denied::new(t.path().join("locked"));
+
+    let (tree, stats) = run(t.path(), &AtomicBool::new(false)).unwrap();
+
+    assert_eq!(stats.skipped, 1);
+    assert_eq!(tree.node(tree.root()).size, 40);
+}
