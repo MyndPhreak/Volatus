@@ -160,16 +160,24 @@ pub struct Route {
 
 /// True when `path` (already canonical) is the root of a local drive: `C:\` or `\\?\C:\`.
 pub fn is_volume_root(path: &Path) -> bool {
-    let _ = path;
-    unimplemented!("is_volume_root")
+    use std::path::{Component, Prefix};
+    let mut parts = path.components();
+    matches!(
+        parts.next(),
+        Some(Component::Prefix(p)) if matches!(p.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_))
+    ) && parts.next() == Some(Component::RootDir)
+        && parts.next().is_none()
 }
 
 /// Picks the scanner. A set `method` is obeyed, with no fallback. Otherwise only a whole-volume
 /// root tries the MFT (and falls back to the walker on failure); any other root is walked,
 /// because the MFT path counts a hard-linked file only under its first name.
 pub fn route(whole_volume: bool, method: Option<Method>) -> Route {
-    let _ = (whole_volume, method);
-    unimplemented!("route")
+    match method {
+        Some(method) => Route { method, fallback_to_walk: false },
+        None if whole_volume => Route { method: Method::Mft, fallback_to_walk: true },
+        None => Route { method: Method::Walk, fallback_to_walk: false },
+    }
 }
 
 /// Scans `root`: reads the NTFS `$MFT` when elevated and `root` is a whole drive, else walks
@@ -191,12 +199,14 @@ pub fn scan_with(
     cancel: &AtomicBool,
     opts: &ScanOptions,
 ) -> Result<(Tree, ScanStats), ScanError> {
-    let run = || match opts.method {
-        Some(Method::Mft) => mft::scan(root, &progress, cancel, opts.chunk),
-        Some(Method::Walk) => walk::walk(root, &progress, cancel),
-        None => match mft::scan(root, &progress, cancel, opts.chunk) {
+    // A root that cannot be resolved is not a drive root: the walker reports the error.
+    let whole_volume = std::fs::canonicalize(root).is_ok_and(|p| is_volume_root(&p));
+    let Route { method, fallback_to_walk } = route(whole_volume, opts.method);
+    let run = || match method {
+        Method::Walk => walk::walk(root, &progress, cancel),
+        Method::Mft => match mft::scan(root, &progress, cancel, opts.chunk) {
             Err(ScanError::Cancelled) => Err(ScanError::Cancelled),
-            Err(_) => walk::walk(root, &progress, cancel),
+            Err(_) if fallback_to_walk => walk::walk(root, &progress, cancel),
             done => done,
         },
     };

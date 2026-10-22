@@ -65,7 +65,7 @@ fn scan_device_with_every_read_is_sector_aligned_and_mft_reads_are_cluster_align
                 assert!(at % 512 == 0 && len % 512 == 0, "{name} chunk {chunk} read {i}: ({at},{len})");
                 if i >= SETUP_READS {
                     assert!(
-                        at % cluster == 0 && len as u64 % cluster == 0,
+                        at % cluster == 0 && (len as u64).is_multiple_of(cluster),
                         "{name} chunk {chunk} $MFT read {i}: ({at},{len})"
                     );
                 }

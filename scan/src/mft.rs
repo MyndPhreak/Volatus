@@ -505,13 +505,14 @@ fn read_mft<R: Read + Seek + Send>(
         let _ = empty_tx.send(vec![0u8; size]);
     }
     let record = g.record;
-    let (read, parsed) = std::thread::scope(|s| {
-        let reader =
-            s.spawn(move || read_batches(dev, &extents, (data_size, record), full_tx, empty_rx, cancel));
+    let (read, parsed) = std::thread::scope(|s| -> Result<_, ScanError> {
+        let reader = std::thread::Builder::new()
+            .spawn_scoped(s, move || read_batches(dev, &extents, (data_size, record), full_tx, empty_rx, cancel))
+            .map_err(ScanError::Io)?;
         // Returning drops this side of both channels, so a waiting reader wakes and stops.
         let parsed = parse_batches(full_rx, empty_tx, record, progress, cancel);
-        (reader.join().unwrap_or_else(|p| std::panic::resume_unwind(p)), parsed)
-    });
+        Ok((reader.join().unwrap_or_else(|p| std::panic::resume_unwind(p)), parsed))
+    })?;
     // A reader error means records are missing: fail, never a partial tree.
     let read = read?;
     let (records, skipped, parse) = parsed?;

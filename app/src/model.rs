@@ -206,7 +206,7 @@ pub fn banner_text(state: &ScanState) -> String {
         ScanState::Done(s) => {
             let (name, hint) = match s.method {
                 Method::Mft => ("Fast scan (MFT)", ""),
-                Method::Walk => ("Standard scan", " Restart as administrator for a faster scan."),
+                Method::Walk => ("Standard scan", " Restart as administrator to scan a whole drive faster."),
             };
             format!(
                 "{name}. {} in {} files and {} folders. {} skipped. {}.{hint}",

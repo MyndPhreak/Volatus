@@ -140,3 +140,11 @@ Not M3 evidence (no MFT path), but the same tools on the same machine: Ryzen 9 7
 The two tools do not count the same items on `C:\` without elevation (5.0M against 7.2M files).
 That gap is open (see the P4 report, FOLLOW-UPS); compare the MFT runs: there both tools read the whole
 `$MFT`.
+
+## Deviations
+
+- The overlapped `$MFT` read replaced the old read loop with no feature flag (user approved).
+  The unchanged P2 record and parity suites run through the new path.
+- Only a whole-drive root (for example `C:\`) uses the MFT. A sub-folder is always walked,
+  because the MFT path counts a hard-linked file only under its first name. `--method mft`
+  still forces the MFT for any root, with no fallback.

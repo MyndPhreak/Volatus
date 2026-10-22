@@ -5,14 +5,14 @@ use std::path::Path;
 
 #[test]
 fn is_volume_root_accepts_drive_roots() {
-    for p in [r"C:\", r"c:\", r"\?\C:\", r"D:\"] {
+    for p in [r"C:\", r"c:\", "\\\\?\\C:\\", r"D:\"] {
         assert!(is_volume_root(Path::new(p)), "{p}");
     }
 }
 
 #[test]
 fn is_volume_root_rejects_folders_and_other_paths() {
-    for p in [r"C:\Users", r"C:\Users\", r"\?\C:\Users", r"C:\a\b", r"C:", r"\server\share\", r"\?\UNC\server\share\", r"Users", ""] {
+    for p in [r"C:\Users", r"C:\Users\", "\\\\?\\C:\\Users", r"C:\a\b", r"C:", "\\\\server\\share\\", "\\\\?\\UNC\\server\\share\\", r"Users", ""] {
         assert!(!is_volume_root(Path::new(p)), "{p}");
     }
 }

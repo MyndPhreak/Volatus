@@ -189,7 +189,8 @@ pub fn rollup(root: u64, entries: Vec<RawEntry>) -> Result<Rolled, ScanError> {
     }
 
     // Freeing millions of names takes about 0.5 s: done off the caller's thread.
-    std::thread::spawn(move || drop(entries));
+    // If the thread cannot start, the closure is dropped and `entries` is freed here.
+    let _ = std::thread::Builder::new().spawn(move || drop(entries));
     let tree = Tree { nodes, names, root: NodeId(root_node) };
     Ok(Rolled { tree, files, dirs, orphans, skipped })
 }
