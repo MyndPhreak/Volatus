@@ -113,3 +113,14 @@ fn scan_unreadable_dir_counts_skipped_and_continues() {
     assert_eq!(stats.skipped, 1);
     assert_eq!(tree.node(tree.root()).size, 40);
 }
+
+#[test]
+fn scan_unreadable_root_returns_io_error() {
+    let t = TempDir::new();
+    t.file("secret.bin", 999);
+    let _guard = Denied::new(t.path().to_path_buf());
+
+    let result = run(t.path(), &AtomicBool::new(false));
+
+    assert!(matches!(result, Err(ScanError::Io(_))), "got {:?}", result.map(|(_, s)| s.skipped));
+}
