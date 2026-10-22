@@ -467,6 +467,12 @@ fn parse_batches(
     Ok((records, skipped, busy))
 }
 
+/// Bytes per read buffer: `chunk` rounded down to whole `unit`s (at least one), never more than
+/// `total` bytes of `$MFT` rounded up to whole units, so a tiny `$MFT` allocates little.
+pub fn buffer_size(chunk: usize, unit: u64, total: u64) -> usize {
+    ((chunk as u64 / unit).max(1) * unit).min(total.div_ceil(unit).saturating_mul(unit)) as usize
+}
+
 /// Reads every `$MFT` record along the run list, `chunk` bytes per read. A reader thread fills
 /// the buffers while this thread parses the previous ones (in parallel, on the current rayon
 /// pool), so the disk and the CPUs work at the same time.
@@ -497,8 +503,7 @@ fn read_mft<R: Read + Seek + Send>(
     // Buffers of whole units: no record is cut at a buffer edge, and every read starts and
     // ends on a cluster (so a sector) boundary. The unit is a multiple of both sizes: the
     // record size is a power of two or a whole number of clusters (`parse_boot`).
-    let unit = g.cluster.max(g.record as u64);
-    let size = ((chunk as u64 / unit).max(1) * unit).min(total.div_ceil(unit).saturating_mul(unit)) as usize;
+    let size = buffer_size(chunk, g.cluster.max(g.record as u64), total);
     let (full_tx, full_rx) = sync_channel(BUFFERS);
     let (empty_tx, empty_rx) = channel();
     for _ in 0..BUFFERS {
