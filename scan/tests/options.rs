@@ -33,11 +33,11 @@ fn walk_with(t: &TempDir, threads: Option<usize>) -> (Tree, ScanStats) {
 }
 
 #[test]
-fn scan_options_default_keeps_the_current_values() {
+fn scan_options_default_uses_a_32_mib_chunk() {
     let o = ScanOptions::default();
 
-    assert_eq!((o.chunk, o.threads, o.method), (4 << 20, None, None));
-    assert_eq!(DEFAULT_CHUNK, 4 << 20);
+    assert_eq!((o.chunk, o.threads, o.method), (32 << 20, None, None));
+    assert_eq!(DEFAULT_CHUNK, 32 << 20);
 }
 
 #[test]
