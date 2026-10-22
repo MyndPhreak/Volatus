@@ -148,7 +148,7 @@ fn sync_rows(ui: &MainWindow) {
 fn sync_selection(ui: &MainWindow) {
     let scale = ui.window().scale_factor() as f64;
     let bounds =
-        with_loaded(|l| l.selected.and_then(|n| tree_view::selection_bounds(&l.data.tree, &l.rects, n))).flatten();
+        with_loaded(|l| l.selected.and_then(|n| tree_view::selection_bounds(&l.rects, n))).flatten();
     ui.set_has_selection(bounds.is_some());
     if let Some((x, y, w, h)) = bounds {
         ui.set_selection_x((x / scale) as f32);

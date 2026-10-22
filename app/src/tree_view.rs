@@ -132,27 +132,10 @@ pub fn hit_test(rects: &[Rect], x: f64, y: f64) -> Option<NodeId> {
 rects.iter().find(|r| x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h).map(|r| r.node)
 }
 
-/// Bounding box `(x, y, w, h)` of every rect at or under `selected`. `None` if none is drawn.
-pub fn selection_bounds(tree: &Tree, rects: &[Rect], selected: NodeId) -> Option<(f64, f64, f64, f64)> {
-let under = |mut n: NodeId| loop {
-    if n == selected {
-        return true;
-    }
-    match tree.node(n).parent {
-        Some(p) => n = p,
-        None => return false,
-    }
-};
-let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
-let mut any = false;
-for r in rects.iter().filter(|r| under(r.node)) {
-    any = true;
-    x0 = x0.min(r.x);
-    y0 = y0.min(r.y);
-    x1 = x1.max(r.x + r.w);
-    y1 = y1.max(r.y + r.h);
-}
-any.then_some((x0, y0, x1 - x0, y1 - y0))
+/// The selected node's own rect `(x, y, w, h)` in the nested layout. `None` if it is not drawn.
+pub fn selection_bounds(rects: &[Rect], selected: NodeId) -> Option<(f64, f64, f64, f64)> {
+    let _ = (rects, selected);
+    unimplemented!("selection_bounds for the nested layout")
 }
 
 /// The folder to zoom into when `leaf` is picked: the child of `view_root` on the path to
@@ -452,27 +435,33 @@ mod tests {
         assert_eq!(hit_test(&[], 1.0, 1.0), None);
     }
 
+    #[test]
+    fn hit_test_nested_rects_returns_the_deepest_rect() {
+        // Layout order: a folder before its descendants.
+        let rects = [rect(1, 0.0, 0.0, 100.0, 100.0), rect(4, 0.0, 0.0, 50.0, 100.0), rect(6, 50.0, 0.0, 50.0, 50.0)];
+        assert_eq!(hit_test(&rects, 10.0, 10.0), Some(NodeId(4)));
+        assert_eq!(hit_test(&rects, 60.0, 10.0), Some(NodeId(6)));
+        assert_eq!(hit_test(&rects, 60.0, 60.0), Some(NodeId(1)));
+    }
+
     // ---- selection_bounds ----
     #[test]
     fn selection_bounds_file_is_its_own_rect() {
         let t = sample();
         let c = find(&t, t.root(), "c");
         let rects = [rect(c.0, 5.0, 6.0, 7.0, 8.0)];
-        assert_eq!(selection_bounds(&t, &rects, c), Some((5.0, 6.0, 7.0, 8.0)));
+        assert_eq!(selection_bounds(&rects, c), Some((5.0, 6.0, 7.0, 8.0)));
     }
 
     #[test]
-    fn selection_bounds_folder_is_union_of_descendant_rects() {
+    fn selection_bounds_folder_is_its_own_rect() {
         let t = sample();
         let a = find(&t, t.root(), "a");
         let a1 = find(&t, a, "a1");
-        let sub = find(&t, a, "sub");
-        let s1 = find(&t, sub, "s1");
         let c = find(&t, t.root(), "c");
         let rects =
-            [rect(a1.0, 0.0, 0.0, 10.0, 10.0), rect(s1.0, 10.0, 0.0, 10.0, 30.0), rect(c.0, 100.0, 100.0, 5.0, 5.0)];
-        assert_eq!(selection_bounds(&t, &rects, a), Some((0.0, 0.0, 20.0, 30.0)));
-        assert_eq!(selection_bounds(&t, &rects, sub), Some((10.0, 0.0, 10.0, 30.0)));
+            [rect(a.0, 0.0, 0.0, 20.0, 30.0), rect(a1.0, 0.0, 0.0, 10.0, 10.0), rect(c.0, 100.0, 100.0, 5.0, 5.0)];
+        assert_eq!(selection_bounds(&rects, a), Some((0.0, 0.0, 20.0, 30.0)));
     }
 
     #[test]
@@ -480,7 +469,38 @@ mod tests {
         let t = sample();
         let b = find(&t, t.root(), "b");
         let c = find(&t, t.root(), "c");
-        assert_eq!(selection_bounds(&t, &[rect(c.0, 0.0, 0.0, 1.0, 1.0)], b), None);
+        assert_eq!(selection_bounds(&[rect(c.0, 0.0, 0.0, 1.0, 1.0)], b), None);
+    }
+
+    fn is_under(tree: &Tree, mut n: NodeId, anc: NodeId) -> bool {
+        loop {
+            if n == anc {
+                return true;
+            }
+            match tree.node(n).parent {
+                Some(p) => n = p,
+                None => return false,
+            }
+        }
+    }
+
+    /// From the P3 verifier probe (F2): the outline of a selected folder, over the real layout,
+    /// must not cover a rect of another folder.
+    #[test]
+    fn selection_bounds_folder_outline_covers_only_its_own_rects() {
+        let t = sample();
+        let a = find(&t, t.root(), "a");
+        let rects = treemap::layout(&t, t.root(), 400, 300);
+
+        let (x, y, w, h) = selection_bounds(&rects, a).expect("folder a is drawn");
+
+        let foreign: Vec<String> = rects
+            .iter()
+            .filter(|r| !is_under(&t, r.node, a) && !is_under(&t, a, r.node))
+            .filter(|r| r.x < x + w - 0.5 && r.x + r.w > x + 0.5 && r.y < y + h - 0.5 && r.y + r.h > y + 0.5)
+            .map(|r| format!("{} ({:.0}x{:.0} at {:.0},{:.0})", t.name(r.node), r.w, r.h, r.x, r.y))
+            .collect();
+        assert!(foreign.is_empty(), "outline of folder 'a' ({x:.0},{y:.0} {w:.0}x{h:.0}) covers {foreign:?}");
     }
 
     // ---- drill_target ----

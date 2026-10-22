@@ -75,8 +75,14 @@ fn parse_listing(b: &[u8], items: &mut Vec<Item>) -> Option<()> {
     }
 }
 
-/// Lists one directory (without `.` and `..`). An error means the listing is incomplete.
-fn list_dir(dir: &Path) -> io::Result<Vec<Item>> {
+/// Lists one directory (without `.` and `..`). An error means the listing is incomplete:
+/// `Cancelled` when `cancel` is set, `Io` when the directory cannot be read.
+fn list_dir(dir: &Path, cancel: &AtomicBool) -> Result<Vec<Item>, ScanError> {
+    let _ = cancel;
+    list_dir_io(dir).map_err(ScanError::Io)
+}
+
+fn list_dir_io(dir: &Path) -> io::Result<Vec<Item>> {
     let handle = std::fs::OpenOptions::new()
         .access_mode(FILE_LIST_DIRECTORY)
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
@@ -140,10 +146,11 @@ fn walk_dir(ctx: &Ctx, dir: &Path, dir_id: u64) -> Result<Out, ScanError> {
     if ctx.cancel.load(Ordering::Relaxed) {
         return Err(ScanError::Cancelled);
     }
-    let items = match list_dir(dir) {
+    let items = match list_dir(dir, ctx.cancel) {
         Ok(items) => items,
+        Err(ScanError::Cancelled) => return Err(ScanError::Cancelled),
         // An unreadable root is a scan failure, never an empty result.
-        Err(e) if dir_id == ROOT_ID => return Err(ScanError::Io(e)),
+        Err(e) if dir_id == ROOT_ID => return Err(e),
         // Unreadable directory: keep the node, count it, carry on.
         Err(_) => return Ok(Out { entries: Vec::new(), skipped: 1 }),
     };
@@ -239,5 +246,16 @@ mod tests {
         let kept: Vec<u64> = drop_extra_links(entries).iter().map(|e| e.id).collect();
 
         assert_eq!(kept, vec![1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn list_dir_cancel_set_returns_cancelled() {
+        // One huge directory (C:\Windows\servicing\Packages, 10k entries) takes 1-2 s to list;
+        // the listing loop must stop on cancel, not only the walk between directories.
+        let cancel = AtomicBool::new(true);
+
+        let got = list_dir(Path::new(env!("CARGO_MANIFEST_DIR")), &cancel);
+
+        assert!(matches!(got, Err(ScanError::Cancelled)), "{:?}", got.map(|v| v.len()));
     }
 }
