@@ -317,7 +317,7 @@ mod tests {
         let t = banner_text(&ScanState::Done(summary(Method::Walk, 0)));
         assert_eq!(
             t,
-            "Standard scan. 3.0 MB in 1,234 files and 56 folders. 0 skipped. 2.5 s. Restart as administrator for a faster scan."
+            "Standard scan. 3.0 MB in 1,234 files and 56 folders. 0 skipped. 2.5 s. Restart as administrator to scan a whole drive faster."
         );
     }
 

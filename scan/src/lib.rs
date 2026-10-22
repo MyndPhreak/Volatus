@@ -151,9 +151,30 @@ impl std::fmt::Display for ScanError {
 
 impl std::error::Error for ScanError {}
 
-/// Scans `root`: reads the NTFS `$MFT` when elevated, else walks directories.
-/// Any MFT failure other than cancel (no admin, not NTFS, bad volume header or `$MFT` run
-/// list) falls back to the walker; `ScanStats::method` says which one ran.
+/// Which scanner `scan_with` runs, and whether a failure of it falls back to the walker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Route {
+    pub method: Method,
+    pub fallback_to_walk: bool,
+}
+
+/// True when `path` (already canonical) is the root of a local drive: `C:\` or `\\?\C:\`.
+pub fn is_volume_root(path: &Path) -> bool {
+    let _ = path;
+    unimplemented!("is_volume_root")
+}
+
+/// Picks the scanner. A set `method` is obeyed, with no fallback. Otherwise only a whole-volume
+/// root tries the MFT (and falls back to the walker on failure); any other root is walked,
+/// because the MFT path counts a hard-linked file only under its first name.
+pub fn route(whole_volume: bool, method: Option<Method>) -> Route {
+    let _ = (whole_volume, method);
+    unimplemented!("route")
+}
+
+/// Scans `root`: reads the NTFS `$MFT` when elevated and `root` is a whole drive, else walks
+/// directories. Any MFT failure other than cancel (no admin, not NTFS, bad volume header or
+/// `$MFT` run list) falls back to the walker; `ScanStats::method` says which one ran.
 pub fn scan(
     root: &Path,
     progress: Sender<Progress>,
