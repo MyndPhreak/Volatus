@@ -2,6 +2,7 @@
 //! Plain functions, no Slint types, so it is unit tested.
 
 use scan::{Method, ScanError, ScanStats};
+use std::io::ErrorKind;
 use std::time::Duration;
 
 /// What the banner needs from a finished scan.
@@ -18,8 +19,14 @@ pub struct Summary {
 
 impl Summary {
     pub fn new(stats: &ScanStats, total: u64) -> Self {
-        let _ = (stats, total);
-        unimplemented!("Not implemented")
+        Self {
+            method: stats.method,
+            files: stats.files,
+            dirs: stats.dirs,
+            skipped: stats.skipped,
+            elapsed: stats.elapsed,
+            total,
+        }
     }
 }
 
@@ -43,37 +50,94 @@ pub enum Event {
 
 /// Next state. An event that is not valid in the current state is ignored.
 pub fn next(state: ScanState, event: Event) -> ScanState {
-    let _ = (state, event);
-    unimplemented!("Not implemented")
+    match (state, event) {
+        (ScanState::Scanning { .. }, Event::Progress { files, dirs }) => ScanState::Scanning { files, dirs },
+        (ScanState::Scanning { .. }, Event::Finished(s)) => ScanState::Done(s),
+        (ScanState::Scanning { .. }, Event::Failed(m)) => ScanState::Error(m),
+        (ScanState::Scanning { .. }, Event::Cancelled) => ScanState::Cancelled,
+        (s @ ScanState::Scanning { .. }, _) => s,
+        (_, Event::Start) => ScanState::Scanning { files: 0, dirs: 0 },
+        (s, _) => s,
+    }
 }
 
 /// Binary units, one decimal above 1 KB: `1.5 MB`.
 pub fn format_size(bytes: u64) -> String {
-    let _ = bytes;
-    unimplemented!("Not implemented")
+    const UNITS: [&str; 7] = ["B", "KB", "MB", "GB", "TB", "PB", "EB"];
+    if bytes < 1024 {
+        return format!("{bytes} B");
+    }
+    let mut v = bytes as f64;
+    let mut i = 0;
+    while v >= 1024.0 && i < UNITS.len() - 1 {
+        v /= 1024.0;
+        i += 1;
+    }
+    format!("{v:.1} {}", UNITS[i])
 }
 
 /// `1234567` -> `1,234,567`.
 pub fn group_digits(n: u64) -> String {
-    let _ = n;
-    unimplemented!("Not implemented")
+    let s = n.to_string();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
 }
 
 pub fn format_elapsed(d: Duration) -> String {
-    let _ = d;
-    unimplemented!("Not implemented")
+    let ms = d.as_millis();
+    if ms < 59_950 {
+        // Integer rounding: f64 formatting rounds ties to even (0.25 -> 0.2).
+        let tenths = (ms + 50) / 100;
+        format!("{}.{} s", tenths / 10, tenths % 10)
+    } else {
+        let secs = (ms + 500) / 1000;
+        format!("{} min {} s", secs / 60, secs % 60)
+    }
 }
 
 /// Short, plain message for a failed scan. Never empty.
 pub fn error_message(e: &ScanError) -> String {
-    let _ = e;
-    unimplemented!("Not implemented")
+    match e {
+        ScanError::Io(io) if io.kind() == ErrorKind::PermissionDenied => {
+            "Access denied. Choose a different folder.".into()
+        }
+        ScanError::Io(io) if io.kind() == ErrorKind::NotFound => "Folder not found.".into(),
+        ScanError::Io(io) => format!("Could not read the folder. {io}"),
+        ScanError::NoRoot => "The folder has no root entry.".into(),
+        ScanError::Cancelled => "The scan was stopped.".into(),
+    }
 }
 
 /// Text for the status banner in each state. Never empty.
 pub fn banner_text(state: &ScanState) -> String {
-    let _ = state;
-    unimplemented!("Not implemented")
+    match state {
+        ScanState::Idle => "Choose a folder or drive. Then select Scan.".into(),
+        ScanState::Scanning { files, dirs } => {
+            format!("Scanning. {} files, {} folders so far.", group_digits(*files), group_digits(*dirs))
+        }
+        ScanState::Done(s) => {
+            let (name, hint) = match s.method {
+                Method::Mft => ("Fast scan (MFT)", ""),
+                Method::Walk => ("Standard scan", " Restart as administrator for a faster scan."),
+            };
+            format!(
+                "{name}. {} in {} files and {} folders. {} skipped. {}.{hint}",
+                format_size(s.total),
+                group_digits(s.files),
+                group_digits(s.dirs),
+                group_digits(s.skipped),
+                format_elapsed(s.elapsed),
+            )
+        }
+        ScanState::Error(m) => format!("Scan failed. {m}").trim_end().to_string(),
+        ScanState::Cancelled => "Scan stopped. There is no result.".into(),
+    }
 }
 
 #[cfg(test)]
