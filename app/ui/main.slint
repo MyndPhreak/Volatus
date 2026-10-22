@@ -1,11 +1,71 @@
-import { Button, VerticalBox } from "std-widgets.slint";
+import { Button, ComboBox, LineEdit, VerticalBox, HorizontalBox, ProgressIndicator, Palette } from "std-widgets.slint";
+
 export component MainWindow inherits Window {
     title: "Storage tool";
-    background: transparent;
-    preferred-width: 600px;
-    preferred-height: 400px;
+    // The window must start transparent so the Mica backdrop shows through (set at window creation).
+    // If Mica is not available, the host sets `mica` to false and the Fluent palette fills the window.
+    in property <bool> mica: true;
+    background: root.mica ? transparent : Palette.background;
+    preferred-width: 800px;
+    preferred-height: 300px;
+    min-width: 520px;
+
+    in property <[string]> drives;
+    in property <bool> scanning;
+    in property <string> banner;
+    in property <bool> banner-is-error;
+    in-out property <string> path;
+
+    callback scan(string);
+    callback cancel();
+    callback browse();
+
     VerticalBox {
-        Text { text: "Mica spike"; }
-        Button { text: "Button"; }
+        spacing: 12px;
+        alignment: start;
+        HorizontalBox {
+            padding: 0;
+            ComboBox {
+                model: root.drives;
+                current-value: "Drive";
+                enabled: !root.scanning;
+                selected(drive) => { root.path = drive; }
+            }
+            LineEdit {
+                placeholder-text: "Folder or drive";
+                text <=> root.path;
+                enabled: !root.scanning;
+                accepted => { if (!root.scanning) { root.scan(root.path); } }
+            }
+            Button {
+                text: "Browse";
+                enabled: !root.scanning;
+                clicked => { root.browse(); }
+            }
+        }
+        HorizontalBox {
+            padding: 0;
+            alignment: start;
+            Button {
+                text: "Scan";
+                primary: true;
+                enabled: !root.scanning;
+                clicked => { root.scan(root.path); }
+            }
+            Button {
+                text: "Cancel";
+                enabled: root.scanning;
+                clicked => { root.cancel(); }
+            }
+        }
+        if root.scanning : ProgressIndicator {
+            indeterminate: true;
+        }
+        Text {
+            text: root.banner;
+            wrap: word-wrap;
+            color: root.banner-is-error ? #d13438 : Palette.foreground;
+            accessible-role: text;
+        }
     }
 }
