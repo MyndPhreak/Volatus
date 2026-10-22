@@ -3,6 +3,8 @@
 
 use scan::{Method, ScanError, ScanStats};
 use std::io::ErrorKind;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 /// What the banner needs from a finished scan.
@@ -58,6 +60,57 @@ pub fn next(state: ScanState, event: Event) -> ScanState {
         (s @ ScanState::Scanning { .. }, _) => s,
         (_, Event::Start) => ScanState::Scanning { files: 0, dirs: 0 },
         (s, _) => s,
+    }
+}
+
+/// The scan the window shows: its state, its id (generation) and its stop flag. UI thread only.
+/// Each scan gets a new id and a new flag, so a worker of an older scan can neither change
+/// the window nor see the flag of a newer scan.
+#[derive(Debug)]
+pub struct ScanControl {
+    state: ScanState,
+    generation: u64,
+    cancel: Arc<AtomicBool>,
+}
+
+impl Default for ScanControl {
+    fn default() -> Self {
+        Self { state: ScanState::Idle, generation: 0, cancel: Arc::new(AtomicBool::new(false)) }
+    }
+}
+
+impl ScanControl {
+    pub fn state(&self) -> &ScanState {
+        unimplemented!("ScanControl::state")
+    }
+
+    pub fn generation(&self) -> u64 {
+        unimplemented!("ScanControl::generation")
+    }
+
+    /// True if events from scan `generation` still apply.
+    pub fn is_current(&self, generation: u64) -> bool {
+        let _ = generation;
+        unimplemented!("ScanControl::is_current")
+    }
+
+    /// Starts a scan: a new id, a new unset stop flag and state `Scanning`.
+    /// `None` while a scan runs.
+    pub fn start(&mut self) -> Option<(u64, Arc<AtomicBool>)> {
+        unimplemented!("ScanControl::start")
+    }
+
+    /// Stops the running scan at once: sets its flag, retires its id and moves to `Cancelled`.
+    /// Its worker ends in the background and what it posts later is dropped.
+    /// `false`, and no change, if no scan runs.
+    pub fn cancel(&mut self) -> bool {
+        unimplemented!("ScanControl::cancel")
+    }
+
+    /// Applies `event` from scan `generation`. `false`, and no change, if that scan is not current.
+    pub fn apply(&mut self, generation: u64, event: Event) -> bool {
+        let _ = (generation, event);
+        unimplemented!("ScanControl::apply")
     }
 }
 
@@ -327,6 +380,191 @@ mod tests {
     #[test]
     fn next_cancelled_while_scanning_moves_to_cancelled() {
         assert_eq!(next(ScanState::Scanning { files: 1, dirs: 1 }, Event::Cancelled), ScanState::Cancelled);
+    }
+
+    // ---- ScanControl: immediate cancel and stale scans ----
+    fn progress() -> Event {
+        Event::Progress { files: 10, dirs: 3 }
+    }
+
+    /// Every event a scan worker can post.
+    fn worker_events() -> Vec<Event> {
+        vec![progress(), Event::Finished(summary(Method::Walk, 0)), Event::Failed("bad".into()), Event::Cancelled]
+    }
+
+    /// A control in each state other than `Scanning`, reached through the public API.
+    fn idle_controls() -> Vec<ScanControl> {
+        let idle = ScanControl::default();
+        let mut done = ScanControl::default();
+        let (g, _) = done.start().unwrap();
+        done.apply(g, Event::Finished(summary(Method::Mft, 0)));
+        let mut failed = ScanControl::default();
+        let (g, _) = failed.start().unwrap();
+        failed.apply(g, Event::Failed("bad".into()));
+        let mut cancelled = ScanControl::default();
+        cancelled.start().unwrap();
+        cancelled.cancel();
+        vec![idle, done, failed, cancelled]
+    }
+
+    #[test]
+    fn scan_control_start_from_idle_moves_to_scanning_with_zero_counts() {
+        let mut c = ScanControl::default();
+
+        c.start().unwrap();
+
+        assert_eq!(c.state(), &ScanState::Scanning { files: 0, dirs: 0 });
+    }
+
+    #[test]
+    fn scan_control_start_returns_the_current_generation() {
+        let mut c = ScanControl::default();
+
+        let (g, _) = c.start().unwrap();
+
+        assert_eq!(c.generation(), g);
+        assert!(c.is_current(g));
+    }
+
+    #[test]
+    fn scan_control_start_gives_an_unset_flag() {
+        let mut c = ScanControl::default();
+
+        let (_, flag) = c.start().unwrap();
+
+        assert!(!flag.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn scan_control_start_while_scanning_returns_none_and_keeps_the_scan() {
+        let mut c = ScanControl::default();
+        let (g, _) = c.start().unwrap();
+
+        let second = c.start();
+
+        assert!(second.is_none());
+        assert!(c.is_current(g));
+    }
+
+    #[test]
+    fn scan_control_cancel_while_scanning_moves_to_cancelled_at_once() {
+        let mut c = ScanControl::default();
+        c.start().unwrap();
+
+        let changed = c.cancel();
+
+        assert!(changed);
+        assert_eq!(c.state(), &ScanState::Cancelled);
+    }
+
+    #[test]
+    fn scan_control_cancel_while_scanning_sets_the_scan_flag() {
+        let mut c = ScanControl::default();
+        let (_, flag) = c.start().unwrap();
+
+        c.cancel();
+
+        assert!(flag.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn scan_control_cancel_while_scanning_retires_the_generation() {
+        let mut c = ScanControl::default();
+        let (g, _) = c.start().unwrap();
+
+        c.cancel();
+
+        assert!(!c.is_current(g));
+    }
+
+    #[test]
+    fn scan_control_cancel_when_not_scanning_changes_nothing() {
+        for mut c in idle_controls() {
+            let (state, generation) = (c.state().clone(), c.generation());
+
+            let changed = c.cancel();
+
+            assert!(!changed, "from {state:?}");
+            assert_eq!((c.state(), c.generation()), (&state, generation), "from {state:?}");
+        }
+    }
+
+    #[test]
+    fn scan_control_late_events_from_a_cancelled_scan_are_dropped() {
+        for e in worker_events() {
+            let mut c = ScanControl::default();
+            let (g, _) = c.start().unwrap();
+            c.cancel();
+
+            let applied = c.apply(g, e.clone());
+
+            assert!(!applied, "{e:?}");
+            assert_eq!(c.state(), &ScanState::Cancelled, "{e:?}");
+        }
+    }
+
+    #[test]
+    fn scan_control_start_after_cancel_is_accepted_at_once() {
+        let mut c = ScanControl::default();
+        let (old, _) = c.start().unwrap();
+        c.cancel();
+
+        let (new, _) = c.start().expect("a new scan starts right after a cancel");
+
+        assert_ne!(new, old);
+        assert_eq!(c.state(), &ScanState::Scanning { files: 0, dirs: 0 });
+    }
+
+    #[test]
+    fn scan_control_late_events_from_an_old_scan_do_not_change_the_new_scan() {
+        for e in worker_events() {
+            let mut c = ScanControl::default();
+            let (old, _) = c.start().unwrap();
+            c.cancel();
+            c.start().unwrap();
+
+            let applied = c.apply(old, e.clone());
+
+            assert!(!applied, "{e:?}");
+            assert_eq!(c.state(), &ScanState::Scanning { files: 0, dirs: 0 }, "{e:?}");
+        }
+    }
+
+    #[test]
+    fn scan_control_new_scan_after_cancel_gets_a_fresh_flag_and_the_old_flag_stays_set() {
+        let mut c = ScanControl::default();
+        let (_, old_flag) = c.start().unwrap();
+        c.cancel();
+
+        let (_, new_flag) = c.start().unwrap();
+
+        assert!(old_flag.load(Ordering::Relaxed), "the old worker must still see its stop flag");
+        assert!(!new_flag.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn scan_control_events_from_the_new_scan_after_cancel_apply() {
+        let mut c = ScanControl::default();
+        c.start().unwrap();
+        c.cancel();
+        let (g, _) = c.start().unwrap();
+        let sum = summary(Method::Walk, 0);
+
+        let applied = c.apply(g, Event::Finished(sum.clone()));
+
+        assert!(applied);
+        assert_eq!(c.state(), &ScanState::Done(sum));
+    }
+
+    #[test]
+    fn scan_control_apply_current_progress_updates_counts() {
+        let mut c = ScanControl::default();
+        let (g, _) = c.start().unwrap();
+
+        let applied = c.apply(g, progress());
+
+        assert!(applied);
+        assert_eq!(c.state(), &ScanState::Scanning { files: 10, dirs: 3 });
     }
 
     #[test]

@@ -285,6 +285,17 @@ fn layout_prunes_rects_smaller_than_one_pixel() {
 }
 
 #[test]
+fn layout_prunes_a_sliver_of_one_square_pixel_or_more() {
+    // 10 px² passes the 1 px² pre-filter, but the squarified row makes it 0.1 px wide.
+    let tree = tree_of(&[9990, 10]);
+
+    let rects = layout(&tree, tree.root(), 100, 100);
+
+    assert_eq!(rects.len(), 1, "{rects:?}");
+    assert_eq!(tree.node(rects[0].node).size, 9990);
+}
+
+#[test]
 fn layout_pruned_children_leave_their_area_in_the_parent() {
     let tree = tiny_files();
     let n1 = named(&tree, "n1");
@@ -346,6 +357,23 @@ fn layout_nested_equal_size_folders_are_ordered_by_node_id_every_run() {
     let folders: Vec<NodeId> = a.iter().map(|r| r.node).filter(|&n| tree.node(n).is_dir).collect();
     assert_eq!(folders, want);
     assert_eq!(a, b);
+}
+
+#[test]
+fn layout_mixed_sizes_order_equal_sizes_by_node_id() {
+    // 200 files of 3 sizes in an interleaved order: more than the small-sort cut-off, and not
+    // presorted, so an unstable sort on size alone moves equal sizes out of id order.
+    let sizes: Vec<u64> = (0..200u64).map(|i| 1000 * (1 + (i * 7) % 3)).collect();
+    let tree = tree_of(&sizes);
+
+    let rects = layout(&tree, tree.root(), W, H);
+
+    assert_eq!(rects.len(), sizes.len());
+    let order: Vec<(u64, NodeId)> = rects.iter().map(|r| (tree.node(r.node).size, r.node)).collect();
+    for pair in order.windows(2) {
+        let ((sa, a), (sb, b)) = (pair[0], pair[1]);
+        assert!(sa > sb || (sa == sb && a < b), "{a:?} (size {sa}) is placed before {b:?} (size {sb})");
+    }
 }
 
 #[test]
