@@ -12,6 +12,7 @@ mod nav;
 mod tree_view;
 
 use model::{Event, ScanState, Summary, banner_text, error_message, format_size, group_digits, next};
+use nav::{Dir, TreeMove};
 use scan::{Method, NodeId, Progress, ScanError, Tree};
 use slint::{
     ComponentHandle, Image, Model, ModelNotify, ModelRc, ModelTracker, Rgba8Pixel, SharedPixelBuffer, SharedString,
@@ -351,8 +352,106 @@ fn to_physical(ui: &MainWindow, x: f32, y: f32) -> (f64, f64) {
     (f64::from(x) * scale, f64::from(y) * scale)
 }
 
+fn row_node(i: i32) -> Option<NodeId> {
+    with_loaded(|l| l.model.rows.borrow().get(usize::try_from(i).ok()?).map(|r| r.node)).flatten()
+}
+
+/// Collapses or expands the folder in row `i`.
+fn toggle_row(ui: &MainWindow, i: i32) {
+    if let Some(n) = row_node(i) {
+        with_loaded(|l| l.view.toggle(&l.data.tree, n));
+        sync_rows(ui);
+    }
+}
+
+/// Shows `folder` in the treemap.
+fn open_folder(ui: &MainWindow, folder: NodeId) {
+    with_loaded(|l| l.view_root = folder);
+    relayout(ui);
+}
+
+/// Shows the parent of the treemap folder.
+fn go_up(ui: &MainWindow) {
+    with_loaded(|l| {
+        if let Some(p) = l.data.tree.node(l.view_root).parent {
+            l.view_root = p;
+        }
+    });
+    relayout(ui);
+}
+
+/// Opens the selected node in the treemap if it is a folder with content.
+fn open_selected(ui: &MainWindow) {
+    if let Some(folder) = with_loaded(|l| l.selected.and_then(|n| nav::enter_target(&l.data.tree, n))).flatten() {
+        open_folder(ui, folder);
+    }
+}
+
+/// A key press in the file tree.
+fn tree_key(ui: &MainWindow, key: &str) {
+    let current = usize::try_from(ui.get_selected_row()).ok();
+    let move_to = |i: usize| {
+        if let Some(n) = row_node(i as i32) {
+            select(ui, n);
+        }
+    };
+    match (key, current) {
+        ("up" | "down", _) => {
+            let len = with_loaded(|l| l.model.rows.borrow().len()).unwrap_or(0);
+            if let Some(i) = nav::step_row(len, current, if key == "up" { -1 } else { 1 }) {
+                move_to(i);
+            }
+        }
+        ("left" | "right", Some(i)) => {
+            let action = with_loaded(|l| {
+                let rows = l.model.rows.borrow();
+                if key == "left" { nav::left_action(&rows, i) } else { nav::right_action(&rows, i) }
+            });
+            match action {
+                Some(TreeMove::Toggle) => toggle_row(ui, i as i32),
+                Some(TreeMove::Select(j)) => move_to(j),
+                Some(TreeMove::Nothing) | None => {}
+            }
+        }
+        ("space", Some(i)) => toggle_row(ui, i as i32),
+        ("enter", Some(_)) => open_selected(ui),
+        _ => {}
+    }
+}
+
+/// A key press in the treemap.
+fn map_key(ui: &MainWindow, key: &str) {
+    let dir = match key {
+        "up" => Dir::Up,
+        "down" => Dir::Down,
+        "left" => Dir::Left,
+        "right" => Dir::Right,
+        "enter" => return open_selected(ui),
+        "backspace" => return go_up(ui),
+        _ => return,
+    };
+    if let Some(n) = with_loaded(|l| nav::neighbour_rect(&l.rects, l.selected, dir)).flatten() {
+        select(ui, n);
+    }
+}
+
 fn wire_tree_and_treemap(ui: &MainWindow) {
-    let row_node = |i: i32| with_loaded(|l| l.model.rows.borrow().get(i as usize).map(|r| r.node)).flatten();
+    ui.on_tree_key({
+        let weak = ui.as_weak();
+        move |key| {
+            if let Some(ui) = weak.upgrade() {
+                tree_key(&ui, &key);
+            }
+        }
+    });
+    ui.on_map_key({
+        let weak = ui.as_weak();
+        move |key| {
+            if let Some(ui) = weak.upgrade() {
+                map_key(&ui, &key);
+            }
+        }
+    });
     ui.on_tree_select({
         let weak = ui.as_weak();
         move |i| {
@@ -364,11 +463,9 @@ fn wire_tree_and_treemap(ui: &MainWindow) {
     ui.on_tree_toggle({
         let weak = ui.as_weak();
         move |i| {
-            let (Some(ui), Some(n)) = (weak.upgrade(), row_node(i)) else {
-                return;
-            };
-            with_loaded(|l| l.view.toggle(&l.data.tree, n));
-            sync_rows(&ui);
+            if let Some(ui) = weak.upgrade() {
+                toggle_row(&ui, i);
+            }
         }
     });
     ui.on_tree_sort({
@@ -406,21 +503,16 @@ fn wire_tree_and_treemap(ui: &MainWindow) {
             })
             .flatten();
             if let Some(folder) = target {
-                with_loaded(|l| l.view_root = folder);
-                relayout(&ui);
+                open_folder(&ui, folder);
             }
         }
     });
     ui.on_treemap_up({
         let weak = ui.as_weak();
         move || {
-            let Some(ui) = weak.upgrade() else { return };
-            with_loaded(|l| {
-                if let Some(p) = l.data.tree.node(l.view_root).parent {
-                    l.view_root = p;
-                }
-            });
-            relayout(&ui);
+            if let Some(ui) = weak.upgrade() {
+                go_up(&ui);
+            }
         }
     });
     ui.on_treemap_resized({

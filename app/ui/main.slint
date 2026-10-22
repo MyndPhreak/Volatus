@@ -20,19 +20,31 @@ component HeaderCell inherits Rectangle {
     callback clicked();
     height: 28px;
     background: touch.has-hover ? Palette.alternate-background : transparent;
-    accessible-role: button;
-    accessible-label: "Sort by \{root.text}";
-    accessible-action-default => { root.clicked(); }
-    Text {
-        x: 8px;
-        width: parent.width - 16px;
-        vertical-alignment: center;
-        horizontal-alignment: root.right-aligned ? right : left;
-        font-weight: 600;
-        text: root.text + (root.active ? (root.descending ? " ▼" : " ▲") : "");
-        overflow: elide;
+    border-width: focus.has-focus ? 2px : 0px;
+    border-color: Palette.accent-background;
+    focus := FocusScope {
+        accessible-role: button;
+        accessible-label: "Sort by \{root.text}";
+        accessible-action-default => { root.clicked(); }
+        key-pressed(event) => {
+            if (event.text == Key.Return || event.text == " ") {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+        Text {
+            x: 8px;
+            width: parent.width - 16px;
+            height: parent.height;
+            vertical-alignment: center;
+            horizontal-alignment: root.right-aligned ? right : left;
+            font-weight: 600;
+            text: root.text + (root.active ? (root.descending ? " ▼" : " ▲") : "");
+            overflow: elide;
+        }
+        touch := TouchArea { clicked => { root.clicked(); focus.focus(); } }
     }
-    touch := TouchArea { clicked => { root.clicked(); } }
 }
 
 export component MainWindow inherits Window {
@@ -43,7 +55,6 @@ export component MainWindow inherits Window {
     background: root.mica ? transparent : Palette.background;
     preferred-width: 1100px;
     preferred-height: 700px;
-    min-width: 640px;
     min-height: 400px;
 
     in property <[string]> drives;
@@ -81,6 +92,10 @@ export component MainWindow inherits Window {
     callback treemap-click(float, float);
     callback treemap-open(float, float);
     callback treemap-up();
+    /// Key press in the file tree: "up", "down", "left", "right", "enter" or "space".
+    callback tree-key(string);
+    /// Key press in the treemap: "up", "down", "left", "right", "enter" or "backspace".
+    callback map-key(string);
     callback treemap-resized(float, float);
     callback restart-admin();
 
@@ -98,6 +113,18 @@ export component MainWindow inherits Window {
         }
     }
 
+    /// Name of the key for the host, or "" for a key the host does not use.
+    pure function key-name(text: string) -> string {
+        if (text == Key.UpArrow) { return "up"; }
+        if (text == Key.DownArrow) { return "down"; }
+        if (text == Key.LeftArrow) { return "left"; }
+        if (text == Key.RightArrow) { return "right"; }
+        if (text == Key.Return) { return "enter"; }
+        if (text == " ") { return "space"; }
+        if (text == Key.Backspace) { return "backspace"; }
+        return "";
+    }
+
     VerticalBox {
         spacing: 12px;
         HorizontalBox {
@@ -105,12 +132,14 @@ export component MainWindow inherits Window {
             drive-box := ComboBox {
                 model: root.drives;
                 enabled: !root.scanning;
+                accessible-label: "Drive";
                 // Row 0 is a label ("Choose drive"), not a drive. A ComboBox cannot show text that is not in its model.
                 current-index: 0;
                 selected(drive) => { if (self.current-index > 0) { root.path = drive; } }
             }
             LineEdit {
                 placeholder-text: "Folder or drive";
+                accessible-label: "Folder or drive path";
                 text <=> root.path;
                 enabled: !root.scanning;
                 edited => { drive-box.current-index = 0; }
@@ -161,123 +190,169 @@ export component MainWindow inherits Window {
         HorizontalLayout {
             spacing: 12px;
             // File tree
-            VerticalLayout {
-                horizontal-stretch: 2;
+            // Each pane sits in a Rectangle with `preferred-width: 0px`, so a pane starts at its
+            // minimum width and the free space is shared 1 : 5 (a layout cannot take that
+            // preferred width itself). The map gets about 51% of the window at 1100 px and more
+            // when the window is wider.
+            Rectangle {
+                horizontal-stretch: 1;
+                preferred-width: 0px;
                 min-width: 460px;
-                HorizontalLayout {
-                    HeaderCell {
-                        horizontal-stretch: 1;
-                        text: "Name";
-                        right-aligned: false;
-                        active: root.sort-key == 0;
-                        descending: root.sort-descending;
-                        clicked => { root.tree-sort(0); }
+                VerticalLayout {
+                    HorizontalLayout {
+                        HeaderCell {
+                            horizontal-stretch: 1;
+                            text: "Name";
+                            right-aligned: false;
+                            active: root.sort-key == 0;
+                            descending: root.sort-descending;
+                            clicked => { root.tree-sort(0); }
+                        }
+                        HeaderCell {
+                            width: 80px;
+                            text: "Size";
+                            active: root.sort-key == 1;
+                            descending: root.sort-descending;
+                            clicked => { root.tree-sort(1); }
+                        }
+                        HeaderCell {
+                            width: 104px;
+                            text: "% of parent";
+                            active: root.sort-key == 2;
+                            descending: root.sort-descending;
+                            clicked => { root.tree-sort(2); }
+                        }
+                        HeaderCell {
+                            width: 76px;
+                            text: "Files";
+                            active: root.sort-key == 3;
+                            descending: root.sort-descending;
+                            clicked => { root.tree-sort(3); }
+                        }
                     }
-                    HeaderCell {
-                        width: 80px;
-                        text: "Size";
-                        active: root.sort-key == 1;
-                        descending: root.sort-descending;
-                        clicked => { root.tree-sort(1); }
-                    }
-                    HeaderCell {
-                        width: 84px;
-                        text: "% of parent";
-                        active: root.sort-key == 2;
-                        descending: root.sort-descending;
-                        clicked => { root.tree-sort(2); }
-                    }
-                    HeaderCell {
-                        width: 76px;
-                        text: "Files";
-                        active: root.sort-key == 3;
-                        descending: root.sort-descending;
-                        clicked => { root.tree-sort(3); }
-                    }
-                }
-                list := ListView {
-                    vertical-stretch: 1;
-                    for row[i] in root.rows : Rectangle {
-                        height: 24px;
-                        background: i == root.selected-row ? Palette.selection-background : (row-touch.has-hover ? Palette.alternate-background : transparent);
-                        row-touch := TouchArea { clicked => { root.tree-select(i); } }
-                        HorizontalLayout {
-                            Rectangle {
-                                horizontal-stretch: 1;
+                    tree-focus := FocusScope {
+                        vertical-stretch: 1;
+                        accessible-role: tree;
+                        accessible-label: "File tree";
+                        accessible-value: root.selected-row >= 0 ? root.rows[root.selected-row].name : "";
+                        key-pressed(event) => {
+                            if (root.key-name(event.text) == "") { return reject; }
+                            root.tree-key(root.key-name(event.text));
+                            return accept;
+                        }
+                        list := ListView {
+                            // Inside the focus ring, so the ring does not cover the last column.
+                            x: 2px;
+                            y: 2px;
+                            width: parent.width - 4px;
+                            height: parent.height - 4px;
+                            for row[i] in root.rows : Rectangle {
+                                height: 24px;
+                                background: i == root.selected-row ? Palette.selection-background : (row-touch.has-hover ? Palette.alternate-background : transparent);
+                                row-touch := TouchArea { clicked => { root.tree-select(i); tree-focus.focus(); } }
                                 HorizontalLayout {
-                                    padding-left: 8px + row.depth * 16px;
-                                    spacing: 4px;
                                     Rectangle {
-                                        width: 16px;
-                                        if row.has-children : Text {
-                                            text: row.expanded ? "-" : "+";
-                                            vertical-alignment: center;
-                                            horizontal-alignment: center;
-                                            accessible-role: button;
-                                            accessible-label: row.expanded ? "Collapse \{row.name}" : "Expand \{row.name}";
+                                        horizontal-stretch: 1;
+                                        HorizontalLayout {
+                                            padding-left: 8px + row.depth * 16px;
+                                            spacing: 4px;
+                                            Rectangle {
+                                                width: 16px;
+                                                if row.has-children : Text {
+                                                    text: row.expanded ? "-" : "+";
+                                                    vertical-alignment: center;
+                                                    horizontal-alignment: center;
+                                                    accessible-role: button;
+                                                    accessible-label: row.expanded ? "Collapse \{row.name}" : "Expand \{row.name}";
+                                                }
+                                                if row.has-children : TouchArea { clicked => { root.tree-toggle(i); tree-focus.focus(); } }
+                                            }
+                                            Text {
+                                                text: row.name;
+                                                vertical-alignment: center;
+                                                overflow: elide;
+                                                color: i == root.selected-row ? Palette.selection-foreground : Palette.foreground;
+                                            }
                                         }
-                                        if row.has-children : TouchArea { clicked => { root.tree-toggle(i); } }
                                     }
-                                    Text {
-                                        text: row.name;
-                                        vertical-alignment: center;
-                                        overflow: elide;
-                                        color: i == root.selected-row ? Palette.selection-foreground : Palette.foreground;
-                                    }
+                                    Text { width: 80px; text: row.size; horizontal-alignment: right; vertical-alignment: center; color: i == root.selected-row ? Palette.selection-foreground : Palette.foreground; }
+                                    Text { width: 104px; text: row.percent; horizontal-alignment: right; vertical-alignment: center; color: i == root.selected-row ? Palette.selection-foreground : Palette.foreground; }
+                                    Text { width: 76px; text: row.files; horizontal-alignment: right; vertical-alignment: center; color: i == root.selected-row ? Palette.selection-foreground : Palette.foreground; }
                                 }
                             }
-                            Text { width: 80px; text: row.size; horizontal-alignment: right; vertical-alignment: center; color: i == root.selected-row ? Palette.selection-foreground : Palette.foreground; }
-                            Text { width: 84px; text: row.percent; horizontal-alignment: right; vertical-alignment: center; color: i == root.selected-row ? Palette.selection-foreground : Palette.foreground; }
-                            Text { width: 76px; text: row.files; horizontal-alignment: right; vertical-alignment: center; color: i == root.selected-row ? Palette.selection-foreground : Palette.foreground; }
+                        }
+                        Rectangle {
+                            border-width: tree-focus.has-focus ? 2px : 0px;
+                            border-color: Palette.accent-background;
                         }
                     }
                 }
             }
             // Treemap
-            VerticalLayout {
-                horizontal-stretch: 3;
+            Rectangle {
+                horizontal-stretch: 5;
+                preferred-width: 0px;
                 min-width: 260px;
-                spacing: 6px;
-                HorizontalLayout {
-                    spacing: 8px;
-                    Button {
-                        text: "Up";
-                        enabled: root.treemap-can-go-up;
-                        clicked => { root.treemap-up(); }
+                VerticalLayout {
+                    spacing: 6px;
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Button {
+                            text: "Up";
+                            enabled: root.treemap-can-go-up;
+                            clicked => { root.treemap-up(); }
+                        }
+                        Text {
+                            text: root.treemap-title;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
                     }
-                    Text {
-                        text: root.treemap-title;
-                        vertical-alignment: center;
-                        overflow: elide;
-                    }
-                }
-                map := Rectangle {
-                    vertical-stretch: 1;
-                    // The image's pixel size must not feed back into the layout: each new image
-                    // would change the map size and start another layout.
-                    preferred-width: 0px;
-                    preferred-height: 0px;
-                    clip: true;
-                    changed width => { root.treemap-resized(self.width / 1px, self.height / 1px); }
-                    changed height => { root.treemap-resized(self.width / 1px, self.height / 1px); }
-                    Image {
-                        width: 100%;
-                        height: 100%;
-                        source: root.treemap;
-                        image-fit: fill;
-                    }
-                    if root.has-selection : Rectangle {
-                        x: root.selection-x;
-                        y: root.selection-y;
-                        width: root.selection-width;
-                        height: root.selection-height;
-                        border-width: 2px;
-                        border-color: Palette.foreground;
-                    }
-                    TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => { root.treemap-click(self.mouse-x / 1px, self.mouse-y / 1px); }
-                        double-clicked => { root.treemap-open(self.mouse-x / 1px, self.mouse-y / 1px); }
+                    map := Rectangle {
+                        vertical-stretch: 1;
+                        // The image's pixel size must not feed back into the layout: each new image
+                        // would change the map size and start another layout.
+                        preferred-width: 0px;
+                        preferred-height: 0px;
+                        clip: true;
+                        changed width => { root.treemap-resized(self.width / 1px, self.height / 1px); }
+                        changed height => { root.treemap-resized(self.width / 1px, self.height / 1px); }
+                        Image {
+                            width: 100%;
+                            height: 100%;
+                            source: root.treemap;
+                            image-fit: fill;
+                        }
+                        if root.has-selection : Rectangle {
+                            x: root.selection-x;
+                            y: root.selection-y;
+                            width: root.selection-width;
+                            height: root.selection-height;
+                            border-width: 2px;
+                            border-color: Palette.foreground;
+                        }
+                        map-focus := FocusScope {
+                            accessible-role: image;
+                            accessible-label: "Treemap";
+                            accessible-description: "Press an arrow key to move the selection. Press Enter to open the folder. Press Backspace to go up one folder.";
+                            key-pressed(event) => {
+                                if (root.key-name(event.text) == "" || event.text == " ") { return reject; }
+                                root.map-key(root.key-name(event.text));
+                                return accept;
+                            }
+                            TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    map-focus.focus();
+                                    root.treemap-click(self.mouse-x / 1px, self.mouse-y / 1px);
+                                }
+                                double-clicked => { root.treemap-open(self.mouse-x / 1px, self.mouse-y / 1px); }
+                            }
+                        }
+                        Rectangle {
+                            border-width: map-focus.has-focus ? 2px : 0px;
+                            border-color: Palette.accent-background;
+                        }
                     }
                 }
             }

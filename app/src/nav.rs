@@ -16,6 +16,9 @@ pub enum TreeMove {
     Nothing,
 }
 
+/// Rect edges closer than this (in pixels) count as touching.
+const EDGE_TOLERANCE: f64 = 1e-6;
+
 /// A direction key in the treemap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Dir {
@@ -28,34 +31,64 @@ pub enum Dir {
 /// Row after moving `delta` rows from `current`, stopped at the first and last row.
 /// With no current row, any move selects the first row. `None` only if there are no rows.
 pub fn step_row(len: usize, current: Option<usize>, delta: isize) -> Option<usize> {
-    let _ = (len, current, delta);
-    unimplemented!("step_row")
+    let last = len.checked_sub(1)?;
+    Some(current.map_or(0, |c| c.saturating_add_signed(delta).min(last)))
 }
 
 /// Left key on row `i`: collapse an expanded folder, otherwise go to the parent row.
 pub fn left_action(rows: &[Row], i: usize) -> TreeMove {
-    let _ = (rows, i);
-    unimplemented!("left_action")
+    let Some(row) = rows.get(i) else { return TreeMove::Nothing };
+    if row.expanded {
+        return TreeMove::Toggle;
+    }
+    // The parent is the closest row above with a smaller depth.
+    rows[..i].iter().rposition(|r| r.depth < row.depth).map_or(TreeMove::Nothing, TreeMove::Select)
 }
 
 /// Right key on row `i`: expand a collapsed folder, go to the first child of an expanded one.
 pub fn right_action(rows: &[Row], i: usize) -> TreeMove {
-    let _ = (rows, i);
-    unimplemented!("right_action")
+    match rows.get(i) {
+        Some(r) if r.expanded => TreeMove::Select(i + 1),
+        Some(r) if r.has_children => TreeMove::Toggle,
+        _ => TreeMove::Nothing,
+    }
 }
 
 /// The rect next to `selected` in direction `dir`. Rects that overlap the selected one (its
 /// folders and its contents) are not neighbours. With no selection, or a selection that is not
 /// drawn, the first rect is chosen. `None` if nothing lies in that direction.
 pub fn neighbour_rect(rects: &[Rect], selected: Option<NodeId>, dir: Dir) -> Option<NodeId> {
-    let _ = (rects, selected, dir);
-    unimplemented!("neighbour_rect")
+    let Some(sel) = selected.and_then(|n| rects.iter().find(|r| r.node == n)) else {
+        return rects.first().map(|r| r.node);
+    };
+    let (sx, sy) = (sel.x + sel.w / 2.0, sel.y + sel.h / 2.0);
+    let overlaps = |r: &Rect| r.x < sel.x + sel.w && r.x + r.w > sel.x && r.y < sel.y + sel.h && r.y + r.h > sel.y;
+    // Gap in the key direction (None if the rect lies the other way) plus the miss across it.
+    let score = |r: &Rect| {
+        let gap = match dir {
+            Dir::Right => r.x - (sel.x + sel.w),
+            Dir::Left => sel.x - (r.x + r.w),
+            Dir::Down => r.y - (sel.y + sel.h),
+            Dir::Up => sel.y - (r.y + r.h),
+        };
+        let across = match dir {
+            Dir::Left | Dir::Right => (r.y + r.h / 2.0 - sy).abs(),
+            Dir::Up | Dir::Down => (r.x + r.w / 2.0 - sx).abs(),
+        };
+        (gap >= -EDGE_TOLERANCE).then(|| gap.max(0.0) + 2.0 * across)
+    };
+    rects
+        .iter()
+        .filter(|r| r.node != sel.node && !overlaps(r))
+        .filter_map(|r| score(r).map(|s| (r.node, s)))
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(n, _)| n)
 }
 
 /// The folder the Enter key opens in the treemap: `node` if it is a folder with content.
 pub fn enter_target(tree: &Tree, node: NodeId) -> Option<NodeId> {
-    let _ = (tree, node);
-    unimplemented!("enter_target")
+    let n = tree.node(node);
+    (n.is_dir && n.first_child.is_some()).then_some(node)
 }
 
 #[cfg(test)]
