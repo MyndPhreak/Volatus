@@ -276,14 +276,15 @@ fn post(ui: &Weak<MainWindow>, generation: u64, event: Event) {
     });
 }
 
-/// Like `post`, but first installs the scanned tree in the window.
+/// Like `post` for `Finished`, and installs the scanned tree in the window. Both are dropped if
+/// a newer scan has started or the scan was cancelled (`ScanControl::finish` decides).
 fn post_done(ui: &Weak<MainWindow>, generation: u64, data: Data, summary: Summary) {
     let ui = ui.clone();
     let _ = slint::invoke_from_event_loop(move || {
-        let current = SESSION.with_borrow(|s| s.scan.is_current(generation));
-        if let Some(ui) = ui.upgrade().filter(|_| current) {
+        let Some(ui) = ui.upgrade() else { return };
+        if let Some(data) = SESSION.with_borrow_mut(|s| s.scan.finish(generation, summary, data)) {
             install(&ui, Arc::new(data));
-            apply(&ui, generation, Event::Finished(summary));
+            show_state(&ui);
         }
     });
 }

@@ -112,8 +112,11 @@ impl ScanControl {
     /// Stops the running scan at once: sets its flag, retires its id and moves to `Cancelled`.
     /// Its worker ends in the background and what it posts later is dropped.
     /// `false`, and no change, if no scan runs.
-    /// ponytail: a cancelled walker can run on for about a second while a new scan starts, so
-    /// two walkers may share the disk and memory briefly. Upgrade path: join the old worker first.
+    /// ponytail: a cancelled scan stops in under a second when nothing else runs, but when a new
+    /// scan starts at once both share rayon's global pool, and the old one measured 31-113 s to
+    /// return on C: (it ends near the end of the new scan). Until then two scans share the disk,
+    /// the CPUs and memory; the old result is dropped. Upgrade path: a thread pool per scan, or
+    /// join the old worker before the new scan starts.
     pub fn cancel(&mut self) -> bool {
         if !self.is_scanning() {
             return false;
@@ -135,10 +138,8 @@ impl ScanControl {
 
     /// Applies `Finished(summary)` from scan `generation` and gives `result` back for the window
     /// to show. `None`, and no change, if that scan is not current: a late result is never shown.
-    #[allow(dead_code)] // stub: post_done calls it in the implementation commit
     pub fn finish<T>(&mut self, generation: u64, summary: Summary, result: T) -> Option<T> {
-        let _ = (generation, summary, result);
-        unimplemented!("ScanControl::finish")
+        self.apply(generation, Event::Finished(summary)).then_some(result)
     }
 }
 
