@@ -184,6 +184,19 @@ pub fn format_elapsed(d: Duration) -> String {
     }
 }
 
+/// "Timing: scan 5.3 s, after scan 0.2 s, total 5.5 s." `scan` is the scan itself, `after` the
+/// work from the end of the scan until the treemap is shown, `total` the time from the Scan click.
+pub fn format_timing(scan: Duration, after: Duration, total: Duration) -> String {
+    let _ = (scan, after, total);
+    todo!("format_timing")
+}
+
+/// The banner with the timing line after it. Without a line the banner is unchanged.
+pub fn append_timing(banner: String, timing: Option<&str>) -> String {
+    let _ = timing;
+    todo!("append_timing {banner}")
+}
+
 /// Short, plain message for a failed scan. Never empty.
 pub fn error_message(e: &ScanError) -> String {
     match e {
@@ -268,6 +281,28 @@ mod tests {
         for (n, want) in cases {
             assert_eq!(group_digits(n), want, "input {n}");
         }
+    }
+
+    #[test]
+    fn format_timing_known_values_formats_three_times() {
+        let line = format_timing(Duration::from_millis(5300), Duration::from_millis(200), Duration::from_millis(5500));
+        assert_eq!(line, "Timing: scan 5.3 s, after scan 0.2 s, total 5.5 s.");
+    }
+
+    #[test]
+    fn format_timing_over_a_minute_uses_minutes() {
+        let line = format_timing(Duration::from_secs(65), Duration::from_millis(150), Duration::from_millis(65_300));
+        assert_eq!(line, "Timing: scan 1 min 5 s, after scan 0.2 s, total 1 min 5 s.");
+    }
+
+    #[test]
+    fn append_timing_with_line_adds_it_after_the_banner() {
+        assert_eq!(append_timing("Done.".into(), Some("Timing: x.")), "Done. Timing: x.");
+    }
+
+    #[test]
+    fn append_timing_without_line_leaves_the_banner_unchanged() {
+        assert_eq!(append_timing("Done.".into(), None), "Done.");
     }
 
     // ---- format_elapsed ----

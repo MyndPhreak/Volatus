@@ -6,6 +6,8 @@
 //! queued before the event loop starts. Calling it right after `show()` returns `NotSupported`.
 //! If Mica is not available (Windows 10), the window falls back to the opaque Fluent background.
 
+mod browse;
+mod cli;
 mod elevate;
 mod model;
 mod nav;

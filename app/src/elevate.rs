@@ -19,6 +19,13 @@ pub fn quote_arg(path: &str) -> String {
     format!("\"{path}{slashes}\"")
 }
 
+/// Command line for the elevated copy. `--` comes before the folder, so a folder named like a
+/// flag is still read as a folder. `--timing` is carried over when set.
+pub fn relaunch_args(scan_path: &str, timing: bool) -> String {
+    let _ = (scan_path, timing);
+    todo!("relaunch_args")
+}
+
 fn wide(s: &std::ffi::OsStr) -> Vec<u16> {
     s.encode_wide().chain(std::iter::once(0)).collect()
 }
@@ -39,7 +46,7 @@ pub fn restart_as_admin(scan_path: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::quote_arg;
+    use super::{quote_arg, relaunch_args};
 
     #[test]
     fn quote_arg_trailing_backslash_is_doubled() {
@@ -49,5 +56,20 @@ mod tests {
     #[test]
     fn quote_arg_plain_path_is_only_quoted() {
         assert_eq!(quote_arg("C:\\My Files"), "\"C:\\My Files\"");
+    }
+
+    #[test]
+    fn relaunch_args_without_timing_has_separator_and_quoted_path() {
+        assert_eq!(relaunch_args("C:\\My Files", false), "-- \"C:\\My Files\"");
+    }
+
+    #[test]
+    fn relaunch_args_with_timing_carries_the_flag() {
+        assert_eq!(relaunch_args("C:\\", true), "--timing -- \"C:\\\\\"");
+    }
+
+    #[test]
+    fn relaunch_args_dash_path_stays_after_the_separator() {
+        assert_eq!(relaunch_args("--timing", false), "-- \"--timing\"");
     }
 }
