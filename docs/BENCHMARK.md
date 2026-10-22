@@ -28,7 +28,7 @@ cargo run -p scan --release --example bench -- <root> [--runs N] [--method mft|w
 - No `--method`: MFT, then the walker if the MFT path fails (the app's behaviour).
 - `--method mft`: MFT only. Without elevation it stops with "Access is denied" instead of timing
   the walker.
-- `--chunk-mib N`: bytes per `$MFT` read (default 4). `--threads N`: rayon pool size (default:
+- `--chunk-mib N`: bytes per `$MFT` read (default 32). `--threads N`: rayon pool size (default:
   one per logical CPU).
 - `--csv out.csv` appends one row per run. `--json` prints one JSON object instead of the table.
 
@@ -75,6 +75,9 @@ cargo run -p scan --release --example bench -- <root> [--runs N] [--method mft|w
    cargo test -p scan --test parity -- --ignored
    ```
 
+   (Elevated. Two live tests: the scratch-folder MFT-against-walker parity, and a whole-volume
+   MFT scan of the system drive that checks counts and that sizes add up.)
+
    Pass `C:\` (with the backslash) to the bench: `C:` alone means "the current folder on C:".
    Pass `C:` (no backslash) to WizTree: inside quotes, `C:\"` would escape the closing quote.
 
@@ -106,22 +109,39 @@ cold run with a warm run.
 
 ## Results
 
-Fill in from `results.txt` (median of the rounds, ms).
+M3 run by the user, 2026-10-22: `docsench.ps1 -Drive C -Rounds 5 -Sweep`, elevated. Ryzen 9
+7950X3D, 95 GB RAM, Corsair MP600 PRO NH, Windows 11 build 26300, WizTree 4.31. Median of 5
+rounds. Log: `.claude/work/storagetool-wiztree-clone/logs/P4-M3-user-run.txt`.
 
-| Date | Drive / disk | `$MFT` size | Files | storagetool in-process | storagetool wall | WizTree wall | WizTree fixed cost | WizTree minus fixed | Cache |
-|---|---|---|---|---|---|---|---|---|---|
-| | | | | | | | | | warm |
-| | | | | | | | | | cold |
+| Date | Drive / disk | Files | storagetool in-process | storagetool wall | WizTree wall | WizTree fixed cost | WizTree minus fixed | Cache |
+|---|---|---|---|---|---|---|---|---|
+| 2026-10-22 | C: / MP600 PRO NH | 5,068,954 (1,281,226 folders, 0 skipped) | 6,716 ms | 6,845 ms | 23,216 ms | 1,024 ms | 22,192 ms | warm |
+| | | | | | | | | cold (not run) |
 
-Tuning (in-process total, median of 3, ms):
+storagetool is about 3.3 times faster than WizTree on this drive (wall 6.8 s against 23.2 s).
+Phases of round 2 (ms): open 520, read 3257, parse 2266, rollup 2700.
 
-| chunk MiB | 1 | 2 | 4 (default) | 8 | 16 | 32 | 64 |
+Tuning at the 4 MiB default (in-process total, median of 3, ms):
+
+| chunk MiB | 1 | 2 | 4 | 8 | 16 | 32 | 64 |
 |---|---|---|---|---|---|---|---|
-| total | | | | | | | |
+| total | 10775 | 8496 | 7153 | 6258 | 5584 | 5264 | 5160 |
 
 | threads | 2 | 4 | 8 | 16 | default |
 |---|---|---|---|---|---|
-| total | | | | | |
+| total | 7.2-7.7 s for every value: no effect | | | | |
+
+Default chunk changed from 4 MiB to 32 MiB on this evidence (P4 fix round 2). Chunk size is the
+only knob that mattered: 32 MiB is 26% faster than 4 MiB, and 64 MiB gains only another 2%.
+The reader keeps 3 buffers, so the default uses 96 MiB while an MFT scan runs. The walker does
+not use the chunk.
+
+Caveats:
+
+- Warm cache only. The cold-cache run (restart, one run of each tool) was not done.
+- WizTree ran in `/admin=1` MFT mode, so both tools read the whole `$MFT`.
+- The WizTree export was `/exportmaxdepth=1`, files excluded, so its time has little CSV writing.
+- One machine, one drive, one SSD.
 
 M3 passes when "storagetool wall" is less than or equal to "WizTree wall", warm, on the same
 drive. "storagetool in-process" against "WizTree minus fixed" compares the scans alone.

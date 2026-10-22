@@ -105,8 +105,9 @@ pub struct Phases {
     pub rollup: Duration,
 }
 
-/// Default bytes per `$MFT` read.
-pub const DEFAULT_CHUNK: usize = 4 << 20;
+/// Default bytes per `$MFT` read: 32 MiB (3 buffers = 96 MiB). Measured on a 5.1M-file volume,
+/// warm: 4 MiB 7.15 s, 8: 6.26, 16: 5.58, 32: 5.26, 64: 5.16 (see docs/BENCHMARK.md).
+pub const DEFAULT_CHUNK: usize = 32 << 20;
 
 /// Tuning knobs. `Default` gives the values `scan` uses.
 #[derive(Debug, Clone, PartialEq, Eq)]
