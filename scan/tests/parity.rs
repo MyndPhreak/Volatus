@@ -5,7 +5,7 @@ mod common;
 use common::ntfs::{ROOT, dir, file, volume};
 use common::{TempDir, make_placeholder};
 use scan::mft::scan_device;
-use scan::{Method, Tree, scan};
+use scan::{Method, ScanOptions, Tree, scan, scan_with};
 use std::fs;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
@@ -107,6 +107,8 @@ fn flush_all(path: &Path) {
 }
 
 /// M2 support: run elevated with `cargo test -p scan --test parity -- --ignored`.
+/// Forces the MFT with the method override: the default routing walks a sub-folder.
+/// The scratch folder holds no hard links, which is the one case where the two paths differ.
 #[test]
 #[ignore = "needs Administrator rights and an NTFS temp folder"]
 fn parity_live_volume_mft_matches_walker() {
@@ -116,10 +118,36 @@ fn parity_live_volume_mft_matches_walker() {
     flush_all(t.path());
     let (tx, _rx) = channel();
     let no = AtomicBool::new(false);
+    let forced = ScanOptions { method: Some(Method::Mft), ..ScanOptions::default() };
 
-    let (mft_tree, mft_stats) = scan(t.path(), tx.clone(), &no).unwrap();
+    let (mft_tree, mft_stats) = scan_with(t.path(), tx.clone(), &no, &forced)
+        .expect("MFT scan failed: run this test from an elevated (Administrator) prompt on an NTFS drive");
     let (walk_tree, _) = scan::walk::walk(t.path(), &tx, &no).unwrap();
 
-    assert_eq!(mft_stats.method, Method::Mft, "precondition: the MFT path ran (elevated, NTFS)");
+    assert_eq!(mft_stats.method, Method::Mft, "precondition: the MFT path ran (run elevated, NTFS)");
     assert_eq!(listing(&mft_tree), listing(&walk_tree));
+}
+
+/// Whole-volume MFT scan of the system drive.
+/// Needs Administrator rights: run `cargo test -p scan --test parity -- --ignored` from an
+/// elevated prompt.
+/// It checks sanity, not parity: a walker run on a whole drive is too slow and too noisy.
+#[test]
+#[ignore = "needs Administrator rights and a large NTFS system drive"]
+fn live_whole_volume_mft_scan_is_consistent() {
+    let drive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into());
+    let root = PathBuf::from(format!("{drive}\\"));
+    let (tx, _rx) = channel();
+    let no = AtomicBool::new(false);
+
+    let (tree, stats) = scan(&root, tx, &no)
+        .expect("whole-volume scan failed: run this test from an elevated (Administrator) prompt");
+
+    assert_eq!(stats.method, Method::Mft, "precondition: the MFT path ran (run elevated, NTFS)");
+    assert_eq!(stats.skipped, 0, "no record may be skipped");
+    assert!(stats.files > 100_000, "files: {}", stats.files);
+    let top = tree.node(tree.root()).size;
+    assert!(top > 0, "total bytes");
+    let children: u64 = tree.children(tree.root()).map(|c| tree.node(c).size).sum();
+    assert_eq!(top, children, "root size equals the sum of its children");
 }
