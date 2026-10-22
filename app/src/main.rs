@@ -133,11 +133,12 @@ fn show_state(ui: &MainWindow) {
     let state = SESSION.with_borrow(|s| s.scan.state().clone());
     ui.set_scanning(matches!(state, ScanState::Scanning { .. }));
     ui.set_banner_is_error(matches!(state, ScanState::Error(_)));
-    ui.set_banner(banner_text(&state).into());
     let root = SESSION.with_borrow(|s| s.scan_root.clone());
     // A root that cannot be resolved is not a drive root (same rule as `scan::scan_with`).
     let root = std::fs::canonicalize(&root).unwrap_or(root);
-    ui.set_show_elevate(matches!(&state, ScanState::Done(s) if offer_elevation(s.method, &root, elevate::is_admin())));
+    let offer = matches!(&state, ScanState::Done(s) if offer_elevation(s.method, &root, elevate::is_admin()));
+    ui.set_banner(banner_text(&state, offer).into());
+    ui.set_show_elevate(offer);
 }
 
 fn with_loaded<R>(f: impl FnOnce(&mut Loaded) -> R) -> Option<R> {
@@ -561,7 +562,7 @@ fn wire_tree_and_treemap(ui: &MainWindow) {
 fn main() {
     let ui = MainWindow::new().expect("create window");
     ui.set_drives(ModelRc::new(VecModel::from(drive_roots())));
-    ui.set_banner(banner_text(&ScanState::Idle).into());
+    ui.set_banner(banner_text(&ScanState::Idle, false).into());
     ui.on_scan({
         let weak = ui.as_weak();
         move |path| {

@@ -204,8 +204,9 @@ pub fn offer_elevation(method: Method, root: &Path, is_admin: bool) -> bool {
     method == Method::Walk && !is_admin && scan::is_volume_root(root)
 }
 
-/// Text for the status banner in each state. Never empty.
-pub fn banner_text(state: &ScanState) -> String {
+/// Text for the status banner in each state. Never empty. `offer_elevation` is the result of
+/// [`offer_elevation`] for the finished scan: the restart hint shows only when the button does.
+pub fn banner_text(state: &ScanState, _offer_elevation: bool) -> String {
     match state {
         ScanState::Idle => "Choose a folder or drive. Then select Scan.".into(),
         ScanState::Scanning { files, dirs } => {
@@ -305,24 +306,24 @@ mod tests {
     // ---- banner_text ----
     #[test]
     fn banner_text_idle_tells_user_what_to_do() {
-        assert_eq!(banner_text(&ScanState::Idle), "Choose a folder or drive. Then select Scan.");
+        assert_eq!(banner_text(&ScanState::Idle, false), "Choose a folder or drive. Then select Scan.");
     }
 
     #[test]
     fn banner_text_scanning_shows_counts() {
-        let t = banner_text(&ScanState::Scanning { files: 1234, dirs: 5 });
+        let t = banner_text(&ScanState::Scanning { files: 1234, dirs: 5 }, false);
         assert_eq!(t, "Scanning. 1,234 files, 5 folders so far.");
     }
 
     #[test]
     fn banner_text_done_mft_shows_method_counts_size_and_time() {
-        let t = banner_text(&ScanState::Done(summary(Method::Mft, 0)));
+        let t = banner_text(&ScanState::Done(summary(Method::Mft, 0)), false);
         assert_eq!(t, "Fast scan (MFT). 3.0 MB in 1,234 files and 56 folders. 0 skipped. 2.5 s.");
     }
 
     #[test]
     fn banner_text_done_walk_says_standard_scan_and_why_slower() {
-        let t = banner_text(&ScanState::Done(summary(Method::Walk, 0)));
+        let t = banner_text(&ScanState::Done(summary(Method::Walk, 0)), true);
         assert_eq!(
             t,
             "Standard scan. 3.0 MB in 1,234 files and 56 folders. 0 skipped. 2.5 s. Restart as administrator to scan a whole drive faster."
@@ -330,24 +331,55 @@ mod tests {
     }
 
     #[test]
+    fn banner_text_done_walk_without_offer_has_no_restart_hint() {
+        let t = banner_text(&ScanState::Done(summary(Method::Walk, 0)), false);
+        assert_eq!(t, "Standard scan. 3.0 MB in 1,234 files and 56 folders. 0 skipped. 2.5 s.");
+    }
+
+    #[test]
+    fn banner_text_done_mft_with_offer_has_no_restart_hint() {
+        let t = banner_text(&ScanState::Done(summary(Method::Mft, 0)), true);
+        assert_eq!(t, "Fast scan (MFT). 3.0 MB in 1,234 files and 56 folders. 0 skipped. 2.5 s.");
+    }
+
+    /// The hint follows `offer_elevation` for every method, root and admin combination.
+    #[test]
+    fn banner_text_hint_shows_exactly_when_offer_elevation_does() {
+        let hint = "Restart as administrator";
+        let cases: [(Method, &str, bool, bool); 6] = [
+            (Method::Walk, r"C:\", false, true),
+            (Method::Walk, r"C:\Users", false, false),
+            (Method::Walk, r"C:\", true, false),
+            (Method::Walk, r"C:\Users", true, false),
+            (Method::Mft, r"C:\", false, false),
+            (Method::Mft, r"C:\Users", false, false),
+        ];
+        for (method, root, admin, want) in cases {
+            let offer = offer_elevation(method, Path::new(root), admin);
+            let t = banner_text(&ScanState::Done(summary(method, 0)), offer);
+            assert_eq!(t.contains(hint), want, "{method:?} {root} admin={admin}: {t}");
+        }
+    }
+
+    #[test]
     fn banner_text_done_with_skipped_shows_skipped_count() {
-        let t = banner_text(&ScanState::Done(summary(Method::Walk, 7)));
+        let t = banner_text(&ScanState::Done(summary(Method::Walk, 7)), false);
         assert!(t.contains("7 skipped."), "{t}");
     }
 
     #[test]
     fn banner_text_error_prefixes_message() {
-        assert_eq!(banner_text(&ScanState::Error("Access denied.".into())), "Scan failed. Access denied.");
+        assert_eq!(banner_text(&ScanState::Error("Access denied.".into()), false), "Scan failed. Access denied.");
     }
 
     #[test]
     fn banner_text_error_with_empty_message_is_still_not_blank() {
-        assert_eq!(banner_text(&ScanState::Error(String::new())), "Scan failed.");
+        assert_eq!(banner_text(&ScanState::Error(String::new()), false), "Scan failed.");
     }
 
     #[test]
     fn banner_text_cancelled_says_no_result() {
-        assert_eq!(banner_text(&ScanState::Cancelled), "Scan stopped. There is no result.");
+        assert_eq!(banner_text(&ScanState::Cancelled, false), "Scan stopped. There is no result.");
     }
 
     // ---- Summary ----
