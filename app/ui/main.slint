@@ -253,6 +253,10 @@ export component MainWindow inherits Window {
                 }
                 map := Rectangle {
                     vertical-stretch: 1;
+                    // The image's pixel size must not feed back into the layout: each new image
+                    // would change the map size and start another layout.
+                    preferred-width: 0px;
+                    preferred-height: 0px;
                     clip: true;
                     changed width => { root.treemap-resized(self.width / 1px, self.height / 1px); }
                     changed height => { root.treemap-resized(self.width / 1px, self.height / 1px); }

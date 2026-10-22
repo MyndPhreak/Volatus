@@ -77,21 +77,22 @@ fn parse_listing(b: &[u8], items: &mut Vec<Item>) -> Option<()> {
 
 /// Lists one directory (without `.` and `..`). An error means the listing is incomplete:
 /// `Cancelled` when `cancel` is set, `Io` when the directory cannot be read.
+/// The flag is checked before each listing call: one huge directory (10k entries in
+/// `C:\Windows\servicing\Packages`) takes over 1 s to list in full.
 fn list_dir(dir: &Path, cancel: &AtomicBool) -> Result<Vec<Item>, ScanError> {
-    let _ = cancel;
-    list_dir_io(dir).map_err(ScanError::Io)
-}
-
-fn list_dir_io(dir: &Path) -> io::Result<Vec<Item>> {
     let handle = std::fs::OpenOptions::new()
         .access_mode(FILE_LIST_DIRECTORY)
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS) // required to open a directory
-        .open(dir)?;
+        .open(dir)
+        .map_err(ScanError::Io)?;
     // u64 elements keep the buffer 8-byte aligned, as the listing entries require.
     let mut buf = vec![0u64; LIST_BUF / 8];
     let mut items = Vec::new();
     loop {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(ScanError::Cancelled);
+        }
         // SAFETY: `handle` is an open directory and `buf` is writable for LIST_BUF bytes.
         let ok = unsafe {
             GetFileInformationByHandleEx(
@@ -105,13 +106,14 @@ fn list_dir_io(dir: &Path) -> io::Result<Vec<Item>> {
             // SAFETY: reads the calling thread's last-error value.
             return match unsafe { GetLastError() } {
                 ERROR_NO_MORE_FILES => Ok(items),
-                _ => Err(io::Error::last_os_error()),
+                _ => Err(ScanError::Io(io::Error::last_os_error())),
             };
         }
         // SAFETY: `buf` is initialised and LIST_BUF bytes long; u8 has no alignment needs.
         let bytes = unsafe { std::slice::from_raw_parts(buf.as_ptr().cast::<u8>(), LIST_BUF) };
-        parse_listing(bytes, &mut items)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "malformed directory listing"))?;
+        parse_listing(bytes, &mut items).ok_or_else(|| {
+            ScanError::Io(io::Error::new(io::ErrorKind::InvalidData, "malformed directory listing"))
+        })?;
     }
 }
 

@@ -11,60 +11,84 @@ pub struct Rect {
     pub h: f64,
 }
 
-/// Rects for every non-empty leaf under `root`, tiling a `w` x `h` area.
-/// Squarified (Bruls et al.), largest first, ties broken by `NodeId`: deterministic.
+/// Nested treemap of `root` in a `w` x `h` area: one rect for each non-empty node below
+/// `root` (folders and files), each inside its parent's rect, with area proportional to size.
+/// Squarified (Bruls et al.) per folder, largest first, ties broken by `NodeId`: deterministic.
+///
+/// A rect less than 1 px wide or high is pruned with everything below it; its area stays
+/// part of the parent's rect. So the count is bounded by the pixels, not by the nodes.
+/// Order is depth first: a folder comes before its descendants, so the last rect that
+/// contains a point is the deepest one.
 pub fn layout(tree: &Tree, root: NodeId, w: u32, h: u32) -> Vec<Rect> {
-    let mut leaves = Vec::new();
-    let mut stack = vec![root];
-    while let Some(n) = stack.pop() {
-        let mut kids = tree.children(n).peekable();
-        if kids.peek().is_some() {
-            stack.extend(kids);
-        } else if tree.node(n).size > 0 {
-            leaves.push((n, tree.node(n).size));
+    let total = tree.node(root).size;
+    let mut out = Vec::new();
+    if total == 0 || w == 0 || h == 0 {
+        return out;
+    }
+    let scale = f64::from(w) * f64::from(h) / total as f64;
+    let mut stack = vec![Rect { node: root, x: 0.0, y: 0.0, w: f64::from(w), h: f64::from(h) }];
+    let (mut kids, mut placed) = (Vec::new(), Vec::new());
+    while let Some(parent) = stack.pop() {
+        if parent.node != root {
+            out.push(parent);
+        }
+        // Under 1 px² a rect cannot be 1 px on both sides: drop it before sorting.
+        kids.clear();
+        kids.extend(tree.children(parent.node).map(|c| (c, tree.node(c).size)).filter(|&(_, s)| s as f64 * scale >= 1.0));
+        kids.sort_unstable_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        let areas: Vec<f64> = kids.iter().map(|&(_, s)| s as f64 * scale).collect();
+        // Snap the last row to the edge only when the children fill the parent exactly.
+        let fills = kids.iter().map(|&(_, s)| s).sum::<u64>() == tree.node(parent.node).size;
+        squarify(&areas, &parent, fills, &mut placed);
+        // Reversed, so the largest child pops first.
+        for (&(node, _), &(x, y, w, h)) in kids.iter().zip(&placed).rev() {
+            if w >= 1.0 && h >= 1.0 {
+                stack.push(Rect { node, x, y, w, h });
+            }
         }
     }
-    let total: u64 = leaves.iter().map(|&(_, s)| s).sum();
-    if total == 0 || w == 0 || h == 0 {
-        return Vec::new();
-    }
-    leaves.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-    let scale = f64::from(w) * f64::from(h) / total as f64;
-    let areas: Vec<f64> = leaves.iter().map(|&(_, s)| s as f64 * scale).collect();
+    out
+}
 
-    let (mut x, mut y, mut rw, mut rh) = (0.0, 0.0, f64::from(w), f64::from(h));
-    let mut out = Vec::with_capacity(leaves.len());
+/// Places `areas` (sorted largest first) inside `b` as rows along the short side. Rects go
+/// to `out` as `(x, y, w, h)`, in the order of `areas`. With `fills`, the last row takes
+/// exactly what is left of `b`, so float drift cannot leave a gap.
+fn squarify(areas: &[f64], b: &Rect, fills: bool, out: &mut Vec<(f64, f64, f64, f64)>) {
+    out.clear();
+    let (mut x, mut y, mut rw, mut rh) = (b.x, b.y, b.w, b.h);
     let mut i = 0;
-    while i < leaves.len() {
+    while i < areas.len() {
         let side = rw.min(rh);
         let mut end = i + 1;
         let mut sum = areas[i];
-        while end < leaves.len() {
+        // Sorted, so the row's largest area is its first and its smallest its last.
+        while end < areas.len() {
             let next = sum + areas[end];
-            if worst(&areas[i..=end], next, side) > worst(&areas[i..end], sum, side) {
+            if worst(areas[i], areas[end], next, side) > worst(areas[i], areas[end - 1], sum, side) {
                 break;
             }
             sum = next;
             end += 1;
         }
-        // The row fills the short side; its thickness is what the row's area needs.
         let horizontal = rw >= rh; // column on the left, items stacked top to bottom
-        // The last row takes exactly what is left, so float drift cannot leave a gap.
-        let thickness = match (end == leaves.len(), horizontal) {
+        let snap = fills && end == areas.len();
+        let thickness = match (snap, horizontal) {
             (true, true) => rw,
             (true, false) => rh,
             (false, true) => sum / rh,
             (false, false) => sum / rw,
         };
         let (mut cx, mut cy) = (x, y);
-        for k in i..end {
-            let last = k + 1 == end;
+        let row = &areas[i..end];
+        for (k, &area) in row.iter().enumerate() {
+            // A row always spans the whole side: its last item takes what is left of it.
+            let last = k + 1 == row.len();
             let (iw, ih) = if horizontal {
-                (thickness, if last { y + rh - cy } else { areas[k] / thickness })
+                (thickness, if last { y + rh - cy } else { area / thickness })
             } else {
-                (if last { x + rw - cx } else { areas[k] / thickness }, thickness)
+                (if last { x + rw - cx } else { area / thickness }, thickness)
             };
-            out.push(Rect { node: leaves[k].0, x: cx, y: cy, w: iw, h: ih });
+            out.push((cx, cy, iw, ih));
             if horizontal {
                 cy += ih;
             } else {
@@ -80,18 +104,18 @@ pub fn layout(tree: &Tree, root: NodeId, w: u32, h: u32) -> Vec<Rect> {
         }
         i = end;
     }
-    out
 }
 
-/// Worst aspect ratio of a row of `areas` (summing to `sum`) laid along `side`.
-fn worst(areas: &[f64], sum: f64, side: f64) -> f64 {
-    let max = areas.iter().cloned().fold(f64::MIN, f64::max);
-    let min = areas.iter().cloned().fold(f64::MAX, f64::min);
+/// Worst aspect ratio of a row with largest area `max` and smallest `min` (summing to `sum`)
+/// laid along `side`.
+fn worst(max: f64, min: f64, sum: f64, side: f64) -> f64 {
     let s2 = side * side;
     (s2 * max / (sum * sum)).max(sum * sum / (s2 * min))
 }
 
 /// RGBA pixels, `w * h * 4` bytes. Background is transparent; each rect gets a stable colour.
+/// Rects are drawn in order, so a child paints over its folder; the folder's colour shows
+/// where pruned children were.
 pub fn render(rects: &[Rect], w: u32, h: u32) -> Vec<u8> {
     let (wu, hu) = (w as usize, h as usize);
     let mut px = vec![0u8; wu * hu * 4];

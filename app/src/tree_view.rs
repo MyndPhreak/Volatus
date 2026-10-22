@@ -127,15 +127,15 @@ let tenths = (u128::from(part) * 1000 + u128::from(total) / 2) / u128::from(tota
 format!("{}.{}%", tenths / 10, tenths % 10)
 }
 
-/// The rect under the point, if any. Left and top edges are inside, right and bottom are not.
+/// The deepest rect under the point, if any: the last match, as the layout lists a folder
+/// before its descendants. Left and top edges are inside, right and bottom are not.
 pub fn hit_test(rects: &[Rect], x: f64, y: f64) -> Option<NodeId> {
-rects.iter().find(|r| x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h).map(|r| r.node)
+rects.iter().rfind(|r| x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h).map(|r| r.node)
 }
 
 /// The selected node's own rect `(x, y, w, h)` in the nested layout. `None` if it is not drawn.
 pub fn selection_bounds(rects: &[Rect], selected: NodeId) -> Option<(f64, f64, f64, f64)> {
-    let _ = (rects, selected);
-    unimplemented!("selection_bounds for the nested layout")
+rects.iter().find(|r| r.node == selected).map(|r| (r.x, r.y, r.w, r.h))
 }
 
 /// The folder to zoom into when `leaf` is picked: the child of `view_root` on the path to

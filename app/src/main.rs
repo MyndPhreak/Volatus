@@ -14,7 +14,7 @@ use model::{Event, ScanState, Summary, banner_text, error_message, format_size, 
 use scan::{Method, NodeId, Progress, ScanError, Tree};
 use slint::{
     ComponentHandle, Image, Model, ModelNotify, ModelRc, ModelTracker, Rgba8Pixel, SharedPixelBuffer, SharedString,
-    VecModel, Weak,
+    Timer, TimerMode, VecModel, Weak,
 };
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -29,8 +29,10 @@ slint::include_modules!();
 
 /// Minimum gap between progress updates sent to the UI.
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
+/// Quiet time after the last treemap size change before it is laid out again.
+const RESIZE_DEBOUNCE: Duration = Duration::from_millis(80);
 
-/// A finished scan plus its derived per-node data.
+/// A finished scan plus its derived per-node data. Shared with treemap layout threads.
 struct Data {
     tree: Tree,
     /// Files under each node, from `tree_view::file_counts`.
@@ -40,7 +42,7 @@ struct Data {
 /// The file tree as a Slint model. Rows are cheap ids; text is built only for rows the list
 /// asks for, so a tree with millions of nodes costs nothing for the rows nobody sees.
 struct RowModel {
-    data: Rc<Data>,
+    data: Arc<Data>,
     rows: RefCell<Vec<Row>>,
     notify: ModelNotify,
 }
@@ -82,13 +84,13 @@ impl Model for RowModel {
 
 /// What the tree and treemap show for the current scan.
 struct Loaded {
-    data: Rc<Data>,
+    data: Arc<Data>,
     model: Rc<RowModel>,
     view: ViewState,
     selected: Option<NodeId>,
-    /// Folder the treemap shows.
+    /// Folder the treemap shows, or will show when its layout arrives.
     view_root: NodeId,
-    /// Treemap rects in physical pixels.
+    /// Treemap rects in physical pixels, from the last layout that arrived.
     rects: Vec<Rect>,
 }
 
@@ -100,6 +102,8 @@ struct Session {
     map_size: (f32, f32),
     /// Id of the current scan. Events from an older scan are dropped.
     generation: u64,
+    /// Id of the latest treemap layout request. Results of older requests are dropped.
+    layout_seq: u64,
     cancel: Arc<AtomicBool>,
 }
 
@@ -109,8 +113,11 @@ thread_local! {
         loaded: None,
         map_size: (0.0, 0.0),
         generation: 0,
+        layout_seq: 0,
         cancel: Arc::new(AtomicBool::new(false)),
     });
+    /// Starts one relayout after the window stops changing the treemap size.
+    static RESIZE_TIMER: Timer = Timer::default();
 }
 
 /// Applies `event` to the session and pushes the new state into the window.
@@ -158,22 +165,51 @@ fn sync_selection(ui: &MainWindow) {
     }
 }
 
-/// Lays out and draws the treemap for the current folder and window size.
+/// Lays out and draws the treemap for the current folder and window size on a worker thread.
+/// The window keeps the old image until the new one arrives. A result is dropped if a newer
+/// layout or a new scan started meanwhile.
+/// ponytail: one thread per request and no early stop; fine while a layout takes well under
+/// a second and resizes are debounced. Upgrade path: a cancel flag per request.
 fn relayout(ui: &MainWindow) {
     let scale = ui.window().scale_factor();
-    let (lw, lh) = SESSION.with_borrow(|s| s.map_size);
-    let (w, h) = ((lw * scale).round() as u32, (lh * scale).round() as u32);
-    let Some(title) = with_loaded(|l| {
-        l.rects = treemap::layout(&l.data.tree, l.view_root, w, h);
-        let px = treemap::render(&l.rects, w, h);
-        if w > 0 && h > 0 {
-            ui.set_treemap(Image::from_rgba8(SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(&px, w, h)));
-        }
-        ui.set_treemap_can_go_up(l.data.tree.node(l.view_root).parent.is_some());
-        l.data.tree.path(l.view_root).display().to_string()
+    let Some((data, root, generation, seq, w, h)) = SESSION.with_borrow_mut(|s| {
+        let l = s.loaded.as_ref()?;
+        let (lw, lh) = s.map_size;
+        let (w, h) = ((lw * scale).round() as u32, (lh * scale).round() as u32);
+        let (data, root) = (l.data.clone(), l.view_root);
+        s.layout_seq += 1;
+        Some((data, root, s.generation, s.layout_seq, w, h))
     }) else {
         return;
     };
+    let weak = ui.as_weak();
+    std::thread::spawn(move || {
+        let rects = treemap::layout(&data.tree, root, w, h);
+        let image = (w > 0 && h > 0)
+            .then(|| SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(&treemap::render(&rects, w, h), w, h));
+        // Err means the event loop has stopped: nothing left to update.
+        let _ = slint::invoke_from_event_loop(move || {
+            let current = SESSION.with_borrow(|s| (s.generation, s.layout_seq));
+            if let Some(ui) = weak.upgrade().filter(|_| current == (generation, seq)) {
+                show_layout(&ui, root, rects, image);
+            }
+        });
+    });
+}
+
+/// Shows a finished layout of `root`: the image, its rects, the title and the selection.
+fn show_layout(ui: &MainWindow, root: NodeId, rects: Vec<Rect>, image: Option<SharedPixelBuffer<Rgba8Pixel>>) {
+    let Some((title, can_go_up)) = with_loaded(|l| {
+        l.rects = rects;
+        let tree = &l.data.tree;
+        (tree.path(root).display().to_string(), tree.node(root).parent.is_some())
+    }) else {
+        return;
+    };
+    if let Some(px) = image {
+        ui.set_treemap(Image::from_rgba8(px));
+    }
+    ui.set_treemap_can_go_up(can_go_up);
     ui.set_treemap_title(title.into());
     sync_selection(ui);
 }
@@ -197,10 +233,8 @@ fn select(ui: &MainWindow, node: NodeId) {
 }
 
 /// Replaces the shown scan with a new one.
-fn install(ui: &MainWindow, tree: Tree) {
-    let counts = tree_view::file_counts(&tree);
-    let root = tree.root();
-    let data = Rc::new(Data { tree, counts });
+fn install(ui: &MainWindow, data: Arc<Data>) {
+    let root = data.tree.root();
     let model =
         Rc::new(RowModel { data: data.clone(), rows: RefCell::new(Vec::new()), notify: ModelNotify::default() });
     ui.set_rows(ModelRc::from(model.clone()));
@@ -242,12 +276,12 @@ fn post(ui: &Weak<MainWindow>, generation: u64, event: Event) {
 }
 
 /// Like `post`, but first installs the scanned tree in the window.
-fn post_done(ui: &Weak<MainWindow>, generation: u64, tree: Tree, summary: Summary) {
+fn post_done(ui: &Weak<MainWindow>, generation: u64, data: Data, summary: Summary) {
     let ui = ui.clone();
     let _ = slint::invoke_from_event_loop(move || {
         let current = SESSION.with_borrow(|s| s.generation);
         if let Some(ui) = ui.upgrade().filter(|_| current == generation) {
-            install(&ui, tree);
+            install(&ui, Arc::new(data));
             apply(&ui, Event::Finished(summary));
         }
     });
@@ -290,7 +324,9 @@ fn start_scan(ui: &MainWindow, path: &str) {
     std::thread::spawn(move || match scan::scan(&root, tx, &cancel) {
         Ok((tree, stats)) => {
             let summary = Summary::new(&stats, tree.node(tree.root()).size);
-            post_done(&weak, generation, tree, summary);
+            // Counted here, not on the UI thread: it visits every node.
+            let counts = tree_view::file_counts(&tree);
+            post_done(&weak, generation, Data { tree, counts }, summary);
         }
         Err(ScanError::Cancelled) => post(&weak, generation, Event::Cancelled),
         Err(e) => post(&weak, generation, Event::Failed(error_message(&e))),
@@ -389,9 +425,16 @@ fn wire_tree_and_treemap(ui: &MainWindow) {
     ui.on_treemap_resized({
         let weak = ui.as_weak();
         move |w, h| {
-            let Some(ui) = weak.upgrade() else { return };
             SESSION.with_borrow_mut(|s| s.map_size = (w, h));
-            relayout(&ui);
+            // Width and height change one after the other: one layout for both.
+            let weak = weak.clone();
+            RESIZE_TIMER.with(|t| {
+                t.start(TimerMode::SingleShot, RESIZE_DEBOUNCE, move || {
+                    if let Some(ui) = weak.upgrade() {
+                        relayout(&ui);
+                    }
+                })
+            });
         }
     });
     ui.on_restart_admin({
