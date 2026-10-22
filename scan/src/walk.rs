@@ -29,7 +29,6 @@ const ROOT_ID: u64 = 0;
 struct Item {
     name: OsString,
     is_dir: bool,
-    reparse: bool,
     size: u64,
 }
 
@@ -60,7 +59,6 @@ fn list_dir(dir: &Path) -> io::Result<Vec<Item>> {
             let reparse = data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0;
             items.push(Item {
                 is_dir: data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0 && !reparse,
-                reparse,
                 size: (u64::from(data.nFileSizeHigh) << 32) | u64::from(data.nFileSizeLow),
                 name,
             });
@@ -109,8 +107,9 @@ fn walk_dir(ctx: &Ctx, dir: &Path, dir_id: u64) -> Result<Out, ScanError> {
     let (mut files, mut dirs) = (0, 0);
     for item in items {
         let id = ctx.next_id.fetch_add(1, Ordering::Relaxed);
-        // A reparse point is kept as a zero-size file entry: its target is not ours to count.
-        let size = if item.is_dir || item.reparse { 0 } else { item.size };
+        // A reparse point is a file entry and never followed. Its reported size is its own
+        // logical size: 0 for junctions and symlinks, the full size for cloud placeholders.
+        let size = if item.is_dir { 0 } else { item.size };
         if item.is_dir {
             dirs += 1;
             subdirs.push((dir.join(&item.name), id));

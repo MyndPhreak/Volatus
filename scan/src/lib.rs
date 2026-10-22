@@ -113,11 +113,17 @@ impl std::fmt::Display for ScanError {
 
 impl std::error::Error for ScanError {}
 
-/// Scans `root`. ponytail: always the walker until the MFT fast path lands (Phase 2).
+/// Scans `root`: reads the NTFS `$MFT` when elevated, else walks directories.
+/// Any MFT failure other than cancel (no admin, not NTFS, bad volume header or `$MFT` run
+/// list) falls back to the walker; `ScanStats::method` says which one ran.
 pub fn scan(
     root: &Path,
     progress: Sender<Progress>,
     cancel: &AtomicBool,
 ) -> Result<(Tree, ScanStats), ScanError> {
-    walk::walk(root, &progress, cancel)
+    match mft::scan(root, &progress, cancel) {
+        Err(ScanError::Cancelled) => Err(ScanError::Cancelled),
+        Err(_) => walk::walk(root, &progress, cancel),
+        done => done,
+    }
 }
