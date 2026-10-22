@@ -6,9 +6,9 @@ use common::ntfs::*;
 use scan::mft::{DataSize, FileName, Malformed, Record, entries, parse_record, scan_device};
 use scan::rollup::rollup;
 use scan::{Method, ScanError, ScanStats, Tree};
-use std::io::Cursor;
+use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::path::Path;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::channel;
 
 fn parse(mut bytes: Vec<u8>) -> Result<Option<Record>, Malformed> {
@@ -487,6 +487,45 @@ fn scan_device_cancel_flag_set_returns_cancelled() {
     );
 
     assert!(matches!(result, Err(ScanError::Cancelled)));
+}
+
+/// Read/seek seam: sets `cancel` when the reader seeks to byte `at`, then reads on normally.
+struct CancelOnSeek<'a> {
+    inner: Cursor<Vec<u8>>,
+    at: u64,
+    cancel: &'a AtomicBool,
+}
+
+impl Read for CancelOnSeek<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.inner.read(buf)
+    }
+}
+
+impl Seek for CancelOnSeek<'_> {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        let p = self.inner.seek(pos)?;
+        if p == self.at {
+            self.cancel.store(true, Ordering::Relaxed);
+        }
+        Ok(p)
+    }
+}
+
+#[test]
+fn scan_device_cancel_during_last_chunk_read_returns_cancelled() {
+    // The fixture $MFT has two runs; run B is read last. Cancel arrives while it is read.
+    let cancel = AtomicBool::new(false);
+    let mut dev = CancelOnSeek {
+        inner: Cursor::new(volume(&sample_volume())),
+        at: MFT_LCN_B * CLUSTER as u64,
+        cancel: &cancel,
+    };
+    let (tx, _rx) = channel();
+
+    let result = scan_device(&mut dev, Path::new(""), "X:\\", &tx, &cancel);
+
+    assert!(matches!(result, Err(ScanError::Cancelled)), "got {:?}", result.map(|(_, s)| s.files));
 }
 
 #[test]

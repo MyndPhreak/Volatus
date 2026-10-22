@@ -40,6 +40,11 @@ impl Drop for TempDir {
 /// Puts a third-party (non-surrogate) reparse tag on an existing file, like a cloud placeholder.
 /// Needs no admin rights: only symlink tags are privileged.
 pub fn make_placeholder(path: &Path) {
+    set_reparse_tag(path, 0x0000_0123);
+}
+
+/// Puts the third-party reparse `tag` on an existing file or directory.
+pub fn set_reparse_tag(path: &Path, tag: u32) {
     use std::os::windows::fs::OpenOptionsExt;
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT};
@@ -53,7 +58,7 @@ pub fn make_placeholder(path: &Path) {
         .unwrap();
     // REPARSE_GUID_DATA_BUFFER: tag, data length, reserved, GUID, data.
     let mut buf = Vec::new();
-    buf.extend_from_slice(&0x0000_0123u32.to_le_bytes());
+    buf.extend_from_slice(&tag.to_le_bytes());
     buf.extend_from_slice(&8u16.to_le_bytes());
     buf.extend_from_slice(&0u16.to_le_bytes());
     buf.extend_from_slice(&[0x5A; 16]);

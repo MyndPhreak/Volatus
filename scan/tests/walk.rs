@@ -1,6 +1,6 @@
 mod common;
 
-use common::{TempDir, make_placeholder};
+use common::{TempDir, make_placeholder, set_reparse_tag};
 use scan::{Method, ScanError, scan};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -88,6 +88,59 @@ fn scan_reparse_placeholder_file_counts_logical_size() {
     let (tree, _) = run(t.path(), &AtomicBool::new(false)).unwrap();
 
     assert_eq!(tree.node(tree.root()).size, 777);
+}
+
+/// Runs the walker alone, so these tests pin it even when the process is elevated.
+fn walk_only(dir: &Path) -> (scan::Tree, scan::ScanStats) {
+    let (tx, _rx) = channel();
+    scan::walk::walk(dir, &tx, &AtomicBool::new(false)).unwrap()
+}
+
+#[test]
+fn walk_hardlink_two_names_in_one_folder_counts_size_once() {
+    let t = TempDir::new();
+    let a = t.file("a.bin", 1000);
+    std::fs::hard_link(&a, t.path().join("b.bin")).unwrap();
+
+    let (tree, _) = walk_only(t.path());
+
+    assert_eq!(tree.node(tree.root()).size, 1000);
+}
+
+#[test]
+fn walk_hardlink_names_in_two_folders_count_size_once() {
+    let t = TempDir::new();
+    let x = t.file("a/x.bin", 5000);
+    std::fs::create_dir(t.path().join("b")).unwrap();
+    std::fs::hard_link(&x, t.path().join("b").join("y.bin")).unwrap();
+
+    let (tree, _) = walk_only(t.path());
+
+    assert_eq!(tree.node(tree.root()).size, 5000);
+}
+
+#[test]
+fn walk_hardlink_two_names_lists_one_file_like_mft() {
+    let t = TempDir::new();
+    let a = t.file("a.bin", 1000);
+    std::fs::hard_link(&a, t.path().join("b.bin")).unwrap();
+
+    let (_, stats) = walk_only(t.path());
+
+    assert_eq!(stats.files, 1);
+}
+
+#[test]
+fn walk_non_surrogate_reparse_directory_is_descended() {
+    let t = TempDir::new();
+    let d = t.path().join("synced");
+    std::fs::create_dir(&d).unwrap();
+    set_reparse_tag(&d, 0x1000_0123); // directory bit set, name-surrogate bit clear (cloud-like)
+    std::fs::write(d.join("inner.bin"), vec![0u8; 4321]).unwrap();
+
+    let (tree, _) = walk_only(t.path());
+
+    assert_eq!(tree.node(tree.root()).size, 4321);
 }
 
 /// Denies list-directory to the current user; restores on drop so cleanup works.
