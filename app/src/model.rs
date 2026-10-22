@@ -3,6 +3,7 @@
 
 use scan::{Method, ScanError, ScanStats};
 use std::io::ErrorKind;
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -194,6 +195,14 @@ pub fn error_message(e: &ScanError) -> String {
         ScanError::NoRoot => "The folder has no root entry.".into(),
         ScanError::Cancelled => "The scan was stopped.".into(),
     }
+}
+
+/// True when the "Restart as administrator" button helps: the scan fell back to the walker, the
+/// user is not an administrator, and `root` (canonical) is a whole drive. Only a whole drive
+/// takes the MFT path, so for a sub-folder the button would change nothing.
+pub fn offer_elevation(method: Method, root: &Path, is_admin: bool) -> bool {
+    let _ = (method, root, is_admin);
+    unimplemented!("offer_elevation")
 }
 
 /// Text for the status banner in each state. Never empty.
@@ -646,6 +655,24 @@ mod tests {
             for e in &events {
                 assert_eq!(next(s.clone(), e.clone()), s, "{s:?} + {e:?}");
             }
+        }
+    }
+
+    #[test]
+    fn offer_elevation_covers_every_method_root_and_admin_combination() {
+        let cases = [
+            (Method::Walk, r"C:\", false, true),
+            (Method::Walk, r"\?\C:\", false, true),
+            (Method::Walk, r"C:\Users", false, false),
+            (Method::Walk, r"\?\C:\Users\mynd", false, false),
+            (Method::Walk, r"C:\", true, false),
+            (Method::Mft, r"C:\", false, false),
+            (Method::Mft, r"C:\", true, false),
+            (Method::Mft, r"C:\Users", false, false),
+            (Method::Walk, r"C:\Users", true, false),
+        ];
+        for (method, root, admin, want) in cases {
+            assert_eq!(offer_elevation(method, Path::new(root), admin), want, "{method:?} {root} admin={admin}");
         }
     }
 }
