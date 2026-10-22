@@ -11,7 +11,7 @@ mod model;
 mod nav;
 mod tree_view;
 
-use model::{Event, ScanState, Summary, banner_text, error_message, format_size, group_digits, next};
+use model::{Event, ScanControl, ScanState, Summary, banner_text, error_message, format_size, group_digits};
 use nav::{Dir, TreeMove};
 use scan::{Method, NodeId, Progress, ScanError, Tree};
 use slint::{
@@ -21,7 +21,6 @@ use slint::{
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 use tree_view::{Row, SortKey, ViewState};
@@ -98,36 +97,37 @@ struct Loaded {
 
 /// UI-thread state. Events from worker threads are applied here via `invoke_from_event_loop`.
 struct Session {
-    state: ScanState,
+    /// State, id and stop flag of the current scan. Events from an older scan are dropped.
+    scan: ScanControl,
     loaded: Option<Loaded>,
     /// Treemap area in logical pixels, set by the window on every resize.
     map_size: (f32, f32),
-    /// Id of the current scan. Events from an older scan are dropped.
-    generation: u64,
     /// Id of the latest treemap layout request. Results of older requests are dropped.
     layout_seq: u64,
-    cancel: Arc<AtomicBool>,
 }
 
 thread_local! {
     static SESSION: RefCell<Session> = RefCell::new(Session {
-        state: ScanState::Idle,
+        scan: ScanControl::default(),
         loaded: None,
         map_size: (0.0, 0.0),
-        generation: 0,
         layout_seq: 0,
-        cancel: Arc::new(AtomicBool::new(false)),
     });
     /// Starts one relayout after the window stops changing the treemap size.
     static RESIZE_TIMER: Timer = Timer::default();
 }
 
-/// Applies `event` to the session and pushes the new state into the window.
-fn apply(ui: &MainWindow, event: Event) {
-    let state = SESSION.with_borrow_mut(|s| {
-        s.state = next(std::mem::replace(&mut s.state, ScanState::Idle), event);
-        s.state.clone()
-    });
+/// Applies `event` from scan `generation` and shows the new state. Dropped if a newer scan
+/// started or the scan was cancelled.
+fn apply(ui: &MainWindow, generation: u64, event: Event) {
+    if SESSION.with_borrow_mut(|s| s.scan.apply(generation, event)) {
+        show_state(ui);
+    }
+}
+
+/// Pushes the scan state into the window.
+fn show_state(ui: &MainWindow) {
+    let state = SESSION.with_borrow(|s| s.scan.state().clone());
     ui.set_scanning(matches!(state, ScanState::Scanning { .. }));
     ui.set_banner_is_error(matches!(state, ScanState::Error(_)));
     ui.set_banner(banner_text(&state).into());
@@ -180,7 +180,7 @@ fn relayout(ui: &MainWindow) {
         let (w, h) = ((lw * scale).round() as u32, (lh * scale).round() as u32);
         let (data, root) = (l.data.clone(), l.view_root);
         s.layout_seq += 1;
-        Some((data, root, s.generation, s.layout_seq, w, h))
+        Some((data, root, s.scan.generation(), s.layout_seq, w, h))
     }) else {
         return;
     };
@@ -191,7 +191,7 @@ fn relayout(ui: &MainWindow) {
             .then(|| SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(&treemap::render(&rects, w, h), w, h));
         // Err means the event loop has stopped: nothing left to update.
         let _ = slint::invoke_from_event_loop(move || {
-            let current = SESSION.with_borrow(|s| (s.generation, s.layout_seq));
+            let current = SESSION.with_borrow(|s| (s.scan.generation(), s.layout_seq));
             if let Some(ui) = weak.upgrade().filter(|_| current == (generation, seq)) {
                 show_layout(&ui, root, rects, image);
             }
@@ -265,14 +265,13 @@ fn clear(ui: &MainWindow) {
     ui.set_selected_row(-1);
 }
 
-/// Queues `event` for the UI thread. Dropped if a newer scan has started.
+/// Queues `event` for the UI thread. Dropped if a newer scan has started or the scan was cancelled.
 fn post(ui: &Weak<MainWindow>, generation: u64, event: Event) {
     let ui = ui.clone();
     // Err means the event loop has stopped: nothing left to update.
     let _ = slint::invoke_from_event_loop(move || {
-        let current = SESSION.with_borrow(|s| s.generation);
-        if let Some(ui) = ui.upgrade().filter(|_| current == generation) {
-            apply(&ui, event);
+        if let Some(ui) = ui.upgrade() {
+            apply(&ui, generation, event);
         }
     });
 }
@@ -281,32 +280,34 @@ fn post(ui: &Weak<MainWindow>, generation: u64, event: Event) {
 fn post_done(ui: &Weak<MainWindow>, generation: u64, data: Data, summary: Summary) {
     let ui = ui.clone();
     let _ = slint::invoke_from_event_loop(move || {
-        let current = SESSION.with_borrow(|s| s.generation);
-        if let Some(ui) = ui.upgrade().filter(|_| current == generation) {
+        let current = SESSION.with_borrow(|s| s.scan.is_current(generation));
+        if let Some(ui) = ui.upgrade().filter(|_| current) {
             install(&ui, Arc::new(data));
-            apply(&ui, Event::Finished(summary));
+            apply(&ui, generation, Event::Finished(summary));
         }
     });
 }
 
+/// Stops the running scan. The window shows "Scan stopped" at once; the worker ends in the
+/// background and its late events are dropped.
+fn cancel_scan(ui: &MainWindow) {
+    if SESSION.with_borrow_mut(|s| s.scan.cancel()) {
+        show_state(ui);
+    }
+}
+
 fn start_scan(ui: &MainWindow, path: &str) {
     let path = path.trim();
-    if SESSION.with_borrow(|s| matches!(s.state, ScanState::Scanning { .. })) {
+    let Some((generation, cancel)) = SESSION.with_borrow_mut(|s| s.scan.start()) else {
         return;
-    }
-    let generation = SESSION.with_borrow_mut(|s| {
-        s.generation += 1;
-        s.cancel = Arc::new(AtomicBool::new(false));
-        s.generation
-    });
-    apply(ui, Event::Start);
+    };
+    show_state(ui);
     clear(ui);
     ui.set_elevate_note(SharedString::new());
     if path.is_empty() {
-        apply(ui, Event::Failed("Choose a folder or drive first.".into()));
+        apply(ui, generation, Event::Failed("Choose a folder or drive first.".into()));
         return;
     }
-    let cancel = SESSION.with_borrow(|s| s.cancel.clone());
     let root = PathBuf::from(path);
     let weak = ui.as_weak();
     let (tx, rx) = mpsc::channel::<Progress>();
@@ -561,7 +562,14 @@ fn main() {
             }
         }
     });
-    ui.on_cancel(|| SESSION.with_borrow(|s| s.cancel.store(true, Ordering::Relaxed)));
+    ui.on_cancel({
+        let weak = ui.as_weak();
+        move || {
+            if let Some(ui) = weak.upgrade() {
+                cancel_scan(&ui);
+            }
+        }
+    });
     ui.on_browse({
         let weak = ui.as_weak();
         move || {

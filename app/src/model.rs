@@ -81,36 +81,56 @@ impl Default for ScanControl {
 
 impl ScanControl {
     pub fn state(&self) -> &ScanState {
-        unimplemented!("ScanControl::state")
+        &self.state
     }
 
     pub fn generation(&self) -> u64 {
-        unimplemented!("ScanControl::generation")
+        self.generation
     }
 
     /// True if events from scan `generation` still apply.
     pub fn is_current(&self, generation: u64) -> bool {
-        let _ = generation;
-        unimplemented!("ScanControl::is_current")
+        generation == self.generation
+    }
+
+    fn is_scanning(&self) -> bool {
+        matches!(self.state, ScanState::Scanning { .. })
     }
 
     /// Starts a scan: a new id, a new unset stop flag and state `Scanning`.
     /// `None` while a scan runs.
     pub fn start(&mut self) -> Option<(u64, Arc<AtomicBool>)> {
-        unimplemented!("ScanControl::start")
+        if self.is_scanning() {
+            return None;
+        }
+        self.generation += 1;
+        self.cancel = Arc::new(AtomicBool::new(false));
+        self.state = next(std::mem::replace(&mut self.state, ScanState::Idle), Event::Start);
+        Some((self.generation, self.cancel.clone()))
     }
 
     /// Stops the running scan at once: sets its flag, retires its id and moves to `Cancelled`.
     /// Its worker ends in the background and what it posts later is dropped.
     /// `false`, and no change, if no scan runs.
+    /// ponytail: a cancelled walker can run on for about a second while a new scan starts, so
+    /// two walkers may share the disk and memory briefly. Upgrade path: join the old worker first.
     pub fn cancel(&mut self) -> bool {
-        unimplemented!("ScanControl::cancel")
+        if !self.is_scanning() {
+            return false;
+        }
+        self.cancel.store(true, Ordering::Relaxed);
+        self.generation += 1;
+        self.state = next(std::mem::replace(&mut self.state, ScanState::Idle), Event::Cancelled);
+        true
     }
 
     /// Applies `event` from scan `generation`. `false`, and no change, if that scan is not current.
     pub fn apply(&mut self, generation: u64, event: Event) -> bool {
-        let _ = (generation, event);
-        unimplemented!("ScanControl::apply")
+        if !self.is_current(generation) {
+            return false;
+        }
+        self.state = next(std::mem::replace(&mut self.state, ScanState::Idle), event);
+        true
     }
 }
 
