@@ -87,10 +87,10 @@ fn parity_temp_tree_walker_and_mft_image_counts_equal() {
 /// Flushes a file's or folder's data and MFT record so a raw volume read sees it.
 fn flush(path: &Path) {
     use std::os::windows::fs::OpenOptionsExt;
-    use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
+    use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT};
     fs::OpenOptions::new()
         .write(true)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
         .open(path)
         .and_then(|f| f.sync_all())
         .unwrap_or_else(|e| panic!("flush {}: {e}", path.display()));
