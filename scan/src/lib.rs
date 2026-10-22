@@ -40,21 +40,31 @@ pub struct Tree {
 
 impl Tree {
     pub fn root(&self) -> NodeId {
-        unimplemented!()
+        self.root
     }
-    pub fn node(&self, _n: NodeId) -> &Node {
-        unimplemented!()
+
+    pub fn node(&self, n: NodeId) -> &Node {
+        &self.nodes[n.0 as usize]
     }
-    pub fn name(&self, _n: NodeId) -> &str {
-        unimplemented!()
+
+    pub fn name(&self, n: NodeId) -> &str {
+        let r = self.node(n).name;
+        &self.names[r.start as usize..(r.start + r.len) as usize]
     }
-    #[allow(unreachable_code)]
-    pub fn children(&self, _n: NodeId) -> impl Iterator<Item = NodeId> + '_ {
-        unimplemented!();
-        std::iter::empty()
+
+    pub fn children(&self, n: NodeId) -> impl Iterator<Item = NodeId> + '_ {
+        std::iter::successors(self.node(n).first_child, move |&c| self.node(c).next_sibling)
     }
-    pub fn path(&self, _n: NodeId) -> PathBuf {
-        unimplemented!()
+
+    /// Names from the root down to `n`, joined. The root's name is its full path.
+    pub fn path(&self, n: NodeId) -> PathBuf {
+        let mut parts = Vec::new();
+        let mut cur = Some(n);
+        while let Some(c) = cur {
+            parts.push(self.name(c));
+            cur = self.node(c).parent;
+        }
+        parts.iter().rev().collect()
     }
 }
 
@@ -102,10 +112,11 @@ impl std::fmt::Display for ScanError {
 
 impl std::error::Error for ScanError {}
 
+/// Scans `root`. ponytail: always the walker until the MFT fast path lands (Phase 2).
 pub fn scan(
-    _root: &Path,
-    _progress: Sender<Progress>,
-    _cancel: &AtomicBool,
+    root: &Path,
+    progress: Sender<Progress>,
+    cancel: &AtomicBool,
 ) -> Result<(Tree, ScanStats), ScanError> {
-    unimplemented!()
+    walk::walk(root, &progress, cancel)
 }
