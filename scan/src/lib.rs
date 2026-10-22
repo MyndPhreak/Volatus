@@ -1,7 +1,8 @@
 //! Disk-usage scanner: builds a size-rolled-up `Tree` of a folder or volume.
 
+pub mod mft;
 pub mod rollup;
-mod walk;
+pub mod walk;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;

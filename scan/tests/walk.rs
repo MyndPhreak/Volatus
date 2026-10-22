@@ -1,6 +1,6 @@
 mod common;
 
-use common::TempDir;
+use common::{TempDir, make_placeholder};
 use scan::{Method, ScanError, scan};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -77,6 +77,17 @@ fn scan_junction_is_not_followed() {
 
     assert_eq!(tree.node(tree.root()).size, 5000);
     assert_eq!(stats.files, 2, "big.bin plus the junction entry itself");
+}
+
+#[test]
+fn scan_reparse_placeholder_file_counts_logical_size() {
+    let t = TempDir::new();
+    let p = t.file("cloud.docx", 777);
+    make_placeholder(&p);
+
+    let (tree, _) = run(t.path(), &AtomicBool::new(false)).unwrap();
+
+    assert_eq!(tree.node(tree.root()).size, 777);
 }
 
 /// Denies list-directory to the current user; restores on drop so cleanup works.

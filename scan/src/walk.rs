@@ -141,7 +141,8 @@ fn walk_dir(ctx: &Ctx, dir: &Path, dir_id: u64) -> Result<Out, ScanError> {
     Ok(out)
 }
 
-pub(crate) fn walk(
+/// Scans `root` with the directory walker only (no MFT attempt).
+pub fn walk(
     root: &Path,
     progress: &Sender<Progress>,
     cancel: &AtomicBool,
