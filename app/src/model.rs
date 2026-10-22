@@ -206,17 +206,18 @@ pub fn offer_elevation(method: Method, root: &Path, is_admin: bool) -> bool {
 
 /// Text for the status banner in each state. Never empty. `offer_elevation` is the result of
 /// [`offer_elevation`] for the finished scan: the restart hint shows only when the button does.
-pub fn banner_text(state: &ScanState, _offer_elevation: bool) -> String {
+pub fn banner_text(state: &ScanState, offer_elevation: bool) -> String {
     match state {
         ScanState::Idle => "Choose a folder or drive. Then select Scan.".into(),
         ScanState::Scanning { files, dirs } => {
             format!("Scanning. {} files, {} folders so far.", group_digits(*files), group_digits(*dirs))
         }
         ScanState::Done(s) => {
-            let (name, hint) = match s.method {
-                Method::Mft => ("Fast scan (MFT)", ""),
-                Method::Walk => ("Standard scan", " Restart as administrator to scan a whole drive faster."),
+            let name = match s.method {
+                Method::Mft => "Fast scan (MFT)",
+                Method::Walk => "Standard scan",
             };
+            let hint = if offer_elevation && s.method == Method::Walk { " Restart as administrator to scan a whole drive faster." } else { "" };
             format!(
                 "{name}. {} in {} files and {} folders. {} skipped. {}.{hint}",
                 format_size(s.total),
