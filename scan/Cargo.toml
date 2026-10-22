@@ -11,3 +11,8 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage
 
 [target.'cfg(windows)'.dev-dependencies]
 windows-sys = { version = "0.61", features = ["Win32_System_IO", "Win32_System_Ioctl"] }
+
+# The benchmark (docs/BENCHMARK.md). `test = true`: its smoke test runs with `cargo test`.
+[[example]]
+name = "bench"
+test = true
