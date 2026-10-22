@@ -99,6 +99,8 @@ fn walk_dir(ctx: &Ctx, dir: &Path, dir_id: u64) -> Result<Out, ScanError> {
     }
     let items = match list_dir(dir) {
         Ok(items) => items,
+        // An unreadable root is a scan failure, never an empty result.
+        Err(e) if dir_id == ROOT_ID => return Err(ScanError::Io(e)),
         // Unreadable directory: keep the node, count it, carry on.
         Err(_) => return Ok(Out { entries: Vec::new(), skipped: 1 }),
     };
