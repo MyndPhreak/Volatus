@@ -9,14 +9,14 @@
 //! same). A file with several hard links is one entry, under its first non-DOS name.
 
 use crate::rollup::{RawEntry, Rolled, rollup};
-use crate::{Method, NodeId, Phases, Progress, ScanError, ScanStats, Tree};
+use crate::{DEFAULT_CHUNK, Method, NodeId, Phases, Progress, ScanError, ScanStats, Tree};
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Component, Path, Prefix};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::Sender;
-use std::time::Instant;
+use std::sync::mpsc::{Receiver, Sender, SyncSender, channel, sync_channel};
+use std::time::{Duration, Instant};
 
 /// Record number of the volume's root directory.
 pub const ROOT_RECORD: u64 = 5;
@@ -68,9 +68,8 @@ const REPARSE_POINT: u32 = 0xC0;
 const DOS_NAMESPACE: u8 = 2;
 const COMPRESSED_OR_SPARSE: u16 = 0x0001 | 0x8000;
 pub(crate) const NAME_SURROGATE: u32 = 0x2000_0000;
-/// Bytes read per I/O call. ponytail: fixed size, read then parse; P4 tunes the size and overlaps
-/// reading with parsing.
-const CHUNK: usize = 4 << 20;
+/// Read buffers shared by the reader and the parser: one being read, one queued, one parsed.
+const BUFFERS: usize = 3;
 
 fn get<const N: usize>(b: &[u8], at: usize) -> Option<[u8; N]> {
     b.get(at..at.checked_add(N)?)?.try_into().ok()
@@ -364,12 +363,120 @@ fn parse_records(
     Ok((records, skipped))
 }
 
-/// Reads every `$MFT` record: large sequential reads along the run list, parsed per chunk.
-fn read_mft<R: Read + Seek>(
+/// Byte ranges `(offset, length)` of `$MFT` on the volume, in order, covering `data_size`
+/// rounded up to whole clusters. The caller has checked that the runs cover `data_size`.
+fn extents(runs: &[(u64, u64)], cluster: u64, data_size: u64) -> Result<Vec<(u64, u64)>, ScanError> {
+    let mut want = data_size.div_ceil(cluster) * cluster;
+    let mut out = Vec::new();
+    for &(lcn, len) in runs {
+        if want == 0 {
+            break;
+        }
+        // `len * cluster` cannot overflow: the caller summed it with checked arithmetic.
+        let n = (len * cluster).min(want);
+        let at = lcn
+            .checked_mul(cluster)
+            .filter(|a| a.checked_add(n).is_some())
+            .ok_or_else(|| bad("bad $MFT run"))?;
+        out.push((at, n));
+        want -= n;
+    }
+    Ok(out)
+}
+
+/// One buffer of `$MFT` bytes: the number of its first record and the length of its whole
+/// records inside `$MFT`'s data size.
+struct Batch {
+    first: u64,
+    buf: Vec<u8>,
+    len: usize,
+}
+
+/// Reads `extents` into the buffers from `empty` and sends each one to `full` when it is full.
+/// Buffers hold whole records, so a record split across two runs is joined here. Checks
+/// `cancel` before each read. Returns its busy time; returns early, without error, when the
+/// parser has stopped.
+fn read_batches<R: Read + Seek>(
+    dev: &mut R,
+    extents: &[(u64, u64)],
+    (data_size, record): (u64, usize),
+    full: SyncSender<Batch>,
+    empty: Receiver<Vec<u8>>,
+    cancel: &AtomicBool,
+) -> Result<Duration, ScanError> {
+    let mut busy = Duration::ZERO;
+    let (mut first, mut filled) = (0u64, 0usize);
+    let Ok(mut buf) = empty.recv() else { return Ok(busy) };
+    let batch = |first: u64, buf: Vec<u8>, filled: usize| {
+        let inside = data_size.saturating_sub(first * record as u64).min(filled as u64) as usize;
+        Batch { first, buf, len: inside / record * record }
+    };
+    for &(mut at, mut left) in extents {
+        while left > 0 {
+            if cancel.load(Ordering::Relaxed) {
+                return Err(ScanError::Cancelled);
+            }
+            let n = ((buf.len() - filled) as u64).min(left) as usize;
+            let t = Instant::now();
+            read_at(dev, at, &mut buf[filled..filled + n])?;
+            busy += t.elapsed();
+            (at, left, filled) = (at + n as u64, left - n as u64, filled + n);
+            if filled == buf.len() {
+                if full.send(batch(first, buf, filled)).is_err() {
+                    return Ok(busy);
+                }
+                first += (filled / record) as u64;
+                filled = 0;
+                buf = match empty.recv() {
+                    Ok(b) => b,
+                    Err(_) => return Ok(busy),
+                };
+            }
+        }
+    }
+    if filled > 0 {
+        let _ = full.send(batch(first, buf, filled));
+    }
+    Ok(busy)
+}
+
+/// Parses each batch from `full` and gives its buffer back to `empty`. Ends when the reader
+/// stops sending. Returns the records in use, the count of malformed ones and the busy time.
+fn parse_batches(
+    full: Receiver<Batch>,
+    empty: Sender<Vec<u8>>,
+    record: usize,
+    progress: &Sender<Progress>,
+    cancel: &AtomicBool,
+) -> Result<(Vec<Record>, u64, Duration), ScanError> {
+    let (mut records, mut skipped, mut busy) = (Vec::new(), 0u64, Duration::ZERO);
+    let (mut files, mut dirs) = (0u64, 0u64);
+    for mut b in full {
+        let t = Instant::now();
+        let (parsed, bad_count) = parse_records(&mut b.buf[..b.len], record, b.first, cancel)?;
+        busy += t.elapsed();
+        skipped += bad_count;
+        for r in parsed.iter().filter(|r| r.base.is_none()) {
+            if r.is_dir { dirs += 1 } else { files += 1 }
+        }
+        records.extend(parsed);
+        // Err: the reader has sent its last batch and needs no more buffers.
+        let _ = empty.send(b.buf);
+        let _ = progress.send(Progress { files, dirs });
+    }
+    Ok((records, skipped, busy))
+}
+
+/// Reads every `$MFT` record along the run list, `chunk` bytes per read. A reader thread fills
+/// the buffers while this thread parses the previous ones (in parallel, on the current rayon
+/// pool), so the disk and the CPUs work at the same time.
+fn read_mft<R: Read + Seek + Send>(
     dev: &mut R,
     progress: &Sender<Progress>,
     cancel: &AtomicBool,
-) -> Result<(Vec<Record>, u64), ScanError> {
+    chunk: usize,
+) -> Result<(Vec<Record>, u64, Phases), ScanError> {
+    let started = Instant::now();
     let mut boot = vec![0u8; 4096];
     read_at(dev, 0, &mut boot)?;
     let g = parse_boot(&boot).ok_or_else(|| bad("not an NTFS volume"))?;
@@ -383,43 +490,32 @@ fn read_mft<R: Read + Seek>(
     if covered.is_none_or(|c| c < data_size) {
         return Err(bad("$MFT run list is incomplete"));
     }
+    let open = started.elapsed();
 
-    let (mut records, mut skipped) = (Vec::new(), 0u64);
-    let (mut files, mut dirs, mut next) = (0u64, 0u64, 0u64);
-    let mut remaining = data_size;
-    let mut pending: Vec<u8> = Vec::new();
-    for (lcn, len) in runs {
-        // `len * cluster` cannot overflow: `covered` summed it with checked arithmetic.
-        let mut left = len * g.cluster;
-        let mut at = lcn
-            .checked_mul(g.cluster)
-            .filter(|a| a.checked_add(left).is_some())
-            .ok_or_else(|| bad("bad $MFT run"))?;
-        while left > 0 && remaining > 0 {
-            if cancel.load(Ordering::Relaxed) {
-                return Err(ScanError::Cancelled);
-            }
-            let n = left.min(CHUNK as u64);
-            let start = pending.len();
-            pending.resize(start + n as usize, 0);
-            read_at(dev, at, &mut pending[start..])?;
-            pending.truncate(start + n.min(remaining) as usize);
-            (at, left, remaining) = (at + n, left - n, remaining - n.min(remaining));
-
-            // A record may straddle two runs: only whole records are parsed, the rest waits.
-            let whole = pending.len() / g.record * g.record;
-            let (parsed, bad_count) = parse_records(&mut pending[..whole], g.record, next, cancel)?;
-            next += (whole / g.record) as u64;
-            skipped += bad_count;
-            for r in parsed.iter().filter(|r| r.base.is_none()) {
-                if r.is_dir { dirs += 1 } else { files += 1 }
-            }
-            records.extend(parsed);
-            pending.drain(..whole);
-            let _ = progress.send(Progress { files, dirs });
-        }
+    let extents = extents(&runs, g.cluster, data_size)?;
+    let total: u64 = extents.iter().map(|&(_, n)| n).sum();
+    // Buffers of whole units: no record is cut at a buffer edge, and every read starts and
+    // ends on a cluster (so a sector) boundary. The unit is a multiple of both sizes: the
+    // record size is a power of two or a whole number of clusters (`parse_boot`).
+    let unit = g.cluster.max(g.record as u64);
+    let size = ((chunk as u64 / unit).max(1) * unit).min(total.div_ceil(unit).saturating_mul(unit)) as usize;
+    let (full_tx, full_rx) = sync_channel(BUFFERS);
+    let (empty_tx, empty_rx) = channel();
+    for _ in 0..BUFFERS {
+        let _ = empty_tx.send(vec![0u8; size]);
     }
-    Ok((records, skipped))
+    let record = g.record;
+    let (read, parsed) = std::thread::scope(|s| {
+        let reader =
+            s.spawn(move || read_batches(dev, &extents, (data_size, record), full_tx, empty_rx, cancel));
+        // Returning drops this side of both channels, so a waiting reader wakes and stops.
+        let parsed = parse_batches(full_rx, empty_tx, record, progress, cancel);
+        (reader.join().unwrap_or_else(|p| std::panic::resume_unwind(p)), parsed)
+    });
+    // A reader error means records are missing: fail, never a partial tree.
+    let read = read?;
+    let (records, skipped, parse) = parsed?;
+    Ok((records, skipped, Phases { open, read, parse, rollup: Duration::ZERO }))
 }
 
 /// Re-roots `tree` at `node`: its subtree as flat entries, the new root named `name`.
@@ -448,15 +544,29 @@ fn subtree(tree: &Tree, node: NodeId, name: &str) -> Vec<RawEntry> {
 
 /// Reads `$MFT` from an NTFS volume (or image) and builds the tree of `sub`, a path relative
 /// to the volume root (empty = whole volume). The tree root is named `root_name`.
-pub fn scan_device<R: Read + Seek>(
+pub fn scan_device<R: Read + Seek + Send>(
     dev: &mut R,
     sub: &Path,
     root_name: &str,
     progress: &Sender<Progress>,
     cancel: &AtomicBool,
 ) -> Result<(Tree, ScanStats), ScanError> {
+    scan_device_with(dev, sub, root_name, progress, cancel, DEFAULT_CHUNK)
+}
+
+/// `scan_device` reading `chunk` bytes per call (rounded down to whole records and clusters,
+/// at least one of each), with reading and parsing overlapped. The caller picks the thread pool.
+pub fn scan_device_with<R: Read + Seek + Send>(
+    dev: &mut R,
+    sub: &Path,
+    root_name: &str,
+    progress: &Sender<Progress>,
+    cancel: &AtomicBool,
+    chunk: usize,
+) -> Result<(Tree, ScanStats), ScanError> {
     let started = Instant::now();
-    let (records, bad_records) = read_mft(dev, progress, cancel)?;
+    let (records, bad_records, mut phases) = read_mft(dev, progress, cancel, chunk)?;
+    let rollup_started = Instant::now();
     let (mut list, unusable) = entries(records);
     if let Some(root) = list.iter_mut().find(|e| e.id == ROOT_RECORD) {
         root.name = root_name.to_owned();
@@ -480,30 +590,17 @@ pub fn scan_device<R: Read + Seek>(
         }
         rollup(u64::from(node.0), subtree(t, node, root_name))?
     };
+    phases.rollup = rollup_started.elapsed();
     let stats = ScanStats {
         files: rolled.files,
         dirs: rolled.dirs,
         skipped: skipped + rolled.skipped,
         elapsed: started.elapsed(),
         method: Method::Mft,
-        phases: Phases::default(),
-        threads: 0,
+        phases,
+        threads: rayon::current_num_threads(),
     };
     Ok((rolled.tree, stats))
-}
-
-/// `scan_device` reading `chunk` bytes per call (rounded down to whole records and clusters,
-/// at least one of each), with reading and parsing overlapped. The caller picks the thread pool.
-pub fn scan_device_with<R: Read + Seek + Send>(
-    dev: &mut R,
-    sub: &Path,
-    root_name: &str,
-    progress: &Sender<Progress>,
-    cancel: &AtomicBool,
-    chunk: usize,
-) -> Result<(Tree, ScanStats), ScanError> {
-    let _ = (dev, sub, root_name, progress, cancel, chunk);
-    unimplemented!("scan_device_with")
 }
 
 /// MFT scan of `root` on its local volume. Fails (and `scan` falls back to the walker) when
@@ -512,7 +609,9 @@ pub(crate) fn scan(
     root: &Path,
     progress: &Sender<Progress>,
     cancel: &AtomicBool,
+    chunk: usize,
 ) -> Result<(Tree, ScanStats), ScanError> {
+    let started = Instant::now();
     let full = std::fs::canonicalize(root).map_err(ScanError::Io)?;
     let mut parts = full.components();
     let letter = match parts.next() {
@@ -525,5 +624,9 @@ pub(crate) fn scan(
     let sub: std::path::PathBuf = parts.filter(|c| matches!(c, Component::Normal(_))).collect();
     // Read-only: `File::open` asks for read access only. Denied without Administrator rights.
     let mut dev = std::fs::File::open(format!(r"\\.\{letter}:")).map_err(ScanError::Io)?;
-    scan_device(&mut dev, &sub, &root.display().to_string(), progress, cancel)
+    let opened = started.elapsed();
+    let (tree, mut stats) = scan_device_with(&mut dev, &sub, &root.display().to_string(), progress, cancel, chunk)?;
+    stats.phases.open += opened;
+    stats.elapsed += opened;
+    Ok((tree, stats))
 }

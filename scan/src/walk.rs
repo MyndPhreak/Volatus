@@ -213,6 +213,7 @@ pub fn walk(
         cancel,
     };
     let out = walk_dir(&ctx, root, ROOT_ID)?;
+    let read = started.elapsed();
     let mut entries = drop_extra_links(out.entries);
     entries.push(RawEntry {
         id: ROOT_ID,
@@ -223,14 +224,15 @@ pub fn walk(
         is_dir: true,
     });
     let rolled = rollup(ROOT_ID, entries)?;
+    let phases = Phases { read, rollup: started.elapsed() - read, ..Phases::default() };
     let stats = ScanStats {
         files: rolled.files,
         dirs: rolled.dirs,
         skipped: out.skipped + rolled.skipped,
         elapsed: started.elapsed(),
         method: Method::Walk,
-        phases: Phases::default(),
-        threads: 0,
+        phases,
+        threads: rayon::current_num_threads(),
     };
     Ok((rolled.tree, stats))
 }

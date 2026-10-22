@@ -121,7 +121,7 @@ pub struct ScanOptions {
 
 impl Default for ScanOptions {
     fn default() -> Self {
-        unimplemented!("ScanOptions::default")
+        Self { chunk: DEFAULT_CHUNK, threads: None, method: None }
     }
 }
 
@@ -159,11 +159,7 @@ pub fn scan(
     progress: Sender<Progress>,
     cancel: &AtomicBool,
 ) -> Result<(Tree, ScanStats), ScanError> {
-    match mft::scan(root, &progress, cancel) {
-        Err(ScanError::Cancelled) => Err(ScanError::Cancelled),
-        Err(_) => walk::walk(root, &progress, cancel),
-        done => done,
-    }
+    scan_with(root, progress, cancel, &ScanOptions::default())
 }
 
 /// `scan` with tuning knobs. `opts.method` set to one scanner runs only that one, with no
@@ -174,6 +170,21 @@ pub fn scan_with(
     cancel: &AtomicBool,
     opts: &ScanOptions,
 ) -> Result<(Tree, ScanStats), ScanError> {
-    let _ = (root, progress, cancel, opts);
-    unimplemented!("scan_with")
+    let run = || match opts.method {
+        Some(Method::Mft) => mft::scan(root, &progress, cancel, opts.chunk),
+        Some(Method::Walk) => walk::walk(root, &progress, cancel),
+        None => match mft::scan(root, &progress, cancel, opts.chunk) {
+            Err(ScanError::Cancelled) => Err(ScanError::Cancelled),
+            Err(_) => walk::walk(root, &progress, cancel),
+            done => done,
+        },
+    };
+    match opts.threads {
+        None => run(),
+        Some(n) => rayon::ThreadPoolBuilder::new()
+            .num_threads(n)
+            .build()
+            .map_err(|e| ScanError::Io(std::io::Error::other(e)))?
+            .install(run),
+    }
 }
