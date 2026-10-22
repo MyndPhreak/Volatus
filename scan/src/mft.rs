@@ -67,7 +67,7 @@ const DATA: u32 = 0x80;
 const REPARSE_POINT: u32 = 0xC0;
 const DOS_NAMESPACE: u8 = 2;
 const COMPRESSED_OR_SPARSE: u16 = 0x0001 | 0x8000;
-const NAME_SURROGATE: u32 = 0x2000_0000;
+pub(crate) const NAME_SURROGATE: u32 = 0x2000_0000;
 /// Bytes read per I/O call. ponytail: fixed size, read then parse; P4 tunes the size and overlaps
 /// reading with parsing.
 const CHUNK: usize = 4 << 20;
@@ -78,10 +78,10 @@ fn get<const N: usize>(b: &[u8], at: usize) -> Option<[u8; N]> {
 fn u16_at(b: &[u8], at: usize) -> Option<u16> {
     get(b, at).map(u16::from_le_bytes)
 }
-fn u32_at(b: &[u8], at: usize) -> Option<u32> {
+pub(crate) fn u32_at(b: &[u8], at: usize) -> Option<u32> {
     get(b, at).map(u32::from_le_bytes)
 }
-fn u64_at(b: &[u8], at: usize) -> Option<u64> {
+pub(crate) fn u64_at(b: &[u8], at: usize) -> Option<u64> {
     get(b, at).map(u64::from_le_bytes)
 }
 
@@ -336,12 +336,23 @@ fn read_at<R: Read + Seek>(dev: &mut R, offset: u64, buf: &mut [u8]) -> Result<(
 }
 
 /// Parses whole records in parallel. Returns records in use and the count of malformed ones.
-fn parse_records(buf: &mut [u8], record: usize, first: u64) -> (Vec<Record>, u64) {
+/// Checks `cancel` before each record.
+fn parse_records(
+    buf: &mut [u8],
+    record: usize,
+    first: u64,
+    cancel: &AtomicBool,
+) -> Result<(Vec<Record>, u64), ScanError> {
     let parsed: Vec<_> = buf
         .par_chunks_mut(record)
         .enumerate()
-        .map(|(i, r)| parse_record(r, first + i as u64))
-        .collect();
+        .map(|(i, r)| {
+            if cancel.load(Ordering::Relaxed) {
+                return Err(ScanError::Cancelled);
+            }
+            Ok(parse_record(r, first + i as u64))
+        })
+        .collect::<Result<_, _>>()?;
     let mut skipped = 0;
     let records = parsed
         .into_iter()
@@ -350,7 +361,7 @@ fn parse_records(buf: &mut [u8], record: usize, first: u64) -> (Vec<Record>, u64
             None
         }))
         .collect();
-    (records, skipped)
+    Ok((records, skipped))
 }
 
 /// Reads every `$MFT` record: large sequential reads along the run list, parsed per chunk.
@@ -397,7 +408,7 @@ fn read_mft<R: Read + Seek>(
 
             // A record may straddle two runs: only whole records are parsed, the rest waits.
             let whole = pending.len() / g.record * g.record;
-            let (parsed, bad_count) = parse_records(&mut pending[..whole], g.record, next);
+            let (parsed, bad_count) = parse_records(&mut pending[..whole], g.record, next, cancel)?;
             next += (whole / g.record) as u64;
             skipped += bad_count;
             for r in parsed.iter().filter(|r| r.base.is_none()) {

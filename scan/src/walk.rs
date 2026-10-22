@@ -1,80 +1,124 @@
 //! Fallback parallel directory walker.
 //!
-//! `FindFirstFileExW` with a large fetch buffer lists one directory; rayon fans out over
-//! sub-directories. Reparse points (junctions, symlinks) are recorded but never followed.
+//! `GetFileInformationByHandleEx(FileIdBothDirectoryInfo)` lists one directory with each
+//! entry's file ID; rayon fans out over sub-directories. Name-surrogate reparse points
+//! (junctions, symlinks) are recorded but never followed; other reparse directories (cloud
+//! folders) are descended, as on the MFT path. A file with several hard links counts once,
+//! under the first name in walk order.
 //!
-//! ponytail: Windows-only, no `\\?\` long-path prefix (paths over MAX_PATH are skipped
-//! and counted), and `allocated` equals `size` because the find data has no cluster size.
+//! Directories open through `std::fs::OpenOptions`, so paths over MAX_PATH are listed too.
+//!
+//! ponytail: Windows-only, and `allocated` equals `size` (the listing's allocation size is
+//! not used yet).
 //! Recursion runs on rayon worker stacks; extremely deep trees need a bigger stack size.
 
+use crate::mft::{NAME_SURROGATE, u32_at, u64_at};
 use crate::rollup::{RawEntry, rollup};
 use crate::{Method, Progress, ScanError, ScanStats, Tree};
 use rayon::prelude::*;
-use std::ffi::{OsString, c_void};
+use std::collections::HashSet;
+use std::ffi::OsString;
 use std::io;
-use std::os::windows::ffi::{OsStrExt, OsStringExt};
+use std::mem::offset_of;
+use std::os::windows::ffi::OsStringExt;
+use std::os::windows::fs::OpenOptionsExt;
+use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::time::Instant;
-use windows_sys::Win32::Foundation::{ERROR_NO_MORE_FILES, GetLastError, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::Foundation::{ERROR_NO_MORE_FILES, GetLastError};
 use windows_sys::Win32::Storage::FileSystem::{
-    FIND_FIRST_EX_LARGE_FETCH, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
-    FindClose, FindExInfoBasic, FindExSearchNameMatch, FindFirstFileExW, FindNextFileW,
-    WIN32_FIND_DATAW,
+    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_ID_BOTH_DIR_INFO,
+    FILE_LIST_DIRECTORY, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FileIdBothDirectoryInfo,
+    GetFileInformationByHandleEx,
 };
 
 const ROOT_ID: u64 = 0;
+/// Bytes per directory listing call; one call returns as many entries as fit.
+const LIST_BUF: usize = 64 * 1024;
 
 struct Item {
     name: OsString,
     is_dir: bool,
     size: u64,
+    file_id: u64,
+}
+
+/// Appends the entries of one `FILE_ID_BOTH_DIR_INFO` buffer, without `.` and `..`.
+/// `None` when an entry runs past the buffer.
+fn parse_listing(b: &[u8], items: &mut Vec<Item>) -> Option<()> {
+    type Info = FILE_ID_BOTH_DIR_INFO;
+    let mut off = 0usize;
+    loop {
+        let attrs = u32_at(b, off + offset_of!(Info, FileAttributes))?;
+        let name_len = u32_at(b, off + offset_of!(Info, FileNameLength))? as usize;
+        let name_at = off + offset_of!(Info, FileName);
+        let raw = b.get(name_at..name_at.checked_add(name_len)?)?;
+        let units: Vec<u16> = raw.as_chunks::<2>().0.iter().map(|&c| u16::from_le_bytes(c)).collect();
+        let name = OsString::from_wide(&units);
+        if name != "." && name != ".." {
+            // With the reparse attribute set, EaSize holds the reparse tag.
+            let link = attrs & FILE_ATTRIBUTE_REPARSE_POINT != 0
+                && u32_at(b, off + offset_of!(Info, EaSize))? & NAME_SURROGATE != 0;
+            items.push(Item {
+                is_dir: attrs & FILE_ATTRIBUTE_DIRECTORY != 0 && !link,
+                size: u64_at(b, off + offset_of!(Info, EndOfFile))?,
+                file_id: u64_at(b, off + offset_of!(Info, FileId))?,
+                name,
+            });
+        }
+        match u32_at(b, off + offset_of!(Info, NextEntryOffset))? {
+            0 => return Some(()),
+            next => off = off.checked_add(next as usize)?,
+        }
+    }
 }
 
 /// Lists one directory (without `.` and `..`). An error means the listing is incomplete.
 fn list_dir(dir: &Path) -> io::Result<Vec<Item>> {
-    let pattern: Vec<u16> = dir.join("*").as_os_str().encode_wide().chain(Some(0)).collect();
-    // SAFETY: WIN32_FIND_DATAW is plain data; all-zero is a valid value.
-    let mut data: WIN32_FIND_DATAW = unsafe { std::mem::zeroed() };
-    // SAFETY: `pattern` is NUL-terminated and `data` is a valid out-pointer for this info level.
-    let handle = unsafe {
-        FindFirstFileExW(
-            pattern.as_ptr(),
-            FindExInfoBasic,
-            (&mut data as *mut WIN32_FIND_DATAW).cast::<c_void>(),
-            FindExSearchNameMatch,
-            std::ptr::null(),
-            FIND_FIRST_EX_LARGE_FETCH,
-        )
-    };
-    if handle == INVALID_HANDLE_VALUE {
-        return Err(io::Error::last_os_error());
-    }
+    let handle = std::fs::OpenOptions::new()
+        .access_mode(FILE_LIST_DIRECTORY)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS) // required to open a directory
+        .open(dir)?;
+    // u64 elements keep the buffer 8-byte aligned, as the listing entries require.
+    let mut buf = vec![0u64; LIST_BUF / 8];
     let mut items = Vec::new();
-    let result = loop {
-        let len = data.cFileName.iter().position(|&c| c == 0).unwrap_or(data.cFileName.len());
-        let name = OsString::from_wide(&data.cFileName[..len]);
-        if name != "." && name != ".." {
-            let reparse = data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0;
-            items.push(Item {
-                is_dir: data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0 && !reparse,
-                size: (u64::from(data.nFileSizeHigh) << 32) | u64::from(data.nFileSizeLow),
-                name,
-            });
-        }
-        // SAFETY: `handle` is a live search handle and `data` a valid out-pointer.
-        if unsafe { FindNextFileW(handle, &mut data) } == 0 {
+    loop {
+        // SAFETY: `handle` is an open directory and `buf` is writable for LIST_BUF bytes.
+        let ok = unsafe {
+            GetFileInformationByHandleEx(
+                handle.as_raw_handle(),
+                FileIdBothDirectoryInfo,
+                buf.as_mut_ptr().cast(),
+                LIST_BUF as u32,
+            )
+        };
+        if ok == 0 {
             // SAFETY: reads the calling thread's last-error value.
-            break match unsafe { GetLastError() } {
+            return match unsafe { GetLastError() } {
                 ERROR_NO_MORE_FILES => Ok(items),
                 _ => Err(io::Error::last_os_error()),
             };
         }
-    };
-    // SAFETY: `handle` came from FindFirstFileExW and is closed exactly once.
-    unsafe { FindClose(handle) };
-    result
+        // SAFETY: `buf` is initialised and LIST_BUF bytes long; u8 has no alignment needs.
+        let bytes = unsafe { std::slice::from_raw_parts(buf.as_ptr().cast::<u8>(), LIST_BUF) };
+        parse_listing(bytes, &mut items)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "malformed directory listing"))?;
+    }
+}
+
+/// Keeps the first entry of each file ID, so a hard-linked file counts once (as on the MFT
+/// path). ID 0 and `u64::MAX` (no 64-bit ID, as on some ReFS files) are never merged.
+/// ponytail: one set slot per file; memory grows with the file count.
+fn drop_extra_links(entries: Vec<(RawEntry, u64)>) -> Vec<RawEntry> {
+    let mut seen = HashSet::new();
+    entries
+        .into_iter()
+        .filter(|&(_, id)| id == 0 || id == u64::MAX || seen.insert(id))
+        .map(|(e, _)| e)
+        .collect()
 }
 
 struct Ctx<'a> {
@@ -87,7 +131,8 @@ struct Ctx<'a> {
 
 #[derive(Default)]
 struct Out {
-    entries: Vec<RawEntry>,
+    /// Entries with their file ID (0 for directories).
+    entries: Vec<(RawEntry, u64)>,
     skipped: u64,
 }
 
@@ -107,8 +152,8 @@ fn walk_dir(ctx: &Ctx, dir: &Path, dir_id: u64) -> Result<Out, ScanError> {
     let (mut files, mut dirs) = (0, 0);
     for item in items {
         let id = ctx.next_id.fetch_add(1, Ordering::Relaxed);
-        // A reparse point is a file entry and never followed. Its reported size is its own
-        // logical size: 0 for junctions and symlinks, the full size for cloud placeholders.
+        // A junction or symlink is a file entry and never followed. A file's reported size is
+        // its own logical size: 0 for junctions and symlinks, the full size for placeholders.
         let size = if item.is_dir { 0 } else { item.size };
         if item.is_dir {
             dirs += 1;
@@ -116,14 +161,15 @@ fn walk_dir(ctx: &Ctx, dir: &Path, dir_id: u64) -> Result<Out, ScanError> {
         } else {
             files += 1;
         }
-        out.entries.push(RawEntry {
+        let entry = RawEntry {
             id,
             parent: dir_id,
             name: item.name.to_string_lossy().into_owned(),
             size,
             allocated: size,
             is_dir: item.is_dir,
-        });
+        };
+        out.entries.push((entry, if item.is_dir { 0 } else { item.file_id }));
     }
     let files = ctx.files.fetch_add(files, Ordering::Relaxed) + files;
     let dirs = ctx.dirs.fetch_add(dirs, Ordering::Relaxed) + dirs;
@@ -157,8 +203,9 @@ pub fn walk(
         progress,
         cancel,
     };
-    let mut out = walk_dir(&ctx, root, ROOT_ID)?;
-    out.entries.push(RawEntry {
+    let out = walk_dir(&ctx, root, ROOT_ID)?;
+    let mut entries = drop_extra_links(out.entries);
+    entries.push(RawEntry {
         id: ROOT_ID,
         parent: ROOT_ID,
         name: root.display().to_string(),
@@ -166,7 +213,7 @@ pub fn walk(
         allocated: 0,
         is_dir: true,
     });
-    let rolled = rollup(ROOT_ID, out.entries)?;
+    let rolled = rollup(ROOT_ID, entries)?;
     let stats = ScanStats {
         files: rolled.files,
         dirs: rolled.dirs,
@@ -175,4 +222,22 @@ pub fn walk(
         method: Method::Walk,
     };
     Ok((rolled.tree, stats))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn file(id: u64) -> RawEntry {
+        RawEntry { id, parent: ROOT_ID, name: format!("f{id}"), size: 10, allocated: 10, is_dir: false }
+    }
+
+    #[test]
+    fn drop_extra_links_unknown_file_ids_are_never_merged() {
+        let entries = vec![(file(1), 0), (file(2), 0), (file(3), u64::MAX), (file(4), u64::MAX), (file(5), 7), (file(6), 7)];
+
+        let kept: Vec<u64> = drop_extra_links(entries).iter().map(|e| e.id).collect();
+
+        assert_eq!(kept, vec![1, 2, 3, 4, 5]);
+    }
 }
