@@ -1,4 +1,39 @@
-import { Button, ComboBox, LineEdit, VerticalBox, HorizontalBox, ProgressIndicator, Palette } from "std-widgets.slint";
+import { Button, ComboBox, LineEdit, VerticalBox, HorizontalBox, ProgressIndicator, Palette, ListView } from "std-widgets.slint";
+
+/// One visible line of the file tree. Text is formatted by the host.
+export struct TreeRow {
+    name: string,
+    size: string,
+    percent: string,
+    files: string,
+    depth: int,
+    expanded: bool,
+    has-children: bool,
+}
+
+/// Sort column ids shared with the host: 0 name, 1 size, 2 percent of parent, 3 files.
+component HeaderCell inherits Rectangle {
+    in property <string> text;
+    in property <bool> active;
+    in property <bool> descending;
+    in property <bool> right-aligned: true;
+    callback clicked();
+    height: 28px;
+    background: touch.has-hover ? Palette.alternate-background : transparent;
+    accessible-role: button;
+    accessible-label: "Sort by \{root.text}";
+    accessible-action-default => { root.clicked(); }
+    Text {
+        x: 8px;
+        width: parent.width - 16px;
+        vertical-alignment: center;
+        horizontal-alignment: root.right-aligned ? right : left;
+        font-weight: 600;
+        text: root.text + (root.active ? (root.descending ? " ▼" : " ▲") : "");
+        overflow: elide;
+    }
+    touch := TouchArea { clicked => { root.clicked(); } }
+}
 
 export component MainWindow inherits Window {
     title: "Storage tool";
@@ -6,9 +41,10 @@ export component MainWindow inherits Window {
     // If Mica is not available, the host sets `mica` to false and the Fluent palette fills the window.
     in property <bool> mica: true;
     background: root.mica ? transparent : Palette.background;
-    preferred-width: 800px;
-    preferred-height: 300px;
-    min-width: 520px;
+    preferred-width: 1100px;
+    preferred-height: 700px;
+    min-width: 640px;
+    min-height: 400px;
 
     in property <[string]> drives;
     in property <bool> scanning;
@@ -16,25 +52,68 @@ export component MainWindow inherits Window {
     in property <bool> banner-is-error;
     in-out property <string> path;
 
+    // File tree
+    in property <[TreeRow]> rows;
+    in property <int> selected-row: -1;
+    in property <int> sort-key: 1;
+    in property <bool> sort-descending: true;
+
+    // Treemap
+    in property <image> treemap;
+    in property <string> treemap-title;
+    in property <bool> treemap-can-go-up;
+    in property <bool> has-selection;
+    in property <length> selection-x;
+    in property <length> selection-y;
+    in property <length> selection-width;
+    in property <length> selection-height;
+
+    // Elevation
+    in property <bool> show-elevate;
+    in property <string> elevate-note;
+
     callback scan(string);
     callback cancel();
     callback browse();
+    callback tree-select(int);
+    callback tree-toggle(int);
+    callback tree-sort(int);
+    callback treemap-click(float, float);
+    callback treemap-open(float, float);
+    callback treemap-up();
+    callback treemap-resized(float, float);
+    callback restart-admin();
+
+    /// Puts the drive box back to its label. The path was changed by hand or by Browse.
+    public function reset-drive() {
+        drive-box.current-index = 0;
+    }
+
+    /// Scrolls the file tree so row `i` is inside the view.
+    public function show-row(i: int) {
+        if (i * 24px < -list.content-y) {
+            list.content-y = -i * 24px;
+        } else if ((i + 1) * 24px > -list.content-y + list.visible-height) {
+            list.content-y = -((i + 1) * 24px - list.visible-height);
+        }
+    }
 
     VerticalBox {
         spacing: 12px;
-        alignment: start;
         HorizontalBox {
             padding: 0;
-            ComboBox {
+            drive-box := ComboBox {
                 model: root.drives;
-                current-value: "Drive";
                 enabled: !root.scanning;
-                selected(drive) => { root.path = drive; }
+                // Row 0 is a label ("Choose drive"), not a drive. A ComboBox cannot show text that is not in its model.
+                current-index: 0;
+                selected(drive) => { if (self.current-index > 0) { root.path = drive; } }
             }
             LineEdit {
                 placeholder-text: "Folder or drive";
                 text <=> root.path;
                 enabled: !root.scanning;
+                edited => { drive-box.current-index = 0; }
                 accepted => { if (!root.scanning) { root.scan(root.path); } }
             }
             Button {
@@ -57,6 +136,11 @@ export component MainWindow inherits Window {
                 enabled: root.scanning;
                 clicked => { root.cancel(); }
             }
+            if root.show-elevate : Button {
+                text: "Restart as administrator";
+                enabled: !root.scanning;
+                clicked => { root.restart-admin(); }
+            }
         }
         if root.scanning : ProgressIndicator {
             indeterminate: true;
@@ -66,6 +150,133 @@ export component MainWindow inherits Window {
             wrap: word-wrap;
             color: root.banner-is-error ? #d13438 : Palette.foreground;
             accessible-role: text;
+        }
+        if root.elevate-note != "" : Text {
+            text: root.elevate-note;
+            wrap: word-wrap;
+            color: #d13438;
+            accessible-role: text;
+        }
+
+        HorizontalLayout {
+            spacing: 12px;
+            // File tree
+            VerticalLayout {
+                horizontal-stretch: 2;
+                min-width: 460px;
+                HorizontalLayout {
+                    HeaderCell {
+                        horizontal-stretch: 1;
+                        text: "Name";
+                        right-aligned: false;
+                        active: root.sort-key == 0;
+                        descending: root.sort-descending;
+                        clicked => { root.tree-sort(0); }
+                    }
+                    HeaderCell {
+                        width: 80px;
+                        text: "Size";
+                        active: root.sort-key == 1;
+                        descending: root.sort-descending;
+                        clicked => { root.tree-sort(1); }
+                    }
+                    HeaderCell {
+                        width: 84px;
+                        text: "% of parent";
+                        active: root.sort-key == 2;
+                        descending: root.sort-descending;
+                        clicked => { root.tree-sort(2); }
+                    }
+                    HeaderCell {
+                        width: 76px;
+                        text: "Files";
+                        active: root.sort-key == 3;
+                        descending: root.sort-descending;
+                        clicked => { root.tree-sort(3); }
+                    }
+                }
+                list := ListView {
+                    vertical-stretch: 1;
+                    for row[i] in root.rows : Rectangle {
+                        height: 24px;
+                        background: i == root.selected-row ? Palette.selection-background : (row-touch.has-hover ? Palette.alternate-background : transparent);
+                        row-touch := TouchArea { clicked => { root.tree-select(i); } }
+                        HorizontalLayout {
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                HorizontalLayout {
+                                    padding-left: 8px + row.depth * 16px;
+                                    spacing: 4px;
+                                    Rectangle {
+                                        width: 16px;
+                                        if row.has-children : Text {
+                                            text: row.expanded ? "-" : "+";
+                                            vertical-alignment: center;
+                                            horizontal-alignment: center;
+                                            accessible-role: button;
+                                            accessible-label: row.expanded ? "Collapse \{row.name}" : "Expand \{row.name}";
+                                        }
+                                        if row.has-children : TouchArea { clicked => { root.tree-toggle(i); } }
+                                    }
+                                    Text {
+                                        text: row.name;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                        color: i == root.selected-row ? Palette.selection-foreground : Palette.foreground;
+                                    }
+                                }
+                            }
+                            Text { width: 80px; text: row.size; horizontal-alignment: right; vertical-alignment: center; color: i == root.selected-row ? Palette.selection-foreground : Palette.foreground; }
+                            Text { width: 84px; text: row.percent; horizontal-alignment: right; vertical-alignment: center; color: i == root.selected-row ? Palette.selection-foreground : Palette.foreground; }
+                            Text { width: 76px; text: row.files; horizontal-alignment: right; vertical-alignment: center; color: i == root.selected-row ? Palette.selection-foreground : Palette.foreground; }
+                        }
+                    }
+                }
+            }
+            // Treemap
+            VerticalLayout {
+                horizontal-stretch: 3;
+                min-width: 260px;
+                spacing: 6px;
+                HorizontalLayout {
+                    spacing: 8px;
+                    Button {
+                        text: "Up";
+                        enabled: root.treemap-can-go-up;
+                        clicked => { root.treemap-up(); }
+                    }
+                    Text {
+                        text: root.treemap-title;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                }
+                map := Rectangle {
+                    vertical-stretch: 1;
+                    clip: true;
+                    changed width => { root.treemap-resized(self.width / 1px, self.height / 1px); }
+                    changed height => { root.treemap-resized(self.width / 1px, self.height / 1px); }
+                    Image {
+                        width: 100%;
+                        height: 100%;
+                        source: root.treemap;
+                        image-fit: fill;
+                    }
+                    if root.has-selection : Rectangle {
+                        x: root.selection-x;
+                        y: root.selection-y;
+                        width: root.selection-width;
+                        height: root.selection-height;
+                        border-width: 2px;
+                        border-color: Palette.foreground;
+                    }
+                    TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.treemap-click(self.mouse-x / 1px, self.mouse-y / 1px); }
+                        double-clicked => { root.treemap-open(self.mouse-x / 1px, self.mouse-y / 1px); }
+                    }
+                }
+            }
         }
     }
 }
