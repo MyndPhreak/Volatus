@@ -1,3 +1,4 @@
+mod model;
 use raw_window_handle::HasWindowHandle;
 use slint::ComponentHandle;
 slint::include_modules!();
