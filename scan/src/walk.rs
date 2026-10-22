@@ -13,10 +13,11 @@
 //! Recursion runs on rayon worker stacks; extremely deep trees need a bigger stack size.
 
 use crate::mft::{NAME_SURROGATE, u32_at, u64_at};
-use crate::rollup::{RawEntry, rollup};
+use crate::rollup::{IdHasher, RawEntry, rollup};
 use crate::{Method, Phases, Progress, ScanError, ScanStats, Tree};
 use rayon::prelude::*;
 use std::collections::HashSet;
+use std::hash::BuildHasherDefault;
 use std::ffi::OsString;
 use std::io;
 use std::mem::offset_of;
@@ -121,7 +122,7 @@ fn list_dir(dir: &Path, cancel: &AtomicBool) -> Result<Vec<Item>, ScanError> {
 /// path). ID 0 and `u64::MAX` (no 64-bit ID, as on some ReFS files) are never merged.
 /// ponytail: one set slot per file; memory grows with the file count.
 fn drop_extra_links(entries: Vec<(RawEntry, u64)>) -> Vec<RawEntry> {
-    let mut seen = HashSet::new();
+    let mut seen: HashSet<u64, BuildHasherDefault<IdHasher>> = HashSet::default();
     entries
         .into_iter()
         .filter(|&(_, id)| id == 0 || id == u64::MAX || seen.insert(id))
