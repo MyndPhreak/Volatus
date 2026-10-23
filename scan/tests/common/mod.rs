@@ -2,6 +2,7 @@
 #![allow(dead_code)]
 
 pub mod ntfs;
+pub mod reference;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};

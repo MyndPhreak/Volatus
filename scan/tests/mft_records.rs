@@ -3,6 +3,7 @@
 mod common;
 
 use common::ntfs::*;
+use common::reference::{Rng, assert_same_entries, entries_reference};
 use scan::mft::{DataSize, FileName, Malformed, Record, entries, parse_record, scan_device};
 use scan::rollup::rollup;
 use scan::{Method, ScanError, ScanStats, Tree};
@@ -369,6 +370,196 @@ fn entries_extension_without_base_is_dropped() {
     let (list, _) = entries(vec![ext]);
 
     assert!(list.is_empty());
+}
+
+// ---- entries: merge quirks pinned before the one-pass rewrite (hand-built records) ----
+
+fn rec(number: u64, base: Option<u64>, names: &[(u64, &str)], data: Option<(u64, u64)>) -> Record {
+    Record {
+        number,
+        base,
+        is_dir: false,
+        names: names.iter().map(|&(parent, name)| FileName { parent, name: name.into() }).collect(),
+        data: data.map(|(size, allocated)| DataSize { size, allocated }),
+        surrogate: false,
+    }
+}
+
+fn summary(list: &[scan::rollup::RawEntry]) -> Vec<(u64, u64, &str, u64, u64)> {
+    list.iter().map(|e| (e.id, e.parent, e.name.as_str(), e.size, e.allocated)).collect()
+}
+
+#[test]
+fn entries_two_extensions_of_nameless_base_first_extension_name_wins() {
+    let records = vec![
+        rec(50, None, &[], None),
+        rec(900, Some(50), &[(7, "from-first")], None),
+        rec(901, Some(50), &[(8, "from-second")], None),
+    ];
+
+    let (list, skipped) = entries(records);
+
+    assert_eq!((summary(&list), skipped), (vec![(50, 7, "from-first", 0, 0)], 0));
+}
+
+#[test]
+fn entries_extensions_before_base_apply_in_extension_input_order() {
+    let records = vec![
+        rec(901, Some(50), &[(8, "second-in-input")], None),
+        rec(900, Some(50), &[(7, "first-in-input")], None),
+        rec(50, None, &[], None),
+    ];
+
+    let (list, _) = entries(records);
+
+    assert_eq!(summary(&list), vec![(50, 8, "second-in-input", 0, 0)]);
+}
+
+#[test]
+fn entries_base_own_name_wins_over_extension_names() {
+    let records = vec![rec(50, None, &[(6, "own")], None), rec(900, Some(50), &[(7, "ext")], None)];
+
+    let (list, _) = entries(records);
+
+    assert_eq!(summary(&list), vec![(50, 6, "own", 0, 0)]);
+}
+
+#[test]
+fn entries_base_own_data_wins_over_extension_data() {
+    let records = vec![rec(50, None, &[(6, "f")], Some((10, 16))), rec(900, Some(50), &[], Some((99, 99)))];
+
+    let (list, _) = entries(records);
+
+    assert_eq!(summary(&list), vec![(50, 6, "f", 10, 16)]);
+}
+
+#[test]
+fn entries_base_without_data_takes_first_extension_data() {
+    let records = vec![
+        rec(50, None, &[(6, "f")], None),
+        rec(900, Some(50), &[], Some((11, 12))),
+        rec(901, Some(50), &[], Some((99, 99))),
+    ];
+
+    let (list, _) = entries(records);
+
+    assert_eq!(summary(&list), vec![(50, 6, "f", 11, 12)]);
+}
+
+#[test]
+fn entries_base_with_zero_data_keeps_it_over_extension_data() {
+    // `Option::or` keeps a present value even when it is all zero.
+    let records = vec![rec(50, None, &[(6, "f")], Some((0, 0))), rec(900, Some(50), &[], Some((99, 99)))];
+
+    let (list, _) = entries(records);
+
+    assert_eq!(summary(&list), vec![(50, 6, "f", 0, 0)]);
+}
+
+#[test]
+fn entries_base_nameless_with_name_in_extension_uses_extension_name() {
+    let records = vec![rec(50, None, &[], Some((5, 8))), rec(900, Some(50), &[(7, "late-name")], None)];
+
+    let (list, skipped) = entries(records);
+
+    assert_eq!((summary(&list), skipped), (vec![(50, 7, "late-name", 5, 8)], 0));
+}
+
+#[test]
+fn entries_extension_of_an_extension_is_dropped() {
+    let records = vec![
+        rec(50, None, &[], None),
+        rec(60, Some(50), &[(7, "a")], None),
+        rec(70, Some(60), &[(8, "b")], Some((999, 999))),
+    ];
+
+    let (list, _) = entries(records);
+
+    assert_eq!(summary(&list), vec![(50, 7, "a", 0, 0)]);
+}
+
+#[test]
+fn entries_duplicate_base_numbers_merge_extension_into_the_last() {
+    let records = vec![
+        rec(50, None, &[(6, "first")], None),
+        rec(50, None, &[(6, "second")], None),
+        rec(900, Some(50), &[], Some((77, 80))),
+    ];
+
+    let (list, _) = entries(records);
+
+    assert_eq!(summary(&list), vec![(50, 6, "first", 0, 0), (50, 6, "second", 77, 80)]);
+}
+
+#[test]
+fn entries_surrogate_in_extension_of_directory_gives_zero_size_file() {
+    let mut base = rec(50, None, &[(6, "link")], None);
+    base.is_dir = true;
+    let mut ext = rec(900, Some(50), &[], None);
+    ext.surrogate = true;
+
+    let (list, _) = entries(vec![base, ext]);
+
+    assert_eq!((list[0].is_dir, list[0].size, list[0].allocated), (false, 0, 0));
+}
+
+// ---- entries: parity with the 81181b2 oracle on seeded record sets ----
+
+/// A mix of bases (some nameless, some with several names, some with duplicate numbers) and
+/// extensions (before or after their base, missing base, extension of an extension).
+fn records(seed: u64, n: usize) -> Vec<Record> {
+    let mut rng = Rng::new(seed);
+    let mut out: Vec<Record> = Vec::new();
+    let mut numbers: Vec<u64> = Vec::new();
+    let mut ext_numbers: Vec<u64> = Vec::new();
+    for k in 0..n {
+        let mut r = rec(0, None, &[], None);
+        r.is_dir = rng.chance(30);
+        r.surrogate = rng.chance(10);
+        for j in 0..rng.below(3) {
+            let parent = 5 + rng.below(20) as u64;
+            r.names.push(FileName { parent, name: format!("n{k}-{j}") });
+        }
+        if rng.chance(70) {
+            r.data = Some(DataSize { size: rng.below(1000) as u64, allocated: rng.below(1000) as u64 });
+        }
+        if rng.chance(20) && !numbers.is_empty() {
+            r.base = Some(match rng.below(10) {
+                0 => 9_000_000 + k as u64, // base never seen
+                1 if !ext_numbers.is_empty() => ext_numbers[rng.below(ext_numbers.len())], // chain
+                _ => numbers[rng.below(numbers.len())],
+            });
+            r.number = 1_000_000 + k as u64;
+            ext_numbers.push(r.number);
+        } else if rng.chance(5) && !numbers.is_empty() {
+            r.number = numbers[rng.below(numbers.len())]; // duplicate base number
+        } else {
+            r.number = 16 + k as u64;
+            numbers.push(r.number);
+        }
+        out.push(r);
+    }
+    for i in (1..out.len()).rev() {
+        if rng.chance(15) {
+            out.swap(i, rng.below(i + 1)); // extensions land before their base
+        }
+    }
+    out
+}
+
+#[test]
+fn entries_seeded_record_sets_equal_the_reference() {
+    let mut cases = 0;
+    for seed in 1..=300u64 {
+        let n = 1 + (seed as usize * 7) % 120;
+        let input = records(seed, n);
+
+        let got = entries(input.clone());
+
+        assert_same_entries(&got, &entries_reference(input));
+        cases += 1;
+    }
+    assert_eq!(cases, 300);
 }
 
 // ---- scan_device (volume image) ----
