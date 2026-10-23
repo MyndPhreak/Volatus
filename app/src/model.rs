@@ -1,7 +1,7 @@
 //! View-model logic: size formatting, banner text and the scan state machine.
 //! Plain functions, no Slint types, so it is unit tested.
 
-use scan::{Method, ScanError, ScanStats};
+use scan::{Method, Phases, ScanError, ScanStats};
 use std::io::ErrorKind;
 use std::path::Path;
 use std::sync::Arc;
@@ -16,6 +16,8 @@ pub struct Summary {
     pub dirs: u64,
     pub skipped: u64,
     pub elapsed: Duration,
+    /// Time in each part of the scan, for the `--timing` line.
+    pub phases: Phases,
     /// Size of the scan root in bytes.
     pub total: u64,
 }
@@ -28,6 +30,7 @@ impl Summary {
             dirs: stats.dirs,
             skipped: stats.skipped,
             elapsed: stats.elapsed,
+            phases: stats.phases,
             total,
         }
     }
@@ -184,10 +187,12 @@ pub fn format_elapsed(d: Duration) -> String {
     }
 }
 
-/// "Timing: scan 5.3 s, after scan 0.2 s, total 5.5 s." `scan` is the scan itself, `after` the
-/// work from the end of the scan until the treemap is shown, `total` the time from the Scan click.
-pub fn format_timing(scan: Duration, after: Duration, total: Duration) -> String {
-    let (scan, after, total) = (format_elapsed(scan), format_elapsed(after), format_elapsed(total));
+/// "Timing: scan 7.2 s (open 0.5, read 3.3, parse 2.3, rollup 1.1), after scan 0.2 s, total 7.9 s."
+/// `scan` is the scan itself, `after` the work from the end of the scan until the treemap is shown,
+/// `total` the time from the Scan click. The steps in brackets come from `phases`: all four for the
+/// MFT scan, `read` and `rollup` for the walker.
+pub fn format_timing(summary: &Summary, after: Duration, total: Duration) -> String {
+    let (scan, after, total) = (format_elapsed(summary.elapsed), format_elapsed(after), format_elapsed(total));
     format!("Timing: scan {scan}, after scan {after}, total {total}.")
 }
 
@@ -205,21 +210,21 @@ pub struct TimingRun {
     clicked: Instant,
     /// When the scan result reached the UI thread.
     returned: Option<Instant>,
-    /// `scan::scan` time, from the scan statistics.
-    scan: Duration,
+    /// The scan result, for the scan time and the steps.
+    summary: Option<Summary>,
     /// The finished line. Set once, when the first treemap of the scan is shown.
     line: Option<String>,
 }
 
 impl TimingRun {
     pub fn new(clicked: Instant) -> Self {
-        Self { clicked, returned: None, scan: Duration::ZERO, line: None }
+        Self { clicked, returned: None, summary: None, line: None }
     }
 
     /// The scan result reached the UI thread at `at`. "After scan" counts from here, so window
     /// start-up before the event loop runs is not part of it.
-    pub fn scan_returned(&mut self, at: Instant, scan: Duration) {
-        (self.returned, self.scan) = (Some(at), scan);
+    pub fn scan_returned(&mut self, at: Instant, summary: &Summary) {
+        (self.returned, self.summary) = (Some(at), Some(summary.clone()));
     }
 
     /// The first treemap of the scan is shown at `now`. Returns the finished line once; `None`
@@ -229,7 +234,7 @@ impl TimingRun {
             return None;
         }
         let returned = self.returned?;
-        let line = format_timing(self.scan, now - returned, now - self.clicked);
+        let line = format_timing(self.summary.as_ref()?, now - returned, now - self.clicked);
         self.line = Some(line.clone());
         Some(line)
     }
@@ -299,7 +304,7 @@ mod tests {
     use std::io;
 
     fn summary(method: Method, skipped: u64) -> Summary {
-        Summary { method, files: 1234, dirs: 56, skipped, elapsed: Duration::from_millis(2500), total: 3 * 1024 * 1024 }
+        Summary { method, files: 1234, dirs: 56, skipped, elapsed: Duration::from_millis(2500), phases: Phases::default(), total: 3 * 1024 * 1024 }
     }
 
     // ---- format_size ----
@@ -331,16 +336,90 @@ mod tests {
         }
     }
 
-    #[test]
-    fn format_timing_known_values_formats_three_times() {
-        let line = format_timing(Duration::from_millis(5300), Duration::from_millis(200), Duration::from_millis(5500));
-        assert_eq!(line, "Timing: scan 5.3 s, after scan 0.2 s, total 5.5 s.");
+    fn ms(n: u64) -> Duration {
+        Duration::from_millis(n)
+    }
+
+    fn timed(method: Method, elapsed: Duration, phases: Phases) -> Summary {
+        Summary { elapsed, phases, ..summary(method, 0) }
+    }
+
+    fn phases(open: u64, read: u64, parse: u64, rollup: u64) -> Phases {
+        Phases { open: ms(open), read: ms(read), parse: ms(parse), rollup: ms(rollup) }
     }
 
     #[test]
-    fn format_timing_over_a_minute_uses_minutes() {
-        let line = format_timing(Duration::from_secs(65), Duration::from_millis(150), Duration::from_millis(65_300));
-        assert_eq!(line, "Timing: scan 1 min 5 s, after scan 0.2 s, total 1 min 5 s.");
+    fn format_timing_mft_lists_open_read_parse_and_rollup() {
+        let s = timed(Method::Mft, ms(7200), phases(500, 3300, 2300, 1100));
+        assert_eq!(
+            format_timing(&s, ms(200), ms(7900)),
+            "Timing: scan 7.2 s (open 0.5, read 3.3, parse 2.3, rollup 1.1), after scan 0.2 s, total 7.9 s."
+        );
+    }
+
+    #[test]
+    fn format_timing_walk_lists_read_and_rollup_only() {
+        let s = timed(Method::Walk, ms(5300), phases(0, 4100, 0, 1200));
+        assert_eq!(
+            format_timing(&s, ms(200), ms(5500)),
+            "Timing: scan 5.3 s (read 4.1, rollup 1.2), after scan 0.2 s, total 5.5 s."
+        );
+    }
+
+    #[test]
+    fn format_timing_walk_ignores_open_and_parse() {
+        let s = timed(Method::Walk, ms(1000), phases(900, 100, 800, 200));
+        assert_eq!(
+            format_timing(&s, ms(0), ms(1000)),
+            "Timing: scan 1.0 s (read 0.1, rollup 0.2), after scan 0.0 s, total 1.0 s."
+        );
+    }
+
+    #[test]
+    fn format_timing_mft_with_zero_phases_shows_zeros() {
+        let s = timed(Method::Mft, ms(0), Phases::default());
+        assert_eq!(
+            format_timing(&s, ms(0), ms(0)),
+            "Timing: scan 0.0 s (open 0.0, read 0.0, parse 0.0, rollup 0.0), after scan 0.0 s, total 0.0 s."
+        );
+    }
+
+    #[test]
+    fn format_timing_phase_rounds_half_up_at_the_0_05_boundary() {
+        let cases: [(u64, &str); 4] = [(49, "0.0"), (50, "0.1"), (149, "0.1"), (150, "0.2")];
+        for (millis, want) in cases {
+            let s = timed(Method::Walk, ms(1000), phases(0, millis, 0, 0));
+            let line = format_timing(&s, ms(0), ms(1000));
+            assert!(line.contains(&format!("(read {want}, rollup 0.0)")), "{millis} ms: {line}");
+        }
+    }
+
+    #[test]
+    fn format_timing_large_values_use_minutes_in_every_part() {
+        let s = timed(Method::Mft, Duration::from_secs(3725), Phases {
+            open: Duration::from_secs(65),
+            read: Duration::from_secs(3600),
+            parse: Duration::from_millis(59_949),
+            rollup: Duration::from_millis(59_950),
+        });
+        assert_eq!(
+            format_timing(&s, Duration::from_secs(120), Duration::from_secs(3845)),
+            "Timing: scan 62 min 5 s (open 1 min 5 s, read 60 min 0 s, parse 59.9, rollup 1 min 0 s),              after scan 2 min 0 s, total 64 min 5 s."
+        );
+    }
+
+    #[test]
+    fn summary_new_copies_the_phases() {
+        let stats = ScanStats {
+            files: 0,
+            dirs: 1,
+            skipped: 0,
+            elapsed: ms(10),
+            method: Method::Mft,
+            phases: phases(1, 2, 3, 4),
+            threads: 1,
+        };
+        assert_eq!(Summary::new(&stats, 0).phases, phases(1, 2, 3, 4));
     }
 
     // ---- TimingRun ----
@@ -348,9 +427,12 @@ mod tests {
     fn timing_run_after_scan_counts_from_the_ui_thread_arrival() {
         let t0 = Instant::now();
         let mut run = TimingRun::new(t0);
-        run.scan_returned(t0 + Duration::from_millis(5900), Duration::from_millis(5300));
-        let line = run.complete(t0 + Duration::from_millis(6100));
-        assert_eq!(line.as_deref(), Some("Timing: scan 5.3 s, after scan 0.2 s, total 6.1 s."));
+        run.scan_returned(t0 + ms(5900), &timed(Method::Walk, ms(5300), phases(0, 4100, 0, 1200)));
+        let line = run.complete(t0 + ms(6100));
+        assert_eq!(
+            line.as_deref(),
+            Some("Timing: scan 5.3 s (read 4.1, rollup 1.2), after scan 0.2 s, total 6.1 s.")
+        );
     }
 
     #[test]
@@ -365,7 +447,7 @@ mod tests {
     fn timing_run_complete_twice_gives_the_line_once() {
         let t0 = Instant::now();
         let mut run = TimingRun::new(t0);
-        run.scan_returned(t0 + Duration::from_secs(2), Duration::from_secs(2));
+        run.scan_returned(t0 + Duration::from_secs(2), &timed(Method::Walk, Duration::from_secs(2), Phases::default()));
         let first = run.complete(t0 + Duration::from_secs(3));
         assert!(first.is_some());
         assert_eq!(run.line(), first.as_deref());
@@ -532,7 +614,7 @@ mod tests {
         let s = Summary::new(&stats, 99);
         assert_eq!(
             s,
-            Summary { method: Method::Walk, files: 4, dirs: 2, skipped: 1, elapsed: Duration::from_secs(3), total: 99 }
+            Summary { method: Method::Walk, files: 4, dirs: 2, skipped: 1, elapsed: Duration::from_secs(3), phases: Phases::default(), total: 99 }
         );
     }
 

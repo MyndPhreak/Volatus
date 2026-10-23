@@ -319,11 +319,11 @@ fn post_done(ui: &Weak<MainWindow>, generation: u64, data: Data, summary: Summar
     let ui = ui.clone();
     let _ = slint::invoke_from_event_loop(move || {
         let Some(ui) = ui.upgrade() else { return };
-        let scan = summary.elapsed;
+        let shown = summary.clone();
         if let Some(data) = SESSION.with_borrow_mut(|s| s.scan.finish(generation, summary, data)) {
             SESSION.with_borrow_mut(|s| {
                 if let Some(run) = s.run.as_mut() {
-                    run.scan_returned(Instant::now(), scan);
+                    run.scan_returned(Instant::now(), &shown);
                 }
             });
             install(&ui, Arc::new(data));
