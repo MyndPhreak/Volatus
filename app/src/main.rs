@@ -702,3 +702,40 @@ fn main() {
     }
     slint::run_event_loop().expect("run event loop");
 }
+
+/// Starts the elevated copy through `launch(path, timing)`. `--timing` is carried over from the session.
+fn restart_admin(path: &str, launch: impl FnOnce(&str, bool) -> Result<(), String>) -> Result<(), String> {
+    unimplemented!("restart_admin")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SESSION, restart_admin};
+    use std::cell::RefCell;
+
+    fn run(timing: bool) -> (Result<(), String>, Option<(String, bool)>) {
+        SESSION.with_borrow_mut(|s| s.timing = timing);
+        let seen = RefCell::new(None);
+        let result = restart_admin("some folder", |p, t| {
+            *seen.borrow_mut() = Some((p.to_string(), t));
+            Ok(())
+        });
+        (result, seen.into_inner())
+    }
+
+    #[test]
+    fn restart_admin_with_timing_passes_the_flag_on() {
+        assert_eq!(run(true), (Ok(()), Some(("some folder".to_string(), true))));
+    }
+
+    #[test]
+    fn restart_admin_without_timing_leaves_the_flag_off() {
+        assert_eq!(run(false), (Ok(()), Some(("some folder".to_string(), false))));
+    }
+
+    #[test]
+    fn restart_admin_launch_error_is_returned() {
+        let result = restart_admin("some folder", |_, _| Err("code 5".into()));
+        assert_eq!(result, Err("code 5".to_string()));
+    }
+}

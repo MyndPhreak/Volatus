@@ -6,7 +6,7 @@ use std::io::ErrorKind;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// What the banner needs from a finished scan.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -199,6 +199,46 @@ pub fn append_timing(banner: String, timing: Option<&str>) -> String {
     }
 }
 
+/// Timings of the latest scan, kept only when the app starts with `--timing`.
+pub struct TimingRun {
+    /// When the Scan click reached `start_scan`.
+    clicked: Instant,
+    /// When the scan result reached the UI thread.
+    returned: Option<Instant>,
+    /// `scan::scan` time, from the scan statistics.
+    scan: Duration,
+    /// The finished line. Set once, when the first treemap of the scan is shown.
+    line: Option<String>,
+}
+
+impl TimingRun {
+    pub fn new(clicked: Instant) -> Self {
+        Self { clicked, returned: None, scan: Duration::ZERO, line: None }
+    }
+
+    /// The scan result reached the UI thread at `at`. "After scan" counts from here, so window
+    /// start-up before the event loop runs is not part of it.
+    pub fn scan_returned(&mut self, at: Instant, scan: Duration) {
+        unimplemented!("TimingRun::scan_returned")
+    }
+
+    /// The first treemap of the scan is shown at `now`. Returns the finished line once; `None`
+    /// before the scan result arrived and for later layouts of the same scan.
+    pub fn complete(&mut self, now: Instant) -> Option<String> {
+        unimplemented!("TimingRun::complete")
+    }
+
+    /// The finished line, if the treemap was shown.
+    pub fn line(&self) -> Option<&str> {
+        self.line.as_deref()
+    }
+}
+
+/// The timing line the banner may show: only for a finished scan.
+pub fn timing_for_state(state: &ScanState, line: Option<&str>) -> Option<String> {
+    unimplemented!("timing_for_state")
+}
+
 /// Short, plain message for a failed scan. Never empty.
 pub fn error_message(e: &ScanError) -> String {
     match e {
@@ -295,6 +335,57 @@ mod tests {
     fn format_timing_over_a_minute_uses_minutes() {
         let line = format_timing(Duration::from_secs(65), Duration::from_millis(150), Duration::from_millis(65_300));
         assert_eq!(line, "Timing: scan 1 min 5 s, after scan 0.2 s, total 1 min 5 s.");
+    }
+
+    // ---- TimingRun ----
+    #[test]
+    fn timing_run_after_scan_counts_from_the_ui_thread_arrival() {
+        let t0 = Instant::now();
+        let mut run = TimingRun::new(t0);
+        run.scan_returned(t0 + Duration::from_millis(5900), Duration::from_millis(5300));
+        let line = run.complete(t0 + Duration::from_millis(6100));
+        assert_eq!(line.as_deref(), Some("Timing: scan 5.3 s, after scan 0.2 s, total 6.1 s."));
+    }
+
+    #[test]
+    fn timing_run_complete_before_the_result_arrived_gives_none() {
+        let t0 = Instant::now();
+        let mut run = TimingRun::new(t0);
+        assert_eq!(run.complete(t0 + Duration::from_secs(1)), None);
+        assert_eq!(run.line(), None);
+    }
+
+    #[test]
+    fn timing_run_complete_twice_gives_the_line_once() {
+        let t0 = Instant::now();
+        let mut run = TimingRun::new(t0);
+        run.scan_returned(t0 + Duration::from_secs(2), Duration::from_secs(2));
+        let first = run.complete(t0 + Duration::from_secs(3));
+        assert!(first.is_some());
+        assert_eq!(run.line(), first.as_deref());
+        assert_eq!(run.complete(t0 + Duration::from_secs(9)), None);
+        assert_eq!(run.line(), first.as_deref());
+    }
+
+    // ---- timing_for_state ----
+    #[test]
+    fn timing_for_state_shows_the_line_only_when_done() {
+        let line = Some("Timing: x.");
+        let cases = [
+            (ScanState::Idle, None),
+            (ScanState::Scanning { files: 1, dirs: 1 }, None),
+            (ScanState::Done(summary(Method::Walk, 0)), Some("Timing: x.".to_string())),
+            (ScanState::Error("e".into()), None),
+            (ScanState::Cancelled, None),
+        ];
+        for (state, want) in cases {
+            assert_eq!(timing_for_state(&state, line), want, "state {state:?}");
+        }
+    }
+
+    #[test]
+    fn timing_for_state_done_without_a_line_gives_none() {
+        assert_eq!(timing_for_state(&ScanState::Done(summary(Method::Walk, 0)), None), None);
     }
 
     #[test]
