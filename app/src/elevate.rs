@@ -13,10 +13,30 @@ pub fn is_admin() -> bool {
     unsafe { IsUserAnAdmin() != 0 }
 }
 
-/// Command line argument for `path`, quoted so a trailing backslash cannot escape the quote.
+/// Command line argument for `path`, quoted by the `CommandLineToArgvW` rules: backslashes before
+/// an embedded quote or the closing quote are doubled, and embedded quotes are escaped.
 pub fn quote_arg(path: &str) -> String {
-    let slashes = if path.ends_with('\\') { "\\" } else { "" };
-    format!("\"{path}{slashes}\"")
+    let mut out = String::with_capacity(path.len() + 2);
+    out.push('"');
+    let mut backslashes = 0;
+    for c in path.chars() {
+        match c {
+            '\\' => backslashes += 1,
+            '"' => {
+                out.extend(std::iter::repeat_n('\\', backslashes * 2 + 1));
+                out.push('"');
+                backslashes = 0;
+            }
+            _ => {
+                out.extend(std::iter::repeat_n('\\', backslashes));
+                out.push(c);
+                backslashes = 0;
+            }
+        }
+    }
+    out.extend(std::iter::repeat_n('\\', backslashes * 2));
+    out.push('"');
+    out
 }
 
 /// Command line for the elevated copy. `--` comes before the folder, so a folder named like a
