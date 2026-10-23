@@ -162,8 +162,8 @@ All values are the user's pasted numbers, one run each unless noted. Seconds.
 |---|---|---|---|---|---|
 | 2026-10-22 | P5, chunk default 4 MiB | 1st (cold) | 17.3 | 18.0 | not shown by the app yet |
 | 2026-10-22 | P5, chunk default 4 MiB | 2nd (warm) | 7.2 | 7.9 | not shown by the app yet |
-| 2026-10-22 | P6, per-step line, 32 MiB | 1st (cold) | not recorded | 10.2 | not recorded here |
-| 2026-10-22 | P6, per-step line, 32 MiB | warm | not recorded | 7.1 | roll-up about 3.5 |
+| 2026-10-22 | P6, per-step line, 32 MiB | 1st | 9.6 | 10.2 | open 3.7, read 2.2, parse 1.6, rollup 3.5 |
+| 2026-10-22 | P6, per-step line, 32 MiB | 2nd | 6.4 | 7.1 | open 0.8, read 2.0, parse 1.4, rollup 3.5 |
 | 2026-10-23 | P7, faster roll-up (`volatus.exe`) | 1st | 6.3 | 6.9 | open 2.4, read 2.1, parse 1.6, rollup 1.6 |
 | 2026-10-23 | P7, faster roll-up (`volatus.exe`) | 2nd | 5.0 | 5.6 | open 0.4, read 2.1, parse 1.6, rollup 2.4 |
 
@@ -173,7 +173,7 @@ Notes:
   2.4 s with the same code. The cause is not known. No measurement explains it.
 - The step times do not add up to `scan`. The reader thread reads the next chunk while other
   threads parse the last one, so `read` and `parse` are busy times that overlap.
-- The P6 row comes from the chief's brief. Its per-step values are not in the ledger or the logs.
+- The P6 rows are the user's pasted `--timing` lines from the first run of the new per-step line.
 - The unelevated walker took 57.1 s in the app (total 57.3 s) and 40.8-43.7 s in the bench
   (see the section below). The two numbers come from different runs and different programs.
   WizTree with `/admin=0` took 217 s (one run).
