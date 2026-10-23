@@ -192,8 +192,25 @@ pub fn format_elapsed(d: Duration) -> String {
 /// `total` the time from the Scan click. The steps in brackets come from `phases`: all four for the
 /// MFT scan, `read` and `rollup` for the walker.
 pub fn format_timing(summary: &Summary, after: Duration, total: Duration) -> String {
+    let p = summary.phases;
+    let steps = match summary.method {
+        Method::Mft => format!(
+            " (open {}, read {}, parse {}, rollup {})",
+            step(p.open),
+            step(p.read),
+            step(p.parse),
+            step(p.rollup)
+        ),
+        Method::Walk => format!(" (read {}, rollup {})", step(p.read), step(p.rollup)),
+    };
     let (scan, after, total) = (format_elapsed(summary.elapsed), format_elapsed(after), format_elapsed(total));
-    format!("Timing: scan {scan}, after scan {after}, total {total}.")
+    format!("Timing: scan {scan}{steps}, after scan {after}, total {total}.")
+}
+
+/// A step time without the unit: `3.3`. From a minute up the unit stays: `1 min 5 s`.
+fn step(d: Duration) -> String {
+    let t = format_elapsed(d);
+    t.strip_suffix(" s").filter(|_| !t.contains("min")).map_or_else(|| t.clone(), str::to_owned)
 }
 
 /// The banner with the timing line after it. Without a line the banner is unchanged.
@@ -404,7 +421,7 @@ mod tests {
         });
         assert_eq!(
             format_timing(&s, Duration::from_secs(120), Duration::from_secs(3845)),
-            "Timing: scan 62 min 5 s (open 1 min 5 s, read 60 min 0 s, parse 59.9, rollup 1 min 0 s),              after scan 2 min 0 s, total 64 min 5 s."
+            "Timing: scan 62 min 5 s (open 1 min 5 s, read 60 min 0 s, parse 59.9, rollup 1 min 0 s), after scan 2 min 0 s, total 64 min 5 s."
         );
     }
 
