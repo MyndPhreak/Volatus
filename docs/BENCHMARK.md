@@ -1,4 +1,4 @@
-# Benchmark: storagetool against WizTree
+# Benchmark: Volatus against WizTree
 
 Definition of Done M3: "MFT scan at least as fast as WizTree on the same machine, measured, not
 claimed". This page gives the exact commands. The MFT path reads the raw volume, so the timed

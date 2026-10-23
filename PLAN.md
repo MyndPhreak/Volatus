@@ -1,4 +1,4 @@
-# storagetool: plan
+# Volatus: plan
 
 ## Summary
 A Rust, WizTree-style disk usage analyzer for Windows. Speed comes from reading the NTFS `$MFT` directly from the raw volume (needs Administrator) instead of walking directories. Without elevation it falls back to a parallel directory walk. UI is Slint (Fluent style) with a Mica backdrop, a sortable tree, and a treemap. Built clean-room from public NTFS documentation; WizTree's binary is not decompiled.

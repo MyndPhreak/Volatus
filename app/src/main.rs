@@ -1,4 +1,4 @@
-//! Storage tool window: Mica backdrop, scan controls and the result banner.
+//! Volatus window: Mica backdrop, scan controls and the result banner.
 //!
 //! Mica recipe (proved by a spike, see `.claude/work/storagetool-wiztree-clone/logs/P3-mica-spike.md`):
 //! the root `Window` background starts transparent; `slint::Window::window_handle()` only yields

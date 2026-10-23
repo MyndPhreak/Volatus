@@ -1,4 +1,4 @@
-//! Command line: `storagetool [--timing] [--] [folder]`, flags and folder in any order.
+//! Command line: `volatus [--timing] [--] [folder]`, flags and folder in any order.
 
 /// What the command line asked for.
 #[derive(Debug, Default, PartialEq, Eq)]

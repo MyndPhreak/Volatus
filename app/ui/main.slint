@@ -48,7 +48,8 @@ component HeaderCell inherits Rectangle {
 }
 
 export component MainWindow inherits Window {
-    title: "Storage tool";
+    title: "Volatus";
+    icon: @image-url("../assets/volatus.png");
     // The window must start transparent so the Mica backdrop shows through (set at window creation).
     // If Mica is not available, the host sets `mica` to false and the Fluent palette fills the window.
     in property <bool> mica: true;

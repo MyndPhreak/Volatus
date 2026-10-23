@@ -117,8 +117,8 @@ mod tests {
             r"\\?\C:\Data\",
         ];
         for path in cases {
-            let parsed = argv(&format!("storagetool.exe {}", quote_arg(path)));
-            assert_eq!(parsed, ["storagetool.exe", path], "path {path:?} quoted as {}", quote_arg(path));
+            let parsed = argv(&format!("volatus.exe {}", quote_arg(path)));
+            assert_eq!(parsed, ["volatus.exe", path], "path {path:?} quoted as {}", quote_arg(path));
         }
     }
 
