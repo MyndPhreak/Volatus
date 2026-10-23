@@ -1,6 +1,7 @@
 //! Parent linking and size roll-up from flat records (shared by walker and MFT).
 
 use crate::{NameRef, Node, NodeId, ScanError, Tree};
+use rayon::prelude::*;
 use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, Hasher};
 
@@ -61,35 +62,92 @@ enum State {
 const NO_NODE: u32 = u32::MAX;
 const ORPHAN_NAME: &str = "$Orphan";
 
+/// "No entry" in the `u32` entry-index arrays below.
+const NO_ENTRY: u32 = u32::MAX;
+
 /// Length of a dense id table (`Vec` indexed by id) for `n` entries whose largest id is
 /// `max_id`, or `None` when the ids are too sparse and the `IdMap` must be used.
-#[allow(dead_code)] // stub: used by the next commit
+/// ponytail: the table may hold up to 8 slots (32 B) per entry; sparser ids take the slower
+/// `IdMap`. MFT record numbers and walker ids are dense; sub-folder `subtree` ids may not be.
 fn dense_len(n: usize, max_id: u64) -> Option<usize> {
-    let _ = (n, max_id);
-    todo!("dense_len")
+    let limit = (n as u64).saturating_mul(8).saturating_add(1024);
+    if max_id < limit { usize::try_from(max_id).ok().map(|m| m + 1) } else { None }
+}
+
+/// Entry index of the first entry with each id.
+enum IdIndex {
+    Dense(Vec<u32>),
+    Map(IdMap<u32>),
+}
+
+impl IdIndex {
+    /// Bounds-checked: an id beyond the table is a miss, never a panic.
+    fn get(&self, id: u64) -> Option<u32> {
+        match self {
+            IdIndex::Dense(v) => {
+                usize::try_from(id).ok().and_then(|i| v.get(i)).copied().filter(|&i| i != NO_ENTRY)
+            }
+            IdIndex::Map(m) => m.get(&id).copied(),
+        }
+    }
+}
+
+/// Indexes entries by id. The first entry with an id wins; later ones are flagged in the
+/// returned `Vec` (dropped and counted skipped).
+/// ponytail: entry indexes are `u32`, the same ceiling as `NodeId`; `u32::MAX` entries of 64 B
+/// each (275 GB) cannot be held in memory, so the ceiling is not checked.
+fn index_ids(entries: &[RawEntry]) -> (IdIndex, Vec<bool>) {
+    let mut dup = vec![false; entries.len()];
+    let max_id = entries.par_iter().map(|e| e.id).max().unwrap_or(0);
+    let index = match dense_len(entries.len(), max_id) {
+        Some(len) => {
+            let mut table = vec![NO_ENTRY; len];
+            for (i, e) in entries.iter().enumerate() {
+                // In range: every id is at most `max_id`.
+                let slot = &mut table[e.id as usize];
+                if *slot == NO_ENTRY {
+                    *slot = i as u32;
+                } else {
+                    dup[i] = true;
+                }
+            }
+            IdIndex::Dense(table)
+        }
+        None => {
+            let mut map: IdMap<u32> = IdMap::with_capacity_and_hasher(entries.len(), Default::default());
+            for (i, e) in entries.iter().enumerate() {
+                if let std::collections::hash_map::Entry::Vacant(v) = map.entry(e.id) {
+                    v.insert(i as u32);
+                } else {
+                    dup[i] = true;
+                }
+            }
+            IdIndex::Map(map)
+        }
+    };
+    (index, dup)
+}
+
+/// Parent entry index of every entry; `NO_ENTRY` when the parent is missing or not a
+/// directory (an orphan). Resolved in parallel, in input order.
+fn parent_entries(entries: &[RawEntry], index: &IdIndex) -> Vec<u32> {
+    let is_dir: Vec<bool> = entries.par_iter().map(|e| e.is_dir).collect();
+    entries
+        .par_iter()
+        .map(|e| index.get(e.parent).filter(|&p| is_dir[p as usize]).unwrap_or(NO_ENTRY))
+        .collect()
 }
 
 /// Builds the tree. `root` is the id of the root entry; its own parent ref is ignored.
 /// Iterative throughout: depth and cycles cannot overflow the stack or loop forever.
 pub fn rollup(root: u64, entries: Vec<RawEntry>) -> Result<Rolled, ScanError> {
     let mut skipped = 0u64;
-    let mut index: IdMap<usize> = IdMap::with_capacity_and_hasher(entries.len(), Default::default());
-    let mut state = vec![State::Unknown; entries.len()];
-    for (i, e) in entries.iter().enumerate() {
-        if let std::collections::hash_map::Entry::Vacant(v) = index.entry(e.id) {
-            v.insert(i);
-        } else {
-            state[i] = State::Dropped; // first entry with an id wins; counted below
-        }
-    }
-    let root_idx = *index.get(&root).ok_or(ScanError::NoRoot)?;
+    let (index, dup) = index_ids(&entries);
+    let mut state: Vec<State> = dup.iter().map(|&d| if d { State::Dropped } else { State::Unknown }).collect();
+    let root_idx = index.get(root).ok_or(ScanError::NoRoot)? as usize;
     state[root_idx] = State::Reachable;
-
-    // Parent entry index; None = missing or not a directory (orphan).
-    let parent_idx: Vec<Option<usize>> = entries
-        .iter()
-        .map(|e| index.get(&e.parent).copied().filter(|&p| entries[p].is_dir))
-        .collect();
+    let parent_idx = parent_entries(&entries, &index);
+    drop((index, dup));
 
     // Resolve reachability by walking up each chain once.
     let mut chain = Vec::new();
@@ -107,8 +165,8 @@ pub fn rollup(root: u64, entries: Vec<RawEntry>) -> Result<Rolled, ScanError> {
                     state[cur] = State::Visiting;
                     chain.push(cur);
                     match parent_idx[cur] {
-                        Some(p) => cur = p,
-                        None => break true, // orphan, attached under $Orphan
+                        NO_ENTRY => break true, // orphan, attached under $Orphan
+                        p => cur = p as usize,
                     }
                 }
             }
@@ -148,7 +206,7 @@ pub fn rollup(root: u64, entries: Vec<RawEntry>) -> Result<Rolled, ScanError> {
         } else {
             files += 1;
         }
-        if i != root_idx && parent_idx[i].is_none() {
+        if i != root_idx && parent_idx[i] == NO_ENTRY {
             orphans += 1;
         }
         // Directory sizes come from the roll-up, never from the record.
@@ -172,8 +230,8 @@ pub fn rollup(root: u64, entries: Vec<RawEntry>) -> Result<Rolled, ScanError> {
             continue;
         }
         let parent = match parent_idx[i] {
-            Some(p) => new_id[p],
-            None => orphan_node.expect("orphans > 0"),
+            NO_ENTRY => orphan_node.expect("orphans > 0"),
+            p => new_id[p as usize],
         };
         link(&mut nodes, new_id[i], parent);
     }
