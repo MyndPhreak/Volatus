@@ -116,7 +116,7 @@ time from the Scan click. "Restart as administrator" keeps the flag.
 
 ## Results
 
-M3 run by the user, 2026-10-22: `docsench.ps1 -Drive C -Rounds 5 -Sweep`, elevated. Ryzen 9
+M3 run by the user, 2026-10-22: `docs\bench.ps1 -Drive C -Rounds 5 -Sweep`, elevated. Ryzen 9
 7950X3D, 95 GB RAM, Corsair MP600 PRO NH, Windows 11 build 26300, WizTree 4.31. Median of 5
 rounds. Log: `.claude/work/storagetool-wiztree-clone/logs/P4-M3-user-run.txt`.
 
