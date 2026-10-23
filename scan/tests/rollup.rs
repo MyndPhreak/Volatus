@@ -1,3 +1,6 @@
+mod common;
+
+use common::reference::{Rng, assert_same_tree, rollup_reference};
 use scan::ScanError;
 use scan::rollup::{RawEntry, rollup};
 
@@ -345,4 +348,162 @@ fn rollup_node_ids_follow_input_order_of_reachable_entries_without_gaps() {
     assert_eq!(names, ["root", "x", "d", "y"]);
     assert_eq!((kids(t, NodeId(2)), kids(t, t.root()), r.skipped), (vec!["x"], vec!["d", "y"], 1));
     assert_eq!(shape(&r).len(), 4);
+}
+
+// ---- parity with the 81181b2 oracle on seeded forests ----
+
+const NAME_POOL: [&str; 6] = ["a", "", "\u{e9}t\u{e9}", "\u{65e5}\u{672c}\u{8a9e}", "x y", "$Orphan"];
+
+/// A forest rooted at id 1 (returned). Directories nest up to 40 deep; entries are permuted so
+/// parents may follow their children; the root lands at a random position. With `weird`, adds
+/// parents that are files, self-parents, missing parents, 2- and 3-cycles (with their
+/// subtrees), duplicate ids (including of directories with children) and a random root parent.
+fn forest(seed: u64, n: usize, weird: bool) -> (u64, Vec<RawEntry>) {
+    let mut rng = Rng::new(seed);
+    let mut all = vec![dir(1, 1, "root")];
+    let mut open_dirs: Vec<(u64, u32)> = vec![(1, 0)];
+    for k in 1..n {
+        let (parent, depth) = open_dirs[rng.below(open_dirs.len())];
+        let id = k as u64 + 1;
+        let base = NAME_POOL[rng.below(NAME_POOL.len())];
+        let name = if rng.chance(20) { base.to_string() } else { format!("{base}{k}") };
+        let is_dir = rng.chance(35);
+        let size = rng.below(10_000) as u64;
+        let (size, allocated) = if is_dir && rng.chance(50) { (0, 0) } else { (size, size + rng.below(4096) as u64) };
+        all.push(RawEntry { id, parent, name, size, allocated, is_dir });
+        if is_dir && depth < 40 {
+            open_dirs.push((id, depth + 1));
+        }
+    }
+    let mut rest = all.split_off(1);
+    for i in (1..rest.len()).rev() {
+        rest.swap(i, rng.below(i + 1));
+    }
+    if weird && n >= 4 {
+        for _ in 0..1 + n / 20 {
+            let (a, b, c) = (rng.below(rest.len()), rng.below(rest.len()), rng.below(rest.len()));
+            match rng.below(6) {
+                0 => rest[a].parent = rest[b].id,
+                1 => rest[a].parent = rest[a].id,
+                2 => rest[a].parent = (1 << 20) + a as u64,
+                3 => {
+                    (rest[a].parent, rest[b].parent) = (rest[b].id, rest[a].id);
+                    (rest[a].is_dir, rest[b].is_dir) = (true, true);
+                }
+                4 => {
+                    (rest[a].parent, rest[b].parent, rest[c].parent) = (rest[b].id, rest[c].id, rest[a].id);
+                    (rest[a].is_dir, rest[b].is_dir, rest[c].is_dir) = (true, true, true);
+                }
+                _ => rest[a].id = rest[b].id,
+            }
+        }
+    }
+    let mut root = all.pop().expect("root");
+    if weird && !rest.is_empty() && rng.chance(50) {
+        root.parent = rest[rng.below(rest.len())].id;
+    }
+    let at = if rng.chance(50) { 0 } else { rng.below(rest.len() + 1) };
+    rest.insert(at, root);
+    (1, rest)
+}
+
+/// Maps every id and parent through `f`.
+fn relabel(entries: &[RawEntry], f: impl Fn(u64) -> u64) -> Vec<RawEntry> {
+    entries.iter().map(|e| RawEntry { id: f(e.id), parent: f(e.parent), ..e.clone() }).collect()
+}
+
+fn assert_matches_reference(root: u64, entries: Vec<RawEntry>) {
+    let want = rollup_reference(root, entries.clone());
+    match (rollup(root, entries), want) {
+        (Ok(got), Some(want)) => assert_same_tree(&got, &want),
+        (Err(ScanError::NoRoot), None) => {}
+        (got, want) => panic!("outcome differs: got ok={}, reference some={}", got.is_ok(), want.is_some()),
+    }
+}
+
+fn size_for(seed: u64) -> usize {
+    1 + (seed as usize * 2477) % 5000
+}
+
+#[test]
+fn rollup_seeded_sane_forests_equal_the_reference() {
+    for seed in 1..=200 {
+        let (root, entries) = forest(seed, size_for(seed), false);
+
+        assert_matches_reference(root, entries);
+    }
+}
+
+#[test]
+fn rollup_seeded_weird_forests_equal_the_reference() {
+    for seed in 1..=200 {
+        let (root, entries) = forest(1000 + seed, size_for(seed), true);
+
+        assert_matches_reference(root, entries);
+    }
+}
+
+#[test]
+fn rollup_seeded_forests_with_sparse_ids_equal_the_reference() {
+    for seed in 1..=60 {
+        let (root, entries) = forest(2000 + seed, size_for(seed).max(8), seed % 2 == 0);
+
+        let sparse = relabel(&entries, |x| x * (1 << 33) + 7);
+
+        assert_matches_reference(root * (1 << 33) + 7, sparse);
+    }
+}
+
+#[test]
+fn rollup_seeded_forests_at_the_dense_index_boundary_equal_the_reference() {
+    for seed in 1..=40 {
+        let (root, entries) = forest(3000 + seed, size_for(seed).max(8), seed % 2 == 0);
+        let n = entries.len() as u64;
+        let max = entries.iter().map(|e| e.id).max().expect("non-empty");
+
+        for target in [8 * n + 1023, 8 * n + 1024] {
+            assert_matches_reference(root, relabel(&entries, |x| if x == max { target } else { x }));
+        }
+    }
+}
+
+#[test]
+fn rollup_150k_entry_forest_equals_the_reference() {
+    let (root, entries) = forest(77, 150_000, false);
+
+    assert_matches_reference(root, entries);
+}
+
+#[test]
+fn rollup_10k_deep_chain_equals_the_reference() {
+    let n = 10_000u64;
+    let entries: Vec<RawEntry> = (1..=n)
+        .map(|id| if id < n { dir(id, id.max(2) - 1, &format!("c{id}")) } else { file(id, id - 1, "leaf", 9) })
+        .collect();
+
+    assert_matches_reference(1, entries);
+}
+
+#[test]
+fn rollup_single_entry_input_equals_the_reference() {
+    assert_matches_reference(1, vec![dir(1, 1, "root")]);
+}
+
+#[test]
+fn rollup_root_with_only_orphans_equals_the_reference() {
+    assert_matches_reference(1, vec![file(2, 50, "o1", 1), dir(1, 7, "root"), dir(3, 51, "o2")]);
+}
+
+#[test]
+fn rollup_weird_forest_is_identical_in_pools_of_1_4_and_8_threads() {
+    let (root, entries) = forest(4242, 3000, true);
+    let want = rollup_reference(root, entries.clone()).expect("root present");
+
+    for threads in [1, 4, 8] {
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
+
+        let got = pool.install(|| rollup(root, entries.clone())).unwrap();
+
+        assert_same_tree(&got, &want);
+    }
 }
