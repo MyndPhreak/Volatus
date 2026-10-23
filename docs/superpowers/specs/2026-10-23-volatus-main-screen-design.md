@@ -56,6 +56,17 @@ The owner wants one thing from the main screen: right after a scan, see **what t
 - The tree sidebar follows what the treemap shows: it expands to the selected folder.
 - The start screen is the window's state before the first scan. After a scan starts, the window switches to the tree/treemap layout with a progress bar and Cancel.
 
+## More calls, after a reviewer read this document (all mine, mark them as such)
+
+- **Frame chrome is a layout change.** Today `treemap::layout` makes each child fill its parent's rectangle exactly. Frames with a label band and a border need children laid out inside a smaller inner rectangle (a header height and an inset per frame; a frame too small for a header gets none). Areas then stay proportional only approximately. I add this as a **new layout function** next to the current one, and the app switches to it. The current `layout`, its tests and its callers stay as they are until the new one replaces them in a later cleanup. `hit_test`, `selection_bounds` and the keyboard neighbour logic get framed counterparts with their own tests. The 1 px pruning rule stays.
+- **What a click means.** A single click selects the deepest tile under the cursor: a file tile selects that file, a click on a frame's label band or empty frame area selects that folder. The selection can be a file or a folder. The tree expands and scrolls to reveal the selection. A double-click on a folder frame opens that folder. A double-click on a file tile opens the file's parent folder with the file selected, so you see its neighbors. No file is opened or changed.
+- **Timing of "about 1 s".** It means the first treemap frame after the scan ends. File-type colors for tiles are computed at draw time from the names of the tiles that are drawn (tens of thousands, not millions). The footer's per-type totals are one pass over all names on a worker thread and may arrive after the treemap (a few seconds later is acceptable; the footer shows a quiet "counting file types" state until then). The pass must not block the UI.
+- **Window flow.** Cancel or a failed scan returns to the start screen with a short message. After a finished scan a "New scan" button in the top bar returns to the start screen. The path box and Browse button are replaced by the drive buttons and one "Choose folder" button. The existing `--timing` flag, the elevated relaunch and the autoscan argument keep working.
+- **Renderer and "frosted".** The Mica backdrop already provides the blur. "Frosted glass" means a translucent fill, a light 1 px border and a faint inner top highlight, not a real blur of the treemap. The hover lift and glow is one Slint element above the treemap with a drop shadow. Because shadows may behave differently on Slint's renderers, the **first phase is a short throwaway spike** that builds a glass frame, a lifted glowing tile and a sliding outline in the running app on this machine's default renderer, and records what works. If a shadow does not render, the fallback is a brighter border and a color tint, with no blur.
+- **Drives.** The start screen lists fixed and removable drives that are ready. Network drives are not listed (use "Choose folder"). Each button shows the drive letter and label, used/free and size, and a small "faster as administrator" note when not elevated. When elevated, a whole-drive scan uses the fast path, as today.
+- **Sign-off on the look.** The three mockup pages from the design conversation are the reference (`layout.html`, `layout-v2.html`, `style.html`; the owner's WizTree screenshots are the second reference). The owner signs off by running the app and looking at screenshots in light and dark theme; each phase includes screenshots and a manual check list since visual work cannot be tested first.
+- **Colors in both themes.** One palette of about ten file-type colors, each tuned for the dark glass look and checked in light theme by screenshot; the rest are grey.
+
 ## Left to the builder
 
 - Label fit rule, minimum frame size for a label, and the maximum number of overlay labels on screen at once.
@@ -68,4 +79,4 @@ The owner wants one thing from the main screen: right after a scan, see **what t
 
 ## Open items for the owner
 
-None now. Questions raised by the builder check are listed in the hand-over message.
+None. The builder check raised seven questions; none needed the owner (answered above).
