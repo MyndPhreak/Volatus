@@ -102,3 +102,247 @@ fn rollup_missing_root_returns_no_root() {
 
     assert!(matches!(err, ScanError::NoRoot));
 }
+
+// ---- pins added before the P7 rewrite (green on 81181b2) ----
+
+use scan::rollup::Rolled;
+use scan::{NodeId, Tree};
+
+fn find(t: &Tree, name: &str) -> NodeId {
+    let mut stack = vec![t.root()];
+    while let Some(n) = stack.pop() {
+        if t.name(n) == name {
+            return n;
+        }
+        stack.extend(t.children(n));
+    }
+    panic!("no node {name}")
+}
+
+fn kids(t: &Tree, n: NodeId) -> Vec<&str> {
+    t.children(n).map(|c| t.name(c)).collect()
+}
+
+type Shape = Vec<(Option<NodeId>, String, u64, u64, bool, Option<NodeId>, Option<NodeId>)>;
+
+/// Every node by NodeId: parent, name, sizes, kind, links. Walks ids until the first out of range.
+fn shape(r: &Rolled) -> Shape {
+    let mut out = Vec::new();
+    let mut dfs = vec![r.tree.root()];
+    let mut ids = Vec::new();
+    while let Some(n) = dfs.pop() {
+        ids.push(n);
+        dfs.extend(r.tree.children(n));
+    }
+    ids.sort();
+    for n in ids {
+        let x = r.tree.node(n);
+        out.push((x.parent, r.tree.name(n).to_string(), x.size, x.allocated, x.is_dir, x.first_child, x.next_sibling));
+    }
+    out
+}
+
+#[test]
+fn rollup_duplicate_id_first_wins_and_later_is_skipped() {
+    let entries = vec![dir(1, 1, "root"), dir(2, 1, "first"), dir(2, 1, "second"), file(3, 2, "c", 5)];
+
+    let r = rollup(1, entries).unwrap();
+
+    let t = &r.tree;
+    assert_eq!(kids(t, t.root()), ["first"]);
+    assert_eq!(kids(t, NodeId(1)), ["c"]);
+    assert_eq!((r.skipped, r.dirs, r.files, r.orphans), (1, 2, 1, 0));
+}
+
+#[test]
+fn rollup_duplicate_id_file_size_is_not_counted() {
+    let entries = vec![dir(1, 1, "root"), file(2, 1, "first", 5), file(2, 1, "dup", 100)];
+
+    let r = rollup(1, entries).unwrap();
+
+    assert_eq!((r.tree.node(r.tree.root()).size, r.skipped), (5, 1));
+}
+
+#[test]
+fn rollup_parent_is_a_file_attaches_child_under_orphan() {
+    let entries = vec![dir(1, 1, "root"), file(2, 1, "f", 4), file(3, 2, "child", 6)];
+
+    let r = rollup(1, entries).unwrap();
+
+    let t = &r.tree;
+    assert_eq!(kids(t, t.root()), ["f", "$Orphan"]);
+    assert_eq!(kids(t, find(t, "$Orphan")), ["child"]);
+    assert_eq!((r.orphans, r.skipped, t.node(t.root()).size), (1, 0, 10));
+}
+
+#[test]
+fn rollup_several_orphans_keep_input_order_and_orphan_is_last_node_and_last_child() {
+    let entries = vec![
+        dir(1, 1, "root"),
+        file(2, 999, "o1", 1),
+        file(3, 1, "ok", 1),
+        file(4, 998, "o2", 1),
+        dir(5, 1, "d"),
+    ];
+
+    let r = rollup(1, entries).unwrap();
+
+    let t = &r.tree;
+    assert_eq!(kids(t, t.root()), ["ok", "d", "$Orphan"]);
+    assert_eq!(kids(t, NodeId(5)), ["o1", "o2"]);
+    assert_eq!((t.name(NodeId(5)), r.orphans), ("$Orphan", 2));
+}
+
+#[test]
+fn rollup_orphan_size_and_allocated_roll_into_orphan_dir_and_root() {
+    let entries = vec![dir(1, 1, "root"), file(2, 1, "ok", 3), file(3, 999, "lost", 7)];
+
+    let r = rollup(1, entries).unwrap();
+
+    let t = &r.tree;
+    let o = t.node(find(t, "$Orphan"));
+    assert_eq!((o.size, o.allocated), (7, 17));
+    let root = t.node(t.root());
+    assert_eq!((root.size, root.allocated), (10, 30));
+}
+
+#[test]
+fn rollup_three_level_nesting_allocated_sums_at_every_level() {
+    let entries = vec![
+        dir(1, 1, "root"),
+        dir(2, 1, "a"),
+        dir(3, 2, "b"),
+        file(4, 3, "f", 10),
+        file(5, 2, "g", 3),
+    ];
+
+    let r = rollup(1, entries).unwrap();
+
+    let t = &r.tree;
+    let alloc = |n: &str| (t.node(find(t, n)).size, t.node(find(t, n)).allocated);
+    assert_eq!((alloc("b"), alloc("a"), alloc("root")), ((10, 20), (13, 33), (13, 33)));
+}
+
+#[test]
+fn rollup_root_last_in_input_with_parent_ref_to_descendant_ignores_that_ref() {
+    let entries = vec![file(2, 1, "f", 3), dir(3, 1, "d"), file(4, 3, "g", 4), dir(1, 3, "root")];
+
+    let r = rollup(1, entries).unwrap();
+
+    let t = &r.tree;
+    assert_eq!(t.root(), NodeId(3));
+    assert_eq!(kids(t, t.root()), ["f", "d"]);
+    assert_eq!((t.node(t.root()).size, r.skipped, r.orphans, r.files, r.dirs), (7, 0, 0, 2, 2));
+}
+
+#[test]
+fn rollup_two_cycle_with_subtree_skips_cycle_and_all_descendants() {
+    let entries = vec![
+        dir(1, 1, "root"),
+        file(2, 1, "ok", 3),
+        dir(3, 4, "x"),
+        dir(4, 3, "y"),
+        dir(5, 3, "sub"),
+        file(6, 5, "deep", 100),
+        file(7, 4, "u", 50),
+    ];
+
+    let r = rollup(1, entries).unwrap();
+
+    let t = &r.tree;
+    assert_eq!(shape(&r).len(), 2);
+    assert_eq!(kids(t, t.root()), ["ok"]);
+    assert_eq!((r.skipped, r.files, r.dirs, t.node(t.root()).size), (5, 1, 1, 3));
+}
+
+#[test]
+fn rollup_directory_record_size_is_ignored_and_dir_size_is_sum_of_children() {
+    let mut d = dir(2, 1, "d");
+    d.size = 999;
+    d.allocated = 999;
+    let mut empty = dir(3, 1, "empty");
+    empty.size = 50;
+    empty.allocated = 60;
+    let entries = vec![dir(1, 1, "root"), d, file(4, 2, "f", 5), empty];
+
+    let r = rollup(1, entries).unwrap();
+
+    let t = &r.tree;
+    let sz = |n: &str| (t.node(find(t, n)).size, t.node(find(t, n)).allocated);
+    assert_eq!((sz("d"), sz("empty"), sz("root")), ((5, 15), (0, 0), (5, 15)));
+}
+
+fn sparse_input(map: impl Fn(u64) -> u64) -> Vec<RawEntry> {
+    let mut v = vec![
+        dir(1, 1, "root"),
+        dir(2, 1, "d"),
+        file(3, 2, "f", 10),
+        file(4, 1000, "high-parent", 4),
+        file(5, 2, "g", 1),
+    ];
+    for e in &mut v {
+        e.id = map(e.id);
+        e.parent = map(e.parent);
+    }
+    v
+}
+
+#[test]
+fn rollup_ids_above_u32_with_gaps_and_parent_above_every_id_equals_compact_ids() {
+    let compact = rollup(1, sparse_input(|x| x)).unwrap();
+
+    let sparse = rollup(7 + (1 << 33), sparse_input(|x| x * (1 << 33) + 7)).unwrap();
+
+    assert_eq!(shape(&sparse), shape(&compact));
+    assert_eq!((sparse.orphans, sparse.skipped), (1, 0));
+    assert_eq!(kids(&sparse.tree, find(&sparse.tree, "$Orphan")), ["high-parent"]);
+}
+
+#[test]
+fn rollup_root_id_above_max_id_returns_no_root() {
+    let entries = || vec![dir(1, 1, "root"), file(2, 1, "f", 1), file(3, 1, "g", 1)];
+
+    let above = rollup(100, entries()).unwrap_err();
+    let max = rollup(u64::MAX, entries()).unwrap_err();
+
+    assert!(matches!(above, ScanError::NoRoot) && matches!(max, ScanError::NoRoot));
+}
+
+#[test]
+fn rollup_empty_input_returns_no_root() {
+    let err = rollup(1, Vec::new()).unwrap_err();
+
+    assert!(matches!(err, ScanError::NoRoot));
+}
+
+#[test]
+fn rollup_orphan_directory_children_hang_under_it_and_sizes_roll_through_orphan() {
+    let entries = vec![dir(1, 1, "root"), dir(2, 999, "od"), file(3, 2, "f", 8), file(4, 2, "g", 2)];
+
+    let r = rollup(1, entries).unwrap();
+
+    let t = &r.tree;
+    let orphan = find(t, "$Orphan");
+    assert_eq!(kids(t, orphan), ["od"]);
+    assert_eq!(kids(t, find(t, "od")), ["f", "g"]);
+    assert_eq!((t.node(orphan).size, t.node(t.root()).size, r.orphans, r.dirs), (10, 10, 1, 2));
+}
+
+#[test]
+fn rollup_node_ids_follow_input_order_of_reachable_entries_without_gaps() {
+    let entries = vec![
+        dir(1, 1, "root"),
+        file(4, 3, "x", 1),
+        dir(3, 1, "d"),
+        dir(8, 8, "selfloop"),
+        file(5, 1, "y", 1),
+    ];
+
+    let r = rollup(1, entries).unwrap();
+
+    let t = &r.tree;
+    let names: Vec<&str> = (0..4).map(|i| t.name(NodeId(i))).collect();
+    assert_eq!(names, ["root", "x", "d", "y"]);
+    assert_eq!((kids(t, NodeId(2)), kids(t, t.root()), r.skipped), (vec!["x"], vec!["d", "y"], 1));
+    assert_eq!(shape(&r).len(), 4);
+}
