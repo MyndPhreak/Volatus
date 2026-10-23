@@ -178,6 +178,9 @@ fn child_lists(parent: &[u32], dup: &[bool], root: usize) -> (Vec<u32>, Vec<u32>
     (off, kids, orphans)
 }
 
+/// Smallest slice of a level that rayon may split off to another thread.
+const MIN_SPLIT: usize = 4096;
+
 /// Reachable entries, level by level: level 0 is the root then the orphans; each next level is
 /// the children of the previous one, parent by parent. Cycles are never reached. Returns the
 /// order and the level bounds (`order[bounds[l]..bounds[l + 1]]` is level `l`).
@@ -189,8 +192,11 @@ fn levels(root: u32, orphans: &[u32], off: &[u32], kids: &[u32]) -> (Vec<u32>, V
     loop {
         let level = &order[bounds[bounds.len() - 2]..];
         // Ordered collect: the result does not depend on the thread count.
+        // ponytail: min_len 4096 (MIN_SPLIT) stops rayon splitting narrow levels, which made
+        // very deep trees up to 17x slower than a serial walk; tune if a level is cheaper/dearer.
         let next: Vec<u32> = level
             .par_iter()
+            .with_min_len(MIN_SPLIT)
             .flat_map_iter(|&p| {
                 kids[off[p as usize] as usize..off[p as usize + 1] as usize]
                     .iter()
@@ -246,6 +252,7 @@ fn roll_up_sizes(
         let (head, below) = sums.split_at_mut(end);
         head[start..]
             .par_iter_mut()
+            .with_min_len(MIN_SPLIT)
             .enumerate()
             .for_each(|(k, sum)| {
                 let j = start + k;
