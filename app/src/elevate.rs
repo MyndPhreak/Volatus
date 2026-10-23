@@ -46,7 +46,61 @@ pub fn restart_as_admin(scan_path: &str, timing: bool) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{quote_arg, relaunch_args};
+    use super::{quote_arg, relaunch_args, wide};
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::UI::Shell::CommandLineToArgvW;
+
+    /// Parses `command_line` with the real Windows rules, as the elevated copy's runtime does.
+    fn argv(command_line: &str) -> Vec<String> {
+        let line = wide(command_line.as_ref());
+        let mut count = 0;
+        // SAFETY: `line` is NUL terminated; the returned block is read within `count` and freed once.
+        unsafe {
+            let list = CommandLineToArgvW(line.as_ptr(), &mut count);
+            assert!(!list.is_null());
+            let out = (0..count as usize)
+                .map(|i| {
+                    let p = *list.add(i);
+                    let len = (0..).take_while(|&n| *p.add(n) != 0).count();
+                    OsString::from_wide(std::slice::from_raw_parts(p, len)).to_string_lossy().into_owned()
+                })
+                .collect();
+            LocalFree(list.cast());
+            out
+        }
+    }
+
+    #[test]
+    fn quote_arg_round_trips_through_command_line_to_argv() {
+        let cases = [
+            r"C:\Data",
+            r"C:\Data\",
+            r"C:\Data\\",
+            r"C:\Data\\\",
+            r"C:\",
+            r"C:\\",
+            r"\\",
+            r"\",
+            "",
+            r"C:\My Files\",
+            r"C:\My Files",
+            r#"C:\a"b"#,
+            r#"C:\a\"b"#,
+            r#"C:\a\\"b\"#,
+            r#"""#,
+            r#""""#,
+            "C:\\caf\u{e9}\\\u{4e2d}\u{6587} \u{1f4c1}\\",
+            r"\\server\share",
+            r"\\server\share\",
+            r"\\?\C:\Data\",
+        ];
+        for path in cases {
+            let parsed = argv(&format!("storagetool.exe {}", quote_arg(path)));
+            assert_eq!(parsed, ["storagetool.exe", path], "path {path:?} quoted as {}", quote_arg(path));
+        }
+    }
 
     #[test]
     fn quote_arg_trailing_backslash_is_doubled() {
