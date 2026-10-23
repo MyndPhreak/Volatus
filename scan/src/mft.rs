@@ -8,10 +8,9 @@
 //! `$ATTRIBUTE_LIST` is never needed. Only the unnamed `$DATA` stream counts (the walker sees the
 //! same). A file with several hard links is one entry, under its first non-DOS name.
 
-use crate::rollup::{RawEntry, Rolled, rollup};
+use crate::rollup::{IdMap, RawEntry, Rolled, rollup};
 use crate::{DEFAULT_CHUNK, Method, NodeId, Phases, Progress, ScanError, ScanStats, Tree};
 use rayon::prelude::*;
-use std::collections::HashMap;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Component, Path, Prefix};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -224,22 +223,41 @@ pub fn parse_record(buf: &mut [u8], number: u64) -> Result<Option<Record>, Malfo
 
 /// Merges extension records into their base and emits one entry per named base record.
 /// Returns the entries and the count of records dropped as unusable.
-pub fn entries(records: Vec<Record>) -> (Vec<RawEntry>, u64) {
-    let (mut bases, extensions): (Vec<Record>, Vec<Record>) =
-        records.into_iter().partition(|r| r.base.is_none());
-    let index: HashMap<u64, usize> = bases.iter().enumerate().map(|(i, r)| (r.number, i)).collect();
+pub fn entries(mut records: Vec<Record>) -> (Vec<RawEntry>, u64) {
+    // Extensions are rare (about 0.5 %): index only them, by base number, in input order.
+    // Value: (the LAST base record with that number, the extension records).
+    let mut ext: IdMap<(Option<usize>, Vec<usize>)> = IdMap::default();
+    for (i, r) in records.iter().enumerate() {
+        if let Some(b) = r.base {
+            ext.entry(b).or_default().1.push(i);
+        }
+    }
+    let ext_count: usize = ext.values().map(|(_, v)| v.len()).sum();
+    if !ext.is_empty() {
+        for (i, r) in records.iter().enumerate() {
+            if let (None, Some(slot)) = (r.base, ext.get_mut(&r.number)) {
+                slot.0 = Some(i);
+            }
+        }
+    }
     // An extension whose base is gone is stale: its base was already counted or never in use.
-    for e in extensions {
-        if let Some(&i) = e.base.and_then(|b| index.get(&b)) {
-            let b = &mut bases[i];
-            b.names.extend(e.names);
-            b.data = b.data.or(e.data);
-            b.surrogate |= e.surrogate;
+    // One whose base number belongs to another extension finds no base and is dropped too.
+    for (base, list) in ext.values() {
+        let Some(base) = *base else { continue };
+        for &e in list {
+            let (names, data, surrogate) = {
+                let e = &mut records[e];
+                (std::mem::take(&mut e.names), e.data, e.surrogate)
+            };
+            let b = &mut records[base];
+            b.names.extend(names);
+            b.data = b.data.or(data);
+            b.surrogate |= surrogate;
         }
     }
     let mut skipped = 0;
-    let mut out = Vec::with_capacity(bases.len());
-    for r in bases {
+    let mut out = Vec::with_capacity(records.len() - ext_count);
+    for r in records.into_iter().filter(|r| r.base.is_none()) {
         let data = r.data.unwrap_or_default();
         let Some(first) = r.names.into_iter().next() else {
             // Reserved system records are in use with no name and no data: nothing is lost.
