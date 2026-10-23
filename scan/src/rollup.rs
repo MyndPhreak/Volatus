@@ -61,6 +61,14 @@ enum State {
 const NO_NODE: u32 = u32::MAX;
 const ORPHAN_NAME: &str = "$Orphan";
 
+/// Length of a dense id table (`Vec` indexed by id) for `n` entries whose largest id is
+/// `max_id`, or `None` when the ids are too sparse and the `IdMap` must be used.
+#[allow(dead_code)] // stub: used by the next commit
+fn dense_len(n: usize, max_id: u64) -> Option<usize> {
+    let _ = (n, max_id);
+    todo!("dense_len")
+}
+
 /// Builds the tree. `root` is the id of the root entry; its own parent ref is ignored.
 /// Iterative throughout: depth and cycles cannot overflow the stack or loop forever.
 pub fn rollup(root: u64, entries: Vec<RawEntry>) -> Result<Rolled, ScanError> {
@@ -193,4 +201,27 @@ pub fn rollup(root: u64, entries: Vec<RawEntry>) -> Result<Rolled, ScanError> {
     let _ = std::thread::Builder::new().spawn(move || drop(entries));
     let tree = Tree { nodes, names, root: NodeId(root_node) };
     Ok(Rolled { tree, files, dirs, orphans, skipped })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dense_len;
+
+    #[test]
+    fn dense_len_max_id_below_8n_plus_1024_is_dense_with_one_slot_per_id() {
+        let cases = [(0, 0, 1), (0, 1023, 1024), (5, 1063, 1064), (1000, 9023, 9024), (6_000_000, 5_999_999, 6_000_000)];
+
+        for (n, max_id, want) in cases {
+            assert_eq!(dense_len(n, max_id), Some(want), "n {n} max_id {max_id}");
+        }
+    }
+
+    #[test]
+    fn dense_len_max_id_at_or_above_8n_plus_1024_uses_the_map() {
+        let cases = [(0, 1024), (5, 1064), (1000, 9024), (1, 1 << 33), (5, u64::MAX), (usize::MAX, u64::MAX)];
+
+        for (n, max_id) in cases {
+            assert_eq!(dense_len(n, max_id), None, "n {n} max_id {max_id}");
+        }
+    }
 }
