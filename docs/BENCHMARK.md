@@ -152,6 +152,65 @@ Caveats:
 
 M3 passes when "storagetool wall" is less than or equal to "WizTree wall", warm, on the same
 drive. "storagetool in-process" against "WizTree minus fixed" compares the scans alone.
+(The table above uses the name from before the rename to Volatus. The tool is the same.)
+
+### The app's `--timing` line over time (elevated, `C:\`, 5.07 M files)
+
+All values are the user's pasted numbers, one run each unless noted. Seconds.
+
+| Date | Build | Run | scan | total | Steps |
+|---|---|---|---|---|---|
+| 2026-10-22 | P5, chunk default 4 MiB | 1st (cold) | 17.3 | 18.0 | not shown by the app yet |
+| 2026-10-22 | P5, chunk default 4 MiB | 2nd (warm) | 7.2 | 7.9 | not shown by the app yet |
+| 2026-10-22 | P6, per-step line, 32 MiB | 1st (cold) | not recorded | 10.2 | not recorded here |
+| 2026-10-22 | P6, per-step line, 32 MiB | warm | not recorded | 7.1 | roll-up about 3.5 |
+| 2026-10-23 | P7, faster roll-up (`volatus.exe`) | 1st | 6.3 | 6.9 | open 2.4, read 2.1, parse 1.6, rollup 1.6 |
+| 2026-10-23 | P7, faster roll-up (`volatus.exe`) | 2nd | 5.0 | 5.6 | open 0.4, read 2.1, parse 1.6, rollup 2.4 |
+
+Notes:
+
+- The roll-up step went from about 3.5 s to 1.6 s on the first P7 run. On the second run it was
+  2.4 s with the same code. The cause is not known. No measurement explains it.
+- The step times do not add up to `scan`. The reader thread reads the next chunk while other
+  threads parse the last one, so `read` and `parse` are busy times that overlap.
+- The P6 row comes from the chief's brief. Its per-step values are not in the ledger or the logs.
+- The unelevated walker took 57.1 s in the app (total 57.3 s) and 40.8-43.7 s in the bench
+  (see the section below). The two numbers come from different runs and different programs.
+  WizTree with `/admin=0` took 217 s (one run).
+
+### Cold start: the first scan after a new exe or a boot
+
+The first elevated scan with a new exe, or after a boot, spends 2-11 s in `open`. A later run
+spends about 0.4-0.5 s. The same drop showed in the bench (11.9 s, then 0.5 s, each run a new
+process) and in the app (17.3 s, then 7.2 s). The `open` step only does `CreateFile` on the
+raw volume, two small reads and the decode of the `$MFT` runs. Disk speed, memory and thread
+pool start-up do not explain 11 s (see `.claude/work/storagetool-wiztree-clone/facts-P6.md`).
+The cause is **not verified**. A first-time check of the new exe or of the raw volume open by
+Windows Defender or another filter driver is the suspect. A probe patch exists in the work
+folder (`proofs/P6-open-probe.diff`); it has not been run elevated.
+
+### Live parity tests (elevated)
+
+`cargo test -p scan --test parity -- --ignored` passes on the live `C:\` volume:
+
+| Date | Build | Result | Time |
+|---|---|---|---|
+| 2026-10-22 | before roll-up speed-up | `parity_live_volume_mft_matches_walker` and `live_whole_volume_mft_scan_is_consistent` ok | 41.8 s |
+| 2026-10-23 | after roll-up speed-up | same two tests ok | 14.8 s |
+
+The first M2 run on 2026-10-22 (the scratch-folder test alone, debug build) passed in 62.0 s.
+
+### Limits of these numbers
+
+- One machine, one drive, one SSD. Different disks, file counts or CPUs can change the result.
+- Warm and cold caches are mixed in the app rows. Only the 6.7 s against 23.2 s comparison is
+  a controlled warm run with alternating tools. The cold run for both tools was not done.
+- WizTree ran with `/admin=1 /exportfiles=0 /exportmaxdepth=1`. Its time includes its start-up
+  and window (fixed cost 1.0 s).
+- Volatus counts a hard-linked file once. WizTree counts each name. Folder sizes and file
+  counts therefore differ on purpose, and the unelevated counts (5.0 M against 7.2 M files)
+  are not a like-for-like pair.
+- The timing numbers are values the user pasted. They were not re-measured for this page.
 
 ## Reference numbers without elevation (2026-10-22, builder)
 
