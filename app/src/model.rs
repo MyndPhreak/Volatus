@@ -219,13 +219,19 @@ impl TimingRun {
     /// The scan result reached the UI thread at `at`. "After scan" counts from here, so window
     /// start-up before the event loop runs is not part of it.
     pub fn scan_returned(&mut self, at: Instant, scan: Duration) {
-        unimplemented!("TimingRun::scan_returned")
+        (self.returned, self.scan) = (Some(at), scan);
     }
 
     /// The first treemap of the scan is shown at `now`. Returns the finished line once; `None`
     /// before the scan result arrived and for later layouts of the same scan.
     pub fn complete(&mut self, now: Instant) -> Option<String> {
-        unimplemented!("TimingRun::complete")
+        if self.line.is_some() {
+            return None;
+        }
+        let returned = self.returned?;
+        let line = format_timing(self.scan, now - returned, now - self.clicked);
+        self.line = Some(line.clone());
+        Some(line)
     }
 
     /// The finished line, if the treemap was shown.
@@ -236,7 +242,7 @@ impl TimingRun {
 
 /// The timing line the banner may show: only for a finished scan.
 pub fn timing_for_state(state: &ScanState, line: Option<&str>) -> Option<String> {
-    unimplemented!("timing_for_state")
+    line.filter(|_| matches!(state, ScanState::Done(_))).map(str::to_owned)
 }
 
 /// Short, plain message for a failed scan. Never empty.

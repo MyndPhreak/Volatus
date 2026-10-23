@@ -111,7 +111,7 @@ cold run with a warm run.
 
 Start the app with `--timing` (before or after the folder). After a scan the banner ends with
 `Timing: scan 5.3 s, after scan 0.2 s, total 5.5 s.` and the same line goes to stderr.
-"scan" is the scan itself. "after scan" is the work until the treemap is shown. "total" is the
+"scan" is the scan itself. "after scan" is the work from the moment the scan result reaches the window until the treemap is shown (window start-up is not counted). "total" is the
 time from the Scan click. "Restart as administrator" keeps the flag.
 
 ## Results

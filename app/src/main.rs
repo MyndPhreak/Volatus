@@ -15,8 +15,8 @@ mod tree_view;
 
 use browse::BrowseState;
 use model::{
-    Event, ScanControl, ScanState, Summary, append_timing, banner_text, error_message, format_size, format_timing,
-    group_digits, offer_elevation,
+    Event, ScanControl, ScanState, Summary, TimingRun, append_timing, banner_text, error_message, format_size,
+    group_digits, offer_elevation, timing_for_state,
 };
 use nav::{Dir, TreeMove};
 use scan::{NodeId, Progress, ScanError, Tree};
@@ -101,18 +101,6 @@ struct Loaded {
     rects: Vec<Rect>,
 }
 
-/// Timings of the latest scan, kept only when the app starts with `--timing`.
-struct TimingRun {
-    /// When the Scan click reached `start_scan`.
-    clicked: Instant,
-    /// When `scan::scan` returned. Set when the scan result is installed.
-    scan_returned: Option<Instant>,
-    /// `scan::scan` time, from the scan statistics.
-    scan: Duration,
-    /// The finished line. Set once, when the first treemap of the scan is shown.
-    line: Option<String>,
-}
-
 /// UI-thread state. Events from worker threads are applied here via `invoke_from_event_loop`.
 struct Session {
     /// State, id and stop flag of the current scan. Events from an older scan are dropped.
@@ -164,8 +152,7 @@ fn show_state(ui: &MainWindow) {
     // A root that cannot be resolved is not a drive root (same rule as `scan::scan_with`).
     let root = std::fs::canonicalize(&root).unwrap_or(root);
     let offer = matches!(&state, ScanState::Done(s) if offer_elevation(s.method, &root, elevate::is_admin()));
-    let line = SESSION.with_borrow(|s| s.run.as_ref().and_then(|r| r.line.clone()));
-    let line = line.filter(|_| matches!(state, ScanState::Done(_)));
+    let line = SESSION.with_borrow(|s| timing_for_state(&state, s.run.as_ref().and_then(TimingRun::line)));
     ui.set_banner(append_timing(banner_text(&state, offer), line.as_deref()).into());
     ui.set_show_elevate(offer);
 }
@@ -257,12 +244,7 @@ fn show_layout(ui: &MainWindow, root: NodeId, rects: Vec<Rect>, image: Option<Sh
 /// prints it to stderr and adds it to the banner. Later layouts of the same scan change nothing.
 fn note_treemap_shown(ui: &MainWindow) {
     let line = SESSION.with_borrow_mut(|s| {
-        let run = s.run.as_mut().filter(|r| r.line.is_none())?;
-        let returned = run.scan_returned?;
-        let now = Instant::now();
-        let line = format_timing(run.scan, now - returned, now - run.clicked);
-        run.line = Some(line.clone());
-        Some(line)
+        s.run.as_mut()?.complete(Instant::now())
     });
     if let Some(line) = line {
         eprintln!("{line}");
@@ -332,8 +314,8 @@ fn post(ui: &Weak<MainWindow>, generation: u64, event: Event) {
 
 /// Like `post` for `Finished`, and installs the scanned tree in the window. Both are dropped if
 /// a newer scan has started or the scan was cancelled (`ScanControl::finish` decides).
-/// `returned` is when `scan::scan` returned; it starts the post-scan time of `--timing`.
-fn post_done(ui: &Weak<MainWindow>, generation: u64, data: Data, summary: Summary, returned: Instant) {
+/// The post-scan time of `--timing` starts when this runs on the UI thread.
+fn post_done(ui: &Weak<MainWindow>, generation: u64, data: Data, summary: Summary) {
     let ui = ui.clone();
     let _ = slint::invoke_from_event_loop(move || {
         let Some(ui) = ui.upgrade() else { return };
@@ -341,7 +323,7 @@ fn post_done(ui: &Weak<MainWindow>, generation: u64, data: Data, summary: Summar
         if let Some(data) = SESSION.with_borrow_mut(|s| s.scan.finish(generation, summary, data)) {
             SESSION.with_borrow_mut(|s| {
                 if let Some(run) = s.run.as_mut() {
-                    (run.scan_returned, run.scan) = (Some(returned), scan);
+                    run.scan_returned(Instant::now(), scan);
                 }
             });
             install(&ui, Arc::new(data));
@@ -365,7 +347,7 @@ fn start_scan(ui: &MainWindow, path: &str) {
     };
     SESSION.with_borrow_mut(|s| {
         s.scan_root = PathBuf::from(path);
-        s.run = s.timing.then(|| TimingRun { clicked: Instant::now(), scan_returned: None, scan: Duration::ZERO, line: None });
+        s.run = s.timing.then(|| TimingRun::new(Instant::now()));
     });
     show_state(ui);
     clear(ui);
@@ -392,11 +374,10 @@ fn start_scan(ui: &MainWindow, path: &str) {
 
     std::thread::spawn(move || match scan::scan(&root, tx, &cancel) {
         Ok((tree, stats)) => {
-            let returned = Instant::now();
             let summary = Summary::new(&stats, tree.node(tree.root()).size);
             // Counted here, not on the UI thread: it visits every node.
             let counts = tree_view::file_counts(&tree);
-            post_done(&weak, generation, Data { tree, counts }, summary, returned);
+            post_done(&weak, generation, Data { tree, counts }, summary);
         }
         Err(ScanError::Cancelled) => post(&weak, generation, Event::Cancelled),
         Err(e) => post(&weak, generation, Event::Failed(error_message(&e))),
@@ -602,7 +583,7 @@ fn wire_tree_and_treemap(ui: &MainWindow) {
         let weak = ui.as_weak();
         move || {
             let Some(ui) = weak.upgrade() else { return };
-            match elevate::restart_as_admin(ui.get_path().trim(), SESSION.with_borrow(|s| s.timing)) {
+            match restart_admin(ui.get_path().trim(), elevate::restart_as_admin) {
                 Ok(()) => {
                     let _ = slint::quit_event_loop();
                 }
@@ -705,7 +686,7 @@ fn main() {
 
 /// Starts the elevated copy through `launch(path, timing)`. `--timing` is carried over from the session.
 fn restart_admin(path: &str, launch: impl FnOnce(&str, bool) -> Result<(), String>) -> Result<(), String> {
-    unimplemented!("restart_admin")
+    launch(path, SESSION.with_borrow(|s| s.timing))
 }
 
 #[cfg(test)]
