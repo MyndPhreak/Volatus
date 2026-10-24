@@ -370,15 +370,15 @@ fn lit_top(c: [u8; 3]) -> [u8; 3] {
     c.map(|v| (f64::from(v) + (255.0 - f64::from(v)) * 0.28).round() as u8)
 }
 
-/// Least contrast of a label's text: 4:1 over the whole tile, from its plain colour to its lit top.
+/// Least contrast of a label's text: 4.5:1 (WCAG AA, normal text) over the whole tile, from its plain colour to its lit top.
 #[test]
-fn ink_has_4_to_1_contrast_on_every_tile_colour_in_both_themes() {
+fn ink_has_aa_4_5_to_1_contrast_on_every_tile_colour_in_both_themes() {
     let mut low = Vec::new();
     for theme in [Theme::Dark, Theme::Light] {
         for c in Category::ALL {
             let tile = colour(c, theme);
             let worst = contrast(ink(tile), tile).min(contrast(ink(tile), lit_top(tile)));
-            if worst < 4.0 {
+            if worst < 4.5 {
                 low.push(format!("{theme:?} {c:?} {worst:.2}:1"));
             }
         }

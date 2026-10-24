@@ -2,6 +2,7 @@
 //! Plain functions, no Slint types, so it is unit tested.
 
 use scan::{Method, Phases, ScanError, ScanStats};
+use std::borrow::Cow;
 use std::io::ErrorKind;
 use std::path::Path;
 use std::sync::Arc;
@@ -176,6 +177,14 @@ pub fn format_size(bytes: u64) -> String {
         i += 1;
     }
     format!("{v:.1} {}", UNITS[i])
+}
+
+/// The name of a file or folder as the window shows it: each character that is invisible or
+/// reorders text (bidi and other format controls, control characters, line and paragraph
+/// separators) becomes U+FFFD, so a name cannot show other text than it holds. A name with none
+/// is returned borrowed. The stored name is not changed.
+pub fn display_name(_name: &str) -> Cow<'_, str> {
+    todo!("display_name")
 }
 
 /// `1234567` -> `1,234,567`.
@@ -999,5 +1008,89 @@ mod tests {
         for (method, root, admin, want) in cases {
             assert_eq!(offer_elevation(method, Path::new(root), admin), want, "{method:?} {root} admin={admin}");
         }
+    }
+
+    // ---- display_name ----
+    const FFFD: char = '\u{FFFD}';
+
+    /// Every character `display_name` hides, as inclusive ranges.
+    const HIDDEN: [(u32, u32); 12] = [
+        (0x00, 0x1F),
+        (0x7F, 0x9F),
+        (0xAD, 0xAD),
+        (0x61C, 0x61C),
+        (0x180E, 0x180E),
+        (0x200B, 0x200F),
+        (0x2028, 0x202E),
+        (0x2060, 0x206F),
+        (0xFEFF, 0xFEFF),
+        (0xFFF9, 0xFFFB),
+        (0xE0001, 0xE0001),
+        (0xE0020, 0xE007F),
+    ];
+
+    #[test]
+    fn display_name_every_hidden_character_becomes_one_placeholder() {
+        let mut kept = Vec::new();
+        for c in HIDDEN.iter().flat_map(|&(a, b)| a..=b).filter_map(char::from_u32) {
+            let name = format!("a{c}b");
+            if display_name(&name) != format!("a{FFFD}b") {
+                kept.push(format!("U+{:04X}", c as u32));
+            }
+        }
+        assert!(kept.is_empty(), "not replaced: {kept:?}");
+    }
+
+    #[test]
+    fn display_name_characters_next_to_the_hidden_ranges_are_kept() {
+        // Hair space, hyphen, narrow no-break space, medium math space, superscript zero,
+        // variation selector 16, object replacement character, first printable ASCII, U+00A0, U+00A1.
+        let next_to = "\u{200A}\u{2010}\u{2027}\u{202F}\u{205F}\u{2070}\u{FE0F}\u{FFFC}\u{20}\u{A0}\u{A1}\u{E0000}\u{E0080}";
+        assert_eq!(display_name(next_to), next_to);
+    }
+
+    #[test]
+    fn display_name_right_to_left_override_cannot_reverse_the_extension() {
+        let shown = display_name("invoice\u{202E}fdp.exe");
+        assert_eq!(shown, format!("invoice{FFFD}fdp.exe"));
+    }
+
+    #[test]
+    fn display_name_isolates_and_marks_are_replaced() {
+        assert_eq!(display_name("\u{2066}x\u{2069}\u{200E}y\u{200F}\u{061C}"), format!("{FFFD}x{FFFD}{FFFD}y{FFFD}{FFFD}"));
+    }
+
+    #[test]
+    fn display_name_zero_width_and_bom_are_replaced() {
+        assert_eq!(display_name("a\u{200B}b\u{200C}c\u{200D}d\u{FEFF}"), format!("a{FFFD}b{FFFD}c{FFFD}d{FFFD}"));
+    }
+
+    #[test]
+    fn display_name_name_of_only_controls_is_only_placeholders() {
+        assert_eq!(display_name("\u{202E}\u{200B}\u{FEFF}"), format!("{FFFD}{FFFD}{FFFD}"));
+    }
+
+    #[test]
+    fn display_name_empty_name_stays_empty() {
+        assert_eq!(display_name(""), "");
+    }
+
+    #[test]
+    fn display_name_plain_ascii_is_borrowed_unchanged() {
+        let shown = display_name("pagefile.sys");
+        assert!(matches!(shown, Cow::Borrowed("pagefile.sys")), "{shown:?}");
+    }
+
+    #[test]
+    fn display_name_emoji_hebrew_and_arabic_are_borrowed_unchanged() {
+        for name in ["clip \u{1F3AC}.mp4", "\u{5E9}\u{5DC}\u{5D5}\u{5DD}.txt", "\u{645}\u{631}\u{62D}\u{628}\u{627}", "\u{2764}\u{FE0F}.png"] {
+            assert!(matches!(display_name(name), Cow::Borrowed(_)), "{name}");
+            assert_eq!(display_name(name), name);
+        }
+    }
+
+    #[test]
+    fn display_name_a_replaced_name_is_owned() {
+        assert!(matches!(display_name("a\u{202E}b"), Cow::Owned(_)));
     }
 }

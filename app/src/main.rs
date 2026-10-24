@@ -1085,6 +1085,54 @@ mod tests {
         assert_eq!((frames.len(), files.len()), (2, 3));
     }
 
+    // ---- label cap ----
+    /// The C: drive needs 630 labels at 4K and 200% (554 frames and 76 files); the cap keeps a
+    /// 15% margin under the 50 ms budget (P8.P6b fix 1).
+    #[test]
+    fn label_cap_covers_the_c_drive_and_keeps_the_time_margin() {
+        assert!((630..=650).contains(&LABEL_CAP), "{LABEL_CAP}");
+    }
+
+    // ---- names with hidden characters reach the window as placeholders ----
+    /// root(0){ folder "d\u{202E}x"(1){ file "g"(3) }, file "invoice\u{202E}fdp.exe"(2) }
+    fn spoofed() -> (Tree, NodeId, NodeId) {
+        let e = |id: u64, parent: u64, name: &str, is_dir: bool| RawEntry { id, parent, name: name.into(), size: 10, allocated: 10, is_dir };
+        let entries = vec![e(0, 0, "root", true), e(1, 0, "d\u{202E}x", true), e(2, 0, "invoice\u{202E}fdp.exe", false), e(3, 1, "g", false)];
+        let tree = rollup(0, entries).unwrap().tree;
+        let find = |n: &str| tree.children(tree.root()).find(|&c| tree.name(c) == n).unwrap();
+        let (folder, file) = (find("d\u{202E}x"), find("invoice\u{202E}fdp.exe"));
+        (tree, folder, file)
+    }
+
+    #[test]
+    fn row_model_row_name_shows_a_placeholder_and_the_tree_keeps_the_name() {
+        let (tree, folder, file) = spoofed();
+        let data = Arc::new(Data { counts: crate::tree_view::file_counts(&tree), tree });
+        let row = |node| crate::tree_view::Row { node, depth: 0, expanded: false, has_children: false };
+        let model = RowModel { data: data.clone(), rows: RefCell::new(vec![row(folder), row(file)]), notify: ModelNotify::default() };
+
+        let names: Vec<String> = (0..2).map(|i| slint::Model::row_data(&model, i).unwrap().name.to_string()).collect();
+
+        assert_eq!(names, ["d\u{FFFD}x", "invoice\u{FFFD}fdp.exe"]);
+        assert_eq!(data.tree.name(file), "invoice\u{202E}fdp.exe");
+    }
+
+    #[test]
+    fn frame_labels_name_shows_a_placeholder() {
+        let (tree, folder, _) = spoofed();
+        let rects = [Rect { node: folder, x: 0.0, y: 0.0, w: 200.0, h: 100.0 }];
+        let names: Vec<String> = frame_labels(&tree, &rects, Chrome::scaled(1.0), 1.0).iter().map(|l| l.name.to_string()).collect();
+        assert_eq!(names, ["d\u{FFFD}x\\"]);
+    }
+
+    #[test]
+    fn file_labels_name_shows_a_placeholder() {
+        let (tree, _, file) = spoofed();
+        let rects = [Rect { node: file, x: 0.0, y: 0.0, w: 200.0, h: 100.0 }];
+        let names: Vec<String> = file_labels(&tree, &rects, 1.0, Theme::Dark, usize::MAX).iter().map(|l| l.name.to_string()).collect();
+        assert_eq!(names, ["invoice\u{FFFD}fdp.exe"]);
+    }
+
     fn data() -> Arc<Data> {
         let entries = vec![
             RawEntry { id: 0, parent: 0, name: "root".into(), size: 0, allocated: 0, is_dir: true },

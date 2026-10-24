@@ -817,6 +817,12 @@ mod tests {
         assert_eq!(frame_label(&t, folder), ("Données 日本語 ✓\\".to_string(), "2.0 KB".to_string()));
     }
 
+    #[test]
+    fn frame_label_name_with_a_right_to_left_override_shows_a_placeholder() {
+        let (t, folder) = one_folder("invoice\u{202E}fdp", 1);
+        assert_eq!(frame_label(&t, folder).0, "invoice\u{FFFD}fdp\\");
+    }
+
     // ---- file_label ----
     /// root(0){ file `name`(1) of `size` bytes }
     fn one_file(name: &str, size: u64) -> (Tree, NodeId) {
@@ -849,6 +855,12 @@ mod tests {
     fn file_label_zero_byte_file_shows_zero_bytes() {
         let (t, file) = one_file("empty.log", 0);
         assert_eq!(file_label(&t, file), ("empty.log".to_string(), "0 B".to_string()));
+    }
+
+    #[test]
+    fn file_label_name_with_a_right_to_left_override_shows_a_placeholder() {
+        let (t, file) = one_file("invoice\u{202E}fdp.exe", 1);
+        assert_eq!(file_label(&t, file).0, "invoice\u{FFFD}fdp.exe");
     }
 
     // ---- crumbs ----
@@ -979,5 +991,17 @@ mod tests {
         let t = with_empty_folder();
         assert_eq!(map_note(&t, find(&t, t.root(), "e"), &[], false), "");
         assert_eq!(map_note(&t, t.root(), &[], false), "");
+    }
+
+    #[test]
+    fn crumbs_name_with_a_right_to_left_override_shows_a_placeholder() {
+        let (t, f) = chain("C:\\", &["a\u{202E}b", "c\u{200B}d"]);
+        assert_eq!(crumbs(&t, f[2]), expected(&f, &[Some(0), Some(1), Some(2)], &["C:", "a\u{FFFD}b", "c\u{FFFD}d"]));
+    }
+
+    #[test]
+    fn crumbs_scan_root_with_a_control_character_shows_a_placeholder() {
+        let (t, f) = chain("D:\\x\u{202E}y", &[]);
+        assert_eq!(crumbs(&t, t.root()), expected(&f, &[Some(0)], &["D:\\x\u{FFFD}y"]));
     }
 }
