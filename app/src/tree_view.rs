@@ -522,6 +522,214 @@ mod tests {
         assert!(foreign.is_empty(), "outline of folder 'a' ({x:.0},{y:.0} {w:.0}x{h:.0}) covers {foreign:?}");
     }
 
+    // ---- framed layout: the existing hit, outline and neighbour rules ----
+    fn framed_sample() -> (Tree, Vec<Rect>) {
+        let t = sample();
+        let rects = treemap::layout_framed(&t, t.root(), 400, 300, treemap::Chrome::scaled(1.0));
+        (t, rects)
+    }
+
+    fn rect_of(rects: &[Rect], n: NodeId) -> Rect {
+        *rects.iter().find(|r| r.node == n).unwrap_or_else(|| panic!("{n:?} is not drawn"))
+    }
+
+    #[test]
+    fn hit_test_framed_header_band_is_the_folder() {
+        let (t, rects) = framed_sample();
+        let b = rect_of(&rects, find(&t, t.root(), "b"));
+        assert!(treemap::Chrome::scaled(1.0).has_header(&b), "{b:?}");
+
+        assert_eq!(hit_test(&rects, b.x + b.w / 2.0, b.y + 8.0), Some(b.node));
+    }
+
+    #[test]
+    fn hit_test_framed_inset_gap_is_the_folder() {
+        let (t, rects) = framed_sample();
+        let b = rect_of(&rects, find(&t, t.root(), "b"));
+
+        assert_eq!(hit_test(&rects, b.x + 1.0, b.y + b.h / 2.0), Some(b.node));
+    }
+
+    #[test]
+    fn hit_test_framed_tile_is_the_file() {
+        let (t, rects) = framed_sample();
+        let b1 = rect_of(&rects, find(&t, find(&t, t.root(), "b"), "b1"));
+
+        assert_eq!(hit_test(&rects, b1.x + b1.w / 2.0, b1.y + b1.h / 2.0), Some(b1.node));
+    }
+
+    #[test]
+    fn selection_bounds_framed_folder_outline_covers_only_its_own_rects() {
+        let (t, rects) = framed_sample();
+        let a = find(&t, t.root(), "a");
+
+        let (x, y, w, h) = selection_bounds(&rects, a).expect("folder a is drawn");
+
+        let foreign = rects
+            .iter()
+            .filter(|r| !is_under(&t, r.node, a) && !is_under(&t, a, r.node))
+            .filter(|r| r.x < x + w - 0.5 && r.x + r.w > x + 0.5 && r.y < y + h - 0.5 && r.y + r.h > y + 0.5)
+            .count();
+        assert_eq!(foreign, 0);
+    }
+
+    #[test]
+    fn neighbour_rect_framed_grid_gives_the_same_moves_as_the_plain_grid() {
+        // Four equal files: a 2 x 2 grid. Framed at 104 x 104, the inset leaves the plain 100 x 100 grid.
+        let e = |id: u64, size: u64| RawEntry { id, parent: 0, name: format!("f{id}"), size, allocated: size, is_dir: id == 0 };
+        let t = rollup(0, vec![e(0, 0), e(1, 5), e(2, 5), e(3, 5), e(4, 5)]).unwrap().tree;
+        let plain = treemap::layout(&t, t.root(), 100, 100);
+        let framed = treemap::layout_framed(&t, t.root(), 104, 104, treemap::Chrome::scaled(1.0));
+        let dirs = [crate::nav::Dir::Left, crate::nav::Dir::Right, crate::nav::Dir::Up, crate::nav::Dir::Down];
+
+        let moves = |rects: &[Rect]| -> Vec<Option<NodeId>> {
+            t.children(t.root())
+                .flat_map(|n| dirs.iter().map(move |&d| (n, d)))
+                .map(|(n, d)| crate::nav::neighbour_rect(rects, Some(n), d))
+                .collect()
+        };
+
+        assert_eq!(plain.len(), 4);
+        assert_eq!(moves(&framed), moves(&plain));
+    }
+
+    // ---- open_target ----
+    // root(0): a(1){ a1(3) }, e(2) empty folder, c(4) file
+    fn with_empty_folder() -> Tree {
+        let e = |id: u64, parent: u64, name: &str, size: u64, is_dir: bool| RawEntry {
+            id,
+            parent,
+            name: name.into(),
+            size,
+            allocated: size,
+            is_dir,
+        };
+        rollup(
+            0,
+            vec![e(0, 0, "root", 0, true), e(1, 0, "a", 0, true), e(2, 0, "e", 0, true), e(3, 1, "a1", 10, false), e(4, 0, "c", 5, false)],
+        )
+        .unwrap()
+        .tree
+    }
+
+    #[test]
+    fn open_target_folder_with_content_opens_and_selects_itself() {
+        let t = sample();
+        let a = find(&t, t.root(), "a");
+        assert_eq!(open_target(&t, a), Some((a, a)));
+    }
+
+    #[test]
+    fn open_target_empty_folder_is_none() {
+        let t = with_empty_folder();
+        assert_eq!(open_target(&t, find(&t, t.root(), "e")), None);
+    }
+
+    #[test]
+    fn open_target_file_in_a_subfolder_opens_its_folder_and_selects_it() {
+        let t = sample();
+        let sub = find(&t, find(&t, t.root(), "a"), "sub");
+        let s1 = find(&t, sub, "s1");
+        assert_eq!(open_target(&t, s1), Some((sub, s1)));
+    }
+
+    #[test]
+    fn open_target_file_under_the_root_opens_the_root_and_selects_it() {
+        let t = sample();
+        let c = find(&t, t.root(), "c");
+        assert_eq!(open_target(&t, c), Some((t.root(), c)));
+    }
+
+    #[test]
+    fn open_target_root_opens_the_root() {
+        let t = sample();
+        assert_eq!(open_target(&t, t.root()), Some((t.root(), t.root())));
+    }
+
+    #[test]
+    fn open_target_node_outside_the_shown_folder_opens_its_own_folder() {
+        // The map shows `a`, but the rects of an older layout hit `b1` in `b`.
+        let t = sample();
+        let b = find(&t, t.root(), "b");
+        let b1 = find(&t, b, "b1");
+        assert_eq!(open_target(&t, b1), Some((b, b1)));
+    }
+
+    // ---- view_for_selection ----
+    #[test]
+    fn view_for_selection_descendant_keeps_the_view() {
+        let t = sample();
+        let a = find(&t, t.root(), "a");
+        let s1 = find(&t, find(&t, a, "sub"), "s1");
+        assert_eq!(view_for_selection(&t, a, s1), a);
+    }
+
+    #[test]
+    fn view_for_selection_the_view_itself_keeps_the_view() {
+        let t = sample();
+        let a = find(&t, t.root(), "a");
+        assert_eq!(view_for_selection(&t, a, a), a);
+    }
+
+    #[test]
+    fn view_for_selection_ancestor_shows_its_parent() {
+        let t = sample();
+        let a = find(&t, t.root(), "a");
+        let sub = find(&t, a, "sub");
+        assert_eq!(view_for_selection(&t, sub, a), t.root());
+    }
+
+    #[test]
+    fn view_for_selection_cousin_folder_shows_its_parent() {
+        let t = sample();
+        let a = find(&t, t.root(), "a");
+        let b = find(&t, t.root(), "b");
+        assert_eq!(view_for_selection(&t, b, find(&t, a, "sub")), a);
+    }
+
+    #[test]
+    fn view_for_selection_cousin_file_shows_its_parent() {
+        let t = sample();
+        let sub = find(&t, find(&t, t.root(), "a"), "sub");
+        let b = find(&t, t.root(), "b");
+        assert_eq!(view_for_selection(&t, b, find(&t, sub, "s1")), sub);
+    }
+
+    #[test]
+    fn view_for_selection_scan_root_shows_the_root() {
+        let t = sample();
+        let sub = find(&t, find(&t, t.root(), "a"), "sub");
+        assert_eq!(view_for_selection(&t, sub, t.root()), t.root());
+    }
+
+    // ---- outline_node ----
+    #[test]
+    fn outline_node_drawn_node_is_itself() {
+        let t = sample();
+        let a = find(&t, t.root(), "a");
+        let a1 = find(&t, a, "a1");
+        let rects = [rect(a.0, 0.0, 0.0, 50.0, 50.0), rect(a1.0, 2.0, 18.0, 20.0, 20.0)];
+        assert_eq!(outline_node(&t, &rects, a1), Some(a1));
+    }
+
+    #[test]
+    fn outline_node_pruned_node_is_its_nearest_drawn_folder() {
+        let t = sample();
+        let a = find(&t, t.root(), "a");
+        let s1 = find(&t, find(&t, a, "sub"), "s1");
+        let rects = [rect(a.0, 0.0, 0.0, 50.0, 50.0), rect(find(&t, a, "a1").0, 2.0, 18.0, 20.0, 20.0)];
+        assert_eq!(outline_node(&t, &rects, s1), Some(a));
+    }
+
+    #[test]
+    fn outline_node_nothing_drawn_on_the_chain_is_none() {
+        let t = sample();
+        let b = find(&t, t.root(), "b");
+        let s1 = find(&t, find(&t, find(&t, t.root(), "a"), "sub"), "s1");
+        let rects = [rect(b.0, 0.0, 0.0, 50.0, 50.0), rect(find(&t, b, "b1").0, 2.0, 18.0, 20.0, 20.0)];
+        assert_eq!(outline_node(&t, &rects, s1), None);
+    }
+
     // ---- drill_target ----
     #[test]
     fn drill_target_leaf_in_subfolder_returns_child_of_view_root() {
