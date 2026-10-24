@@ -1028,4 +1028,197 @@ mod tests {
         let (t, f) = chain("D:\\x\u{202E}y", &[]);
         assert_eq!(crumbs(&t, t.root()), expected(&f, &[Some(0)], &["D:\\x\u{FFFD}y"]));
     }
+
+    // ---- tooltip_lines ----
+    const MB12: u64 = 12 * 1024 * 1024;
+
+    // C:\ (0)
+    //   Windows (1) { System32 (2) { kernel32.dll (3) = 12 MB, README (4) = 5, empty.txt (5) = 0, photo.JpG (6) = 3 } }
+    //   one (7) { only.txt (8) = 7 }
+    //   none (9) {}
+    //   .gitignore (10) = 1
+    //   Données 日本語.zip (11) = 2048
+    //   invoice\u{202E}fdp.exe (12) = 10
+    fn tip_tree() -> Tree {
+        let e = |id: u64, parent: u64, name: &str, size: u64, is_dir: bool| RawEntry {
+            id,
+            parent,
+            name: name.into(),
+            size,
+            allocated: size,
+            is_dir,
+        };
+        let entries = vec![
+            e(0, 0, "C:\\", 0, true),
+            e(1, 0, "Windows", 0, true),
+            e(2, 1, "System32", 0, true),
+            e(3, 2, "kernel32.dll", MB12, false),
+            e(4, 2, "README", 5, false),
+            e(5, 2, "empty.txt", 0, false),
+            e(6, 2, "photo.JpG", 3, false),
+            e(7, 0, "one", 0, true),
+            e(8, 7, "only.txt", 7, false),
+            e(9, 0, "none", 0, true),
+            e(10, 0, ".gitignore", 1, false),
+            e(11, 0, "Données 日本語.zip", 2048, false),
+            e(12, 0, "invoice\u{202E}fdp.exe", 10, false),
+        ];
+        rollup(0, entries).unwrap().tree
+    }
+
+    /// The tooltip lines of the node at `path` (names from the root down) in `tip_tree`.
+    fn tip(path: &[&str]) -> (String, String) {
+        let t = tip_tree();
+        let node = path.iter().fold(t.root(), |n, name| find(&t, n, name));
+        tooltip_lines(&t, &file_counts(&t), node)
+    }
+
+    fn lines(title: &str, detail: &str) -> (String, String) {
+        (title.to_string(), detail.to_string())
+    }
+
+    #[test]
+    fn tooltip_lines_file_gives_its_path_size_and_file_type() {
+        assert_eq!(
+            tip(&["Windows", "System32", "kernel32.dll"]),
+            lines("C:\\Windows\\System32\\kernel32.dll", "12.0 MB. DLL file.")
+        );
+    }
+
+    #[test]
+    fn tooltip_lines_extension_in_mixed_case_is_upper_case() {
+        assert_eq!(tip(&["Windows", "System32", "photo.JpG"]).1, "3 B. JPG file.");
+    }
+
+    #[test]
+    fn tooltip_lines_file_with_no_extension_says_so() {
+        assert_eq!(tip(&["Windows", "System32", "README"]), lines("C:\\Windows\\System32\\README", "5 B. File with no extension."));
+    }
+
+    #[test]
+    fn tooltip_lines_name_with_only_a_leading_dot_has_no_extension() {
+        assert_eq!(tip(&[".gitignore"]).1, "1 B. File with no extension.");
+    }
+
+    #[test]
+    fn tooltip_lines_zero_size_file_shows_0_b() {
+        assert_eq!(tip(&["Windows", "System32", "empty.txt"]).1, "0 B. TXT file.");
+    }
+
+    #[test]
+    fn tooltip_lines_folder_gives_its_path_size_and_file_count() {
+        assert_eq!(tip(&["Windows"]), lines("C:\\Windows", "12.0 MB. 4 files."));
+    }
+
+    #[test]
+    fn tooltip_lines_scan_root_gives_its_path_and_every_file() {
+        assert_eq!(tip(&[]), lines("C:\\", "12.0 MB. 8 files."));
+    }
+
+    #[test]
+    fn tooltip_lines_folder_with_one_file_says_1_file() {
+        assert_eq!(tip(&["one"]).1, "7 B. 1 file.");
+    }
+
+    #[test]
+    fn tooltip_lines_empty_folder_says_0_files() {
+        assert_eq!(tip(&["none"]).1, "0 B. 0 files.");
+    }
+
+    #[test]
+    fn tooltip_lines_large_file_count_groups_the_digits() {
+        let t = tip_tree();
+        let windows = find(&t, t.root(), "Windows");
+        let mut counts = file_counts(&t);
+        counts[windows.0 as usize] = 1_234_567;
+        assert_eq!(tooltip_lines(&t, &counts, windows).1, "12.0 MB. 1,234,567 files.");
+    }
+
+    #[test]
+    fn tooltip_lines_unicode_name_is_kept_unchanged() {
+        assert_eq!(tip(&["Données 日本語.zip"]), lines("C:\\Données 日本語.zip", "2.0 KB. ZIP file."));
+    }
+
+    #[test]
+    fn tooltip_lines_long_name_is_kept_whole() {
+        let long = format!("{}.bin", "Long file name ".repeat(20));
+        let e =|id: u64, parent: u64, name: &str, is_dir: bool| RawEntry { id, parent, name: name.into(), size: 1, allocated: 1, is_dir };
+        let t = rollup(0, vec![e(0, 0, "C:\\", true), e(1, 0, &long, false)]).unwrap().tree;
+        let node = find(&t, t.root(), &long);
+        assert_eq!(tooltip_lines(&t, &file_counts(&t), node).0, format!("C:\\{long}"));
+    }
+
+    #[test]
+    fn tooltip_lines_right_to_left_override_in_a_file_name_shows_a_placeholder_and_the_real_type() {
+        assert_eq!(tip(&["invoice\u{202E}fdp.exe"]), lines("C:\\invoice\u{FFFD}fdp.exe", "10 B. EXE file."));
+    }
+
+    #[test]
+    fn tooltip_lines_control_character_in_a_folder_of_the_path_shows_a_placeholder() {
+        let (t, folders) = chain("C:\\", &["d\u{202E}x"]);
+        let file = find(&t, folders[1], "f");
+        assert_eq!(tooltip_lines(&t, &file_counts(&t), file).0, "C:\\d\u{FFFD}x\\f");
+    }
+
+    #[test]
+    fn tooltip_lines_control_character_in_the_scan_root_shows_a_placeholder() {
+        let (t, _) = chain("D:\\x\u{202E}y", &[]);
+        assert_eq!(tooltip_lines(&t, &file_counts(&t), t.root()).0, "D:\\x\u{FFFD}y");
+    }
+
+    // ---- tip_position ----
+    /// Gap after the pointer used by the tests, as the window uses for x.
+    const GAP: f32 = 16.0;
+
+    #[test]
+    fn tip_position_tip_that_fits_after_the_pointer_goes_after_it() {
+        assert_eq!(tip_position(100.0, 50.0, 400.0, GAP), 116.0);
+    }
+
+    #[test]
+    fn tip_position_tip_that_ends_on_the_map_edge_still_goes_after_the_pointer() {
+        assert_eq!(tip_position(334.0, 50.0, 400.0, GAP), 350.0);
+    }
+
+    #[test]
+    fn tip_position_tip_one_pixel_past_the_edge_goes_before_the_pointer() {
+        assert_eq!(tip_position(335.0, 50.0, 400.0, GAP), 335.0 - TIP_FLIP_GAP - 50.0);
+    }
+
+    #[test]
+    fn tip_position_tip_before_the_pointer_may_start_on_the_map_edge() {
+        assert_eq!(tip_position(58.0, 50.0, 100.0, GAP), 0.0);
+    }
+
+    #[test]
+    fn tip_position_tip_that_fits_on_neither_side_ends_on_the_far_edge() {
+        assert_eq!(tip_position(40.0, 50.0, 100.0, GAP), 50.0);
+    }
+
+    #[test]
+    fn tip_position_tip_as_long_as_the_map_starts_at_0() {
+        assert_eq!(tip_position(30.0, 100.0, 100.0, GAP), 0.0);
+    }
+
+    #[test]
+    fn tip_position_tip_longer_than_the_map_starts_at_0() {
+        assert_eq!(tip_position(10.0, 150.0, 100.0, GAP), 0.0);
+    }
+
+    #[test]
+    fn tip_position_every_tip_that_fits_stays_inside_the_map() {
+        let mut checked = 0;
+        for extent in [0u16, 1, 50, 100, 101] {
+            for size in 0..=extent + 20 {
+                for pointer in 0..=extent {
+                    let (p, s, e) = (f32::from(pointer), f32::from(size), f32::from(extent));
+                    let at = tip_position(p, s, e, GAP);
+                    let inside = at >= 0.0 && (s > e || at + s <= e);
+                    assert!(inside, "pointer {p} size {s} map {e} -> {at}");
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 10_000, "{checked}");
+    }
 }

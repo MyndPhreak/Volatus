@@ -1363,6 +1363,12 @@ mod tests {
     }
 
     #[test]
+    fn hover_of_tooltip_is_the_path_then_the_size_and_file_type() {
+        let hover = hover_of_one(false, (0.0, 0.0, 80.0, 28.0), 1.0, Theme::Dark);
+        assert_eq!((hover.title.as_str(), hover.detail.as_str()), ("root\\clip0.mp4", "10 B. MP4 file."));
+    }
+
+    #[test]
     fn hover_of_node_not_drawn_is_not_visible() {
         let (tree, _, files) = flat(0, &[10]);
         let data = Data { counts: crate::tree_view::file_counts(&tree), tree };
