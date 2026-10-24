@@ -13,6 +13,7 @@ mod elevate;
 mod footer;
 mod model;
 mod nav;
+mod tip;
 mod tree_view;
 
 use browse::BrowseState;

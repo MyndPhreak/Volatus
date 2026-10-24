@@ -94,6 +94,12 @@ mod tests {
     }
 
     #[test]
+    fn chips_label_of_an_extension_with_a_hidden_character_shows_a_placeholder() {
+        let chips = chips(&[total("a\u{202E}b", 10)], 10, 8);
+        assert_eq!(labels(&chips), vec![".a\u{FFFD}b"]);
+    }
+
+    #[test]
     fn chips_label_is_the_extension_with_a_dot() {
         let chips = chips(&[total("dll", 5)], 5, 8);
 

@@ -509,6 +509,12 @@ mod tests {
     }
 
     #[test]
+    fn drive_buttons_label_with_a_hidden_character_shows_a_placeholder() {
+        let b = one(info('E', "Photos\u{202E}fdp", DriveKind::Removable, None));
+        assert_eq!(b.title, "E: Photos\u{FFFD}fdp");
+    }
+
+    #[test]
     fn drive_buttons_sorts_by_letter() {
         let v = drive_buttons(
             &[info('E', "", DriveKind::Removable, None), info('C', "", DriveKind::Fixed, None), info('D', "", DriveKind::Fixed, None)],

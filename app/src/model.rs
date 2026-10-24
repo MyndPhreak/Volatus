@@ -199,6 +199,12 @@ pub fn display_name(name: &str) -> Cow<'_, str> {
     }
 }
 
+/// The scan root as the title above the crumbs shows it: through `display_name`.
+pub fn scan_title(root: &Path) -> String {
+    let _ = root;
+    todo!("scan_title")
+}
+
 /// `1234567` -> `1,234,567`.
 pub fn group_digits(n: u64) -> String {
     let s = n.to_string();
@@ -1026,19 +1032,26 @@ mod tests {
     const FFFD: char = '\u{FFFD}';
 
     /// Every character `display_name` hides, as inclusive ranges.
-    const HIDDEN: [(u32, u32); 12] = [
+    const HIDDEN: [(u32, u32); 19] = [
         (0x00, 0x1F),
         (0x7F, 0x9F),
         (0xAD, 0xAD),
+        (0x34F, 0x34F),
         (0x61C, 0x61C),
-        (0x180E, 0x180E),
+        (0x115F, 0x1160),
+        (0x17B4, 0x17B5),
+        (0x180B, 0x180F),
         (0x200B, 0x200F),
         (0x2028, 0x202E),
         (0x2060, 0x206F),
+        (0x3164, 0x3164),
+        (0xFE00, 0xFE0E),
         (0xFEFF, 0xFEFF),
-        (0xFFF9, 0xFFFB),
-        (0xE0001, 0xE0001),
-        (0xE0020, 0xE007F),
+        (0xFFA0, 0xFFA0),
+        (0xFFF0, 0xFFFB),
+        (0x1BCA0, 0x1BCA3),
+        (0x1D173, 0x1D17A),
+        (0xE0000, 0xE0FFF),
     ];
 
     #[test]
@@ -1057,7 +1070,7 @@ mod tests {
     fn display_name_characters_next_to_the_hidden_ranges_are_kept() {
         // Hair space, hyphen, narrow no-break space, medium math space, superscript zero,
         // variation selector 16, object replacement character, first printable ASCII, U+00A0, U+00A1.
-        let next_to = "\u{200A}\u{2010}\u{2027}\u{202F}\u{205F}\u{2070}\u{FE0F}\u{FFFC}\u{20}\u{A0}\u{A1}\u{E0000}\u{E0080}";
+        let next_to = "\u{200A}\u{2010}\u{2027}\u{202F}\u{205F}\u{2070}\u{FE0F}\u{FFFC}\u{20}\u{A0}\u{A1}\u{E1000}\u{3163}\u{3165}\u{FFA1}\u{FFEF}\u{115E}\u{1161}\u{17B3}\u{17B6}\u{180A}\u{1810}\u{FE10}\u{34E}\u{350}\u{1BC9F}\u{1BCA4}\u{1D172}\u{1D17B}";
         assert_eq!(display_name(next_to), next_to);
     }
 
@@ -1104,5 +1117,98 @@ mod tests {
     #[test]
     fn display_name_a_replaced_name_is_owned() {
         assert!(matches!(display_name("a\u{202E}b"), Cow::Owned(_)));
+    }
+
+    #[test]
+    fn display_name_a_name_of_hangul_fillers_is_only_placeholders() {
+        assert_eq!(display_name("\u{3164}\u{3164}\u{FFA0}\u{115F}\u{1160}"), format!("{FFFD}{FFFD}{FFFD}{FFFD}{FFFD}"));
+    }
+
+    #[test]
+    fn display_name_variation_selector_16_after_a_symbol_is_kept() {
+        assert!(matches!(display_name("\u{2764}\u{FE0F}"), Cow::Borrowed(_)));
+    }
+
+    // The zero width non-joiner (U+200C) and joiner (U+200D) stay only between two visible
+    // characters that are not ASCII.
+    const ZWNJ: char = '\u{200C}';
+    const ZWJ: char = '\u{200D}';
+
+    #[test]
+    fn display_name_persian_zero_width_non_joiner_is_kept() {
+        let name = "\u{645}\u{6CC}\u{200C}\u{62E}\u{648}\u{627}\u{647}\u{645}";
+        assert!(matches!(display_name(name), Cow::Borrowed(_)));
+        assert_eq!(display_name(name), name);
+    }
+
+    #[test]
+    fn display_name_indic_conjunct_joiner_is_kept() {
+        let name = "\u{915}\u{94D}\u{200D}\u{937}";
+        assert_eq!(display_name(name), name);
+    }
+
+    #[test]
+    fn display_name_emoji_family_sequence_is_kept() {
+        let name = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}.png";
+        assert_eq!(display_name(name), name);
+    }
+
+    #[test]
+    fn display_name_joiner_between_ascii_letters_is_replaced() {
+        for joiner in [ZWNJ, ZWJ] {
+            assert_eq!(display_name(&format!("a{joiner}b")), format!("a{FFFD}b"));
+        }
+    }
+
+    #[test]
+    fn display_name_joiner_with_ascii_on_one_side_is_replaced() {
+        for joiner in [ZWNJ, ZWJ] {
+            assert_eq!(display_name(&format!("\u{645}{joiner}a")), format!("\u{645}{FFFD}a"));
+            assert_eq!(display_name(&format!("a{joiner}\u{645}")), format!("a{FFFD}\u{645}"));
+        }
+    }
+
+    #[test]
+    fn display_name_joiner_at_the_start_or_the_end_is_replaced() {
+        for joiner in [ZWNJ, ZWJ] {
+            assert_eq!(display_name(&format!("{joiner}\u{645}")), format!("{FFFD}\u{645}"));
+            assert_eq!(display_name(&format!("\u{645}{joiner}")), format!("\u{645}{FFFD}"));
+            assert_eq!(display_name(&joiner.to_string()), FFFD.to_string());
+        }
+    }
+
+    #[test]
+    fn display_name_two_joiners_in_a_row_are_both_replaced() {
+        assert_eq!(display_name("\u{645}\u{200D}\u{200D}\u{646}"), format!("\u{645}{FFFD}{FFFD}\u{646}"));
+        assert_eq!(display_name("\u{645}\u{200C}\u{200D}\u{646}"), format!("\u{645}{FFFD}{FFFD}\u{646}"));
+    }
+
+    #[test]
+    fn display_name_joiner_next_to_another_hidden_character_is_replaced() {
+        assert_eq!(display_name("\u{645}\u{200B}\u{200D}\u{646}"), format!("\u{645}{FFFD}{FFFD}\u{646}"));
+        assert_eq!(display_name("\u{645}\u{200D}\u{202E}\u{646}"), format!("\u{645}{FFFD}{FFFD}\u{646}"));
+    }
+
+    #[test]
+    fn display_name_joiner_next_to_a_space_is_replaced() {
+        assert_eq!(display_name("\u{645}\u{200D}\u{A0}\u{646}"), format!("\u{645}{FFFD}\u{A0}\u{646}"));
+    }
+
+    // ---- scan_title ----
+    #[test]
+    fn scan_title_plain_path_is_unchanged() {
+        assert_eq!(scan_title(Path::new(r"D:\data")), r"D:\data");
+    }
+
+    #[test]
+    fn scan_title_root_with_a_right_to_left_override_shows_a_placeholder() {
+        assert_eq!(scan_title(Path::new("D:\\x\u{202E}y")), format!("D:\\x{FFFD}y"));
+    }
+
+    // ---- other places a name reaches the window ----
+    #[test]
+    fn banner_text_error_message_with_a_hidden_character_shows_a_placeholder() {
+        let m = "Could not read D:\\x\u{202E}y.".to_string();
+        assert_eq!(banner_text(&ScanState::Error(m), false), format!("Scan failed. Could not read D:\\x{FFFD}y."));
     }
 }
