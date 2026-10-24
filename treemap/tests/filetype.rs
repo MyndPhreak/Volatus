@@ -1,6 +1,6 @@
 use scan::rollup::{RawEntry, rollup};
 use scan::{NodeId, Tree};
-use treemap::filetype::{Category, category_of, colour, extension};
+use treemap::filetype::{Category, category_of, colour, extension, type_totals};
 use treemap::{Chrome, Rect, Theme, layout_framed, render_framed};
 
 /// Files `(name, size)` directly under a root folder.
@@ -222,4 +222,134 @@ fn render_framed_program_tile_has_the_light_program_colour_in_light() {
 #[test]
 fn render_framed_tile_with_no_extension_is_other_grey() {
     assert_eq!(tile_body(Theme::Dark, "README"), [0x6e, 0x6e, 0x6e]);
+}
+
+// ---- type_totals ----
+
+/// `(ext, bytes, files)` of each total, in order.
+fn totals_of(tree: &Tree, root: NodeId) -> Vec<(String, u64, u64)> {
+    type_totals(tree, root).into_iter().map(|t| (t.ext, t.bytes, t.files)).collect()
+}
+
+fn row(ext: &str, bytes: u64, files: u64) -> (String, u64, u64) {
+    (ext.to_string(), bytes, files)
+}
+
+#[test]
+fn type_totals_sums_bytes_and_files_per_extension() {
+    let tree = files(&[("a.exe", 7), ("b.dll", 10), ("c.dll", 5)]);
+
+    assert_eq!(totals_of(&tree, tree.root()), vec![row("dll", 15, 2), row("exe", 7, 1)]);
+}
+
+#[test]
+fn type_totals_upper_and_lower_case_extension_are_one_lower_case_entry() {
+    let tree = files(&[("x.DLL", 4), ("y.dll", 6), ("z.Dll", 1)]);
+
+    assert_eq!(totals_of(&tree, tree.root()), vec![row("dll", 11, 3)]);
+}
+
+#[test]
+fn type_totals_names_with_no_extension_are_one_empty_entry() {
+    let tree = files(&[("Makefile", 3), (".gitignore", 2), ("file.", 1), ("a.txt ", 1), ("x.ÄBC", 1), ("a.b-c", 1)]);
+
+    assert_eq!(totals_of(&tree, tree.root()), vec![row("", 9, 6)]);
+}
+
+#[test]
+fn type_totals_unusual_names_use_the_last_extension_in_lower_case() {
+    let tree = files(&[("x.tar.gz", 8), ("日本.TXT", 4), ("a.abcdefghijkl", 2), ("a.abcdefghijklm", 1)]);
+
+    assert_eq!(totals_of(&tree, tree.root()), vec![row("gz", 8, 1), row("txt", 4, 1), row("abcdefghijkl", 2, 1), row("", 1, 1)]);
+}
+
+#[test]
+fn type_totals_zero_size_files_count_with_zero_bytes() {
+    let tree = files(&[("a.exe", 7), ("empty.txt", 0)]);
+
+    assert_eq!(totals_of(&tree, tree.root()), vec![row("exe", 7, 1), row("txt", 0, 1)]);
+}
+
+/// root{ pkg.zip (folder){ data.bin=5, inner.7z (folder){} }, top.exe=1 }
+fn with_dotted_folders() -> Tree {
+    let e = |id: u64, parent: u64, name: &str, size: u64, is_dir: bool| RawEntry {
+        id,
+        parent,
+        name: name.into(),
+        size,
+        allocated: size,
+        is_dir,
+    };
+    let entries = vec![
+        e(0, 0, "root", 0, true),
+        e(1, 0, "pkg.zip", 0, true),
+        e(2, 1, "data.bin", 5, false),
+        e(3, 1, "inner.7z", 0, true),
+        e(4, 0, "top.exe", 1, false),
+    ];
+    rollup(0, entries).unwrap().tree
+}
+
+#[test]
+fn type_totals_folders_are_never_counted() {
+    let tree = with_dotted_folders();
+
+    assert_eq!(totals_of(&tree, tree.root()), vec![row("bin", 5, 1), row("exe", 1, 1)]);
+}
+
+#[test]
+fn type_totals_of_a_folder_counts_only_the_files_under_it() {
+    let tree = with_dotted_folders();
+    let pkg = named(&tree, "pkg.zip");
+
+    assert_eq!(totals_of(&tree, pkg), vec![row("bin", 5, 1)]);
+}
+
+#[test]
+fn type_totals_sorted_by_bytes_desc_then_ext_asc() {
+    let tree = files(&[("a.zz", 5), ("b.yy", 5), ("c.big", 9), ("d.aa", 1), ("e", 5)]);
+
+    let exts: Vec<String> = type_totals(&tree, tree.root()).into_iter().map(|t| t.ext).collect();
+
+    assert_eq!(exts, vec!["big", "", "yy", "zz", "aa"]);
+}
+
+#[test]
+fn type_totals_folder_with_no_files_is_empty() {
+    let tree = files(&[]);
+
+    assert_eq!(totals_of(&tree, tree.root()), vec![]);
+}
+
+/// 6,000 folders x 1,000 files = 6,000,000 files over 2,000 extensions ("e0" to "e1999").
+fn six_million_files() -> Tree {
+    let mut entries = Vec::with_capacity(6_006_001);
+    entries.push(RawEntry { id: 0, parent: 0, name: "root".into(), size: 0, allocated: 0, is_dir: true });
+    let mut id = 1u64;
+    for _ in 0..6_000 {
+        let folder = id;
+        entries.push(RawEntry { id, parent: 0, name: format!("folder{id}"), size: 0, allocated: 0, is_dir: true });
+        id += 1;
+        for _ in 0..1_000 {
+            let name = format!("file{id}.E{}", id % 2_000);
+            entries.push(RawEntry { id, parent: folder, name, size: id % 4_096, allocated: 0, is_dir: false });
+            id += 1;
+        }
+    }
+    rollup(0, entries).unwrap().tree
+}
+
+#[test]
+#[ignore = "release timing: cargo test --release -p treemap --test filetype -- --ignored --nocapture"]
+fn type_totals_six_million_files_take_under_two_seconds() {
+    let tree = six_million_files();
+
+    let started = std::time::Instant::now();
+    let totals = type_totals(&tree, tree.root());
+    let took = started.elapsed();
+    eprintln!("type_totals of 6,000,000 files, {} extensions: {took:?}", totals.len());
+
+    let files: u64 = totals.iter().map(|t| t.files).sum();
+    assert_eq!((totals.len(), files), (2_000, 6_000_000));
+    assert!(took.as_secs_f64() < 2.0, "took {took:?}");
 }

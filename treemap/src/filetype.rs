@@ -135,5 +135,5 @@ pub struct TypeTotal {
 /// ext asc). Folders are not counted; files with no size count with 0 bytes.
 pub fn type_totals(tree: &Tree, root: NodeId) -> Vec<TypeTotal> {
     let _ = (tree, root);
-    Vec::new()
+    todo!()
 }
