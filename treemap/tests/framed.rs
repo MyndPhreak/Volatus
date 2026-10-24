@@ -1,6 +1,6 @@
 use scan::rollup::{RawEntry, rollup};
 use scan::{NodeId, Tree};
-use treemap::{Chrome, Rect, Theme, layout, layout_framed, render_framed};
+use treemap::{Chrome, Rect, Theme, label_spots, layout, layout_framed, render_framed};
 
 const W: u32 = 800;
 const H: u32 = 600;
@@ -497,4 +497,118 @@ fn render_framed_light_fill_differs_from_dark_fill() {
     let (dark, light) = (shot(Theme::Dark), shot(Theme::Light));
 
     assert_ne!(dark.band("n1"), light.band("n1"));
+}
+
+// ---- label_spots ----
+
+/// A rect of node `name` in `sample()`.
+fn at(tree: &Tree, name: &str, x: f64, y: f64, w: f64, h: f64) -> Rect {
+    Rect { node: named(tree, name), x, y, w, h }
+}
+
+#[test]
+fn label_spots_folder_with_a_band_gets_one_spot_on_its_band() {
+    let tree = sample();
+    let rects = [at(&tree, "n1", 10.0, 20.0, 100.0, 50.0)];
+
+    let spots = label_spots(&tree, &rects, ONE, 96.0, 10);
+
+    assert_eq!(spots, vec![at(&tree, "n1", 12.0, 20.0, 96.0, 16.0)]);
+}
+
+#[test]
+fn label_spots_band_narrower_than_min_w_gets_none() {
+    let tree = sample();
+    let rects = [at(&tree, "n1", 10.0, 20.0, 100.0, 50.0)];
+
+    assert!(label_spots(&tree, &rects, ONE, 96.01, 10).is_empty());
+}
+
+#[test]
+fn label_spots_folder_without_a_band_gets_none() {
+    let tree = sample();
+    let rects = [at(&tree, "n1", 0.0, 0.0, 100.0, 31.99)];
+
+    assert!(label_spots(&tree, &rects, ONE, 24.0, 10).is_empty());
+}
+
+#[test]
+fn label_spots_file_gets_none() {
+    let tree = sample();
+    let rects = [at(&tree, "n3", 0.0, 0.0, 400.0, 300.0)];
+
+    assert!(label_spots(&tree, &rects, ONE, 24.0, 10).is_empty());
+}
+
+/// Folders in depth-first order; by area n2 > n1 > n13 > n4.
+fn four_frames(tree: &Tree) -> [Rect; 4] {
+    [
+        at(tree, "n1", 0.0, 0.0, 200.0, 100.0),
+        at(tree, "n13", 2.0, 16.0, 100.0, 40.0),
+        at(tree, "n2", 200.0, 0.0, 300.0, 200.0),
+        at(tree, "n4", 0.0, 100.0, 60.0, 40.0),
+    ]
+}
+
+#[test]
+fn label_spots_more_than_cap_keeps_the_largest_in_depth_first_order() {
+    let tree = sample();
+    let rects = four_frames(&tree);
+
+    let spots = label_spots(&tree, &rects, ONE, 24.0, 2);
+
+    let names: Vec<&str> = spots.iter().map(|s| tree.name(s.node)).collect();
+    assert_eq!(names, ["n1", "n2"]);
+}
+
+#[test]
+fn label_spots_cap_above_the_count_keeps_every_spot() {
+    let tree = sample();
+    let rects = four_frames(&tree);
+
+    let spots = label_spots(&tree, &rects, ONE, 24.0, 5);
+
+    let names: Vec<&str> = spots.iter().map(|s| tree.name(s.node)).collect();
+    assert_eq!(names, ["n1", "n13", "n2", "n4"]);
+}
+
+#[test]
+fn label_spots_equal_areas_keep_the_first_in_rects() {
+    let tree = sample();
+    let rects = [at(&tree, "n2", 0.0, 0.0, 100.0, 50.0), at(&tree, "n1", 100.0, 0.0, 100.0, 50.0)];
+
+    let spots = label_spots(&tree, &rects, ONE, 24.0, 1);
+
+    assert_eq!(spots.len(), 1);
+    assert_eq!(tree.name(spots[0].node), "n2");
+}
+
+#[test]
+fn label_spots_cap_zero_is_empty() {
+    let tree = sample();
+    let rects = four_frames(&tree);
+
+    assert!(label_spots(&tree, &rects, ONE, 24.0, 0).is_empty());
+}
+
+#[test]
+fn label_spots_at_scale_two_band_is_32_high_inside_a_4_px_inset() {
+    let tree = sample();
+    let rects = [at(&tree, "n1", 10.0, 20.0, 200.0, 100.0)];
+
+    let spots = label_spots(&tree, &rects, Chrome::scaled(2.0), 48.0, 10);
+
+    assert_eq!(spots, vec![at(&tree, "n1", 14.0, 20.0, 192.0, 32.0)]);
+}
+
+#[test]
+fn label_spots_of_a_real_layout_are_the_bands_of_the_frames() {
+    let tree = sample();
+    let rects = layout_framed(&tree, tree.root(), W, H, ONE);
+
+    let spots = label_spots(&tree, &rects, ONE, 24.0, usize::MAX);
+
+    let frames: Vec<NodeId> = rects.iter().filter(|r| tree.node(r.node).is_dir && ONE.has_header(r)).map(|r| r.node).collect();
+    assert!(frames.len() >= 3, "{frames:?}");
+    assert_eq!(spots.iter().map(|s| s.node).collect::<Vec<_>>(), frames);
 }

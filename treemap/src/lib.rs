@@ -136,6 +136,16 @@ pub fn layout_framed(tree: &Tree, root: NodeId, w: u32, h: u32, chrome: Chrome) 
     out
 }
 
+/// Where the frame labels go: for each folder in `rects` with a label band (`chrome.has_header`)
+/// whose band is at least `min_w` wide less the inset on both sides, the rect
+/// `(x + pad, y, w - 2 pad, header)` with the folder's node. Files get none.
+///
+/// At most `cap` spots: the largest folders by area (ties: the first in `rects`), in the order
+/// of `rects`, so a folder's label comes before the labels of its descendants.
+pub fn label_spots(tree: &Tree, rects: &[Rect], chrome: Chrome, min_w: f64, cap: usize) -> Vec<Rect> {
+    todo!()
+}
+
 /// Places `areas` (sorted largest first) inside `b` as rows along the short side. Rects go
 /// to `out` as `(x, y, w, h)`, in the order of `areas`. With `fills`, the last row takes
 /// exactly what is left of `b`, so float drift cannot leave a gap.

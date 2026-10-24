@@ -172,6 +172,23 @@ pub fn outline_node(tree: &Tree, rects: &[Rect], selected: NodeId) -> Option<Nod
     None
 }
 
+/// Map text for a folder with no file that has a size.
+pub const NO_SIZES: &str = "No files with a size in this folder.";
+/// Map text for a folder whose files are all too small to draw at this map size.
+pub const TOO_SMALL: &str = "The files in this folder are too small to show.";
+
+/// The text the treemap shows over the layout `rects` of `root`, or "" for none. A map with no
+/// area (`has_area` false) shows no text.
+pub fn map_note(tree: &Tree, root: NodeId, rects: &[Rect], has_area: bool) -> &'static str {
+    todo!()
+}
+
+/// The label of folder `node` on its frame: (name with a trailing `\`, size), as
+/// `("Local\\", "306.0 GB")`.
+pub fn frame_label(tree: &Tree, node: NodeId) -> (String, String) {
+    todo!()
+}
+
 /// Order of two siblings: the chosen column, flipped if descending, then name, then id.
 fn compare(tree: &Tree, counts: &[u64], view: &ViewState, a: NodeId, b: NodeId) -> Ordering {
     let name = |n: NodeId| tree.name(n).chars().flat_map(char::to_lowercase);
@@ -730,5 +747,62 @@ mod tests {
         let s1 = find(&t, find(&t, find(&t, t.root(), "a"), "sub"), "s1");
         let rects = [rect(b.0, 0.0, 0.0, 50.0, 50.0), rect(find(&t, b, "b1").0, 2.0, 18.0, 20.0, 20.0)];
         assert_eq!(outline_node(&t, &rects, s1), None);
+    }
+
+    // ---- frame_label ----
+    /// root(0){ folder `name`(1){ f(2) of `size` bytes } }
+    fn one_folder(name: &str, size: u64) -> (Tree, NodeId) {
+        let e = |id: u64, parent: u64, name: &str, size: u64, is_dir: bool| RawEntry {
+            id,
+            parent,
+            name: name.into(),
+            size,
+            allocated: size,
+            is_dir,
+        };
+        let t = rollup(0, vec![e(0, 0, "root", 0, true), e(1, 0, name, 0, true), e(2, 1, "f", size, false)]).unwrap().tree;
+        let folder = find(&t, t.root(), name);
+        (t, folder)
+    }
+
+    #[test]
+    fn frame_label_folder_is_name_with_backslash_and_size() {
+        let (t, local) = one_folder("Local", 306 * (1 << 30));
+        assert_eq!(frame_label(&t, local), ("Local\\".to_string(), "306.0 GB".to_string()));
+    }
+
+    #[test]
+    fn frame_label_unicode_name_is_kept_unchanged() {
+        let (t, folder) = one_folder("Données 日本語 ✓", 2048);
+        assert_eq!(frame_label(&t, folder), ("Données 日本語 ✓\\".to_string(), "2.0 KB".to_string()));
+    }
+
+    // ---- map_note ----
+    #[test]
+    fn map_note_folder_with_drawn_rects_is_empty() {
+        let t = sample();
+        let rects = treemap::layout_framed(&t, t.root(), 400, 300, treemap::Chrome::scaled(1.0));
+        assert_eq!(map_note(&t, t.root(), &rects, true), "");
+    }
+
+    #[test]
+    fn map_note_folder_with_no_sizes_says_so() {
+        let t = with_empty_folder();
+        let e = find(&t, t.root(), "e");
+        assert_eq!(map_note(&t, e, &[], true), NO_SIZES);
+    }
+
+    /// P8.P2 verify MINOR-1: a folder full of files that are all under 1 px² said it had no sizes.
+    #[test]
+    fn map_note_folder_whose_files_are_all_pruned_says_they_are_too_small() {
+        let t = sample();
+        assert_eq!(map_note(&t, t.root(), &[], true), TOO_SMALL);
+    }
+
+    #[test]
+    fn map_note_map_with_no_area_is_empty() {
+        let t = with_empty_folder();
+        assert_eq!(map_note(&t, find(&t, t.root(), "e"), &[], false), "");
+        assert_eq!(map_note(&t, t.root(), &[], false), "");
     }
 }
