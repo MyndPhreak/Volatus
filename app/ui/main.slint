@@ -343,13 +343,15 @@ export component MainWindow inherits Window {
             }
         }
 
-        // File-type footer, when a scan is shown: a strip with one part per type and the chips
-        // under it, in the tile colours.
-        if root.rows.length > 0 : VerticalLayout {
+        // File-type footer: a strip with one part per type and the chips under it, in the tile
+        // colours. Always there and always 32 px high, so the map keeps its size when a scan
+        // is shown or the chips arrive (a size change would lay the map out a second time).
+        VerticalLayout {
             spacing: 6px;
             if root.types-counting || root.type-chips.length == 0 : Text {
-                height: 16px;
-                text: root.types-counting ? "Counting file types." : "No file sizes to show.";
+                height: 32px;
+                // The tree has rows only while a scan is shown.
+                text: root.types-counting ? "Counting file types." : (root.rows.length > 0 ? "No file sizes to show." : "");
                 vertical-alignment: center;
                 color: Palette.foreground.transparentize(30%);
                 accessible-role: text;
