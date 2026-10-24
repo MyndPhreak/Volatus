@@ -251,7 +251,7 @@ pub fn render(rects: &[Rect], w: u32, h: u32) -> Vec<u8> {
 /// Frames are translucent (fill, a light border and a highlight row under it), so nested
 /// frames add up. Tiles are opaque, with a highlight that fades out over their top half; a
 /// tile of `6 * pad` or more also gets rounded corners and a light ring. The tile colour is
-/// the node hash (`colour`) until file types colour it. Units scale with `chrome.pad`.
+/// the file-type colour of its name (`filetype::category_of`). Units scale with `chrome.pad`.
 pub fn render_framed(tree: &Tree, rects: &[Rect], w: u32, h: u32, chrome: Chrome, theme: Theme) -> Vec<u8> {
     let (wu, hu) = (w as usize, h as usize);
     // Packed premultiplied RGBA (R in the low byte) while drawing: translucent layers blend
@@ -271,8 +271,8 @@ pub fn render_framed(tree: &Tree, rects: &[Rect], w: u32, h: u32, chrome: Chrome
         if tree.node(r.node).is_dir {
             draw_frame(&mut px, wu, &b, radius, unit, &glass);
         } else {
-            let c = colour(r.node);
-            draw_tile(&mut px, wu, &b, radius, unit, [c[0], c[1], c[2]]);
+            let c = filetype::colour(filetype::category_of(tree.name(r.node)), theme);
+            draw_tile(&mut px, wu, &b, radius, unit, c);
         }
     }
     // Back to straight alpha: c * 255 / a, through a 16.16 reciprocal per alpha.
