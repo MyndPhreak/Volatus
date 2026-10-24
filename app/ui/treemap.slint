@@ -300,6 +300,7 @@ export component TreemapView inherits Rectangle {
             accessible-role: text;
         }
     }
+    // The selection outline, above the frames. It slides to the next selected node.
     if root.has-selection : Rectangle {
         x: root.selection-x;
         y: root.selection-y;
@@ -307,6 +308,7 @@ export component TreemapView inherits Rectangle {
         height: root.selection-height;
         border-width: 2px;
         border-color: Palette.foreground;
+        animate x, y, width, height { duration: 120ms; easing: ease-out; }
     }
     // The hover, above everything in the map. A folder frame gets a light highlight, with no lift.
     if root.hover.visible && !root.hover.lift : Rectangle {
