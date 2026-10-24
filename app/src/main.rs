@@ -41,8 +41,8 @@ const RESIZE_DEBOUNCE: Duration = Duration::from_millis(80);
 /// Narrowest frame label, in logical pixels: room for a few characters and "…".
 const LABEL_MIN_WIDTH: f64 = 24.0;
 /// Most frame labels on the map, largest frames first. Measured at 3840x2160 and 200%, release:
-/// 750 labels and a new image show in at most 40 ms, 1000 in up to 55 ms (target 50 ms).
-/// The C: drive has 328 frames with a label band at that size, so the cap rarely applies.
+/// 750 labels and a new image show in at most 43.6 ms, 1000 in up to 55.5 ms (target 50 ms).
+/// The C: drive has 557 frames with a label band at that size, so the cap rarely applies.
 const LABEL_CAP: usize = 750;
 
 /// A finished scan plus its derived per-node data. Shared with treemap layout threads.
