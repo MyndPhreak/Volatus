@@ -85,6 +85,8 @@ export component MainWindow inherits Window {
     in property <[DriveButton]> drive-buttons;
     /// The host is still looking for drives.
     in property <bool> drives-loading: true;
+    /// One note under the drive list, or "".
+    in property <string> admin-note;
     /// A scan is finished: "New scan" is offered.
     in property <bool> show-new-scan;
 
@@ -152,6 +154,7 @@ export component MainWindow inherits Window {
         height: 100%;
         drives: root.drive-buttons;
         loading: root.drives-loading;
+        admin-note: root.admin-note;
         message: root.banner;
         message-is-error: root.banner-is-error;
         browsing: root.browsing;

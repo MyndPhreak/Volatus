@@ -4,12 +4,16 @@
 use crate::model::format_size;
 use std::os::windows::ffi::OsStrExt;
 use std::ptr::null_mut;
-use windows_sys::Win32::Storage::FileSystem::{GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW};
+use windows_sys::Win32::Storage::FileSystem::{GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW, QueryDosDeviceW};
 use windows_sys::Win32::System::Diagnostics::Debug::{SEM_FAILCRITICALERRORS, SetThreadErrorMode};
 use windows_sys::Win32::System::WindowsProgramming::{DRIVE_FIXED, DRIVE_REMOVABLE};
 
 /// The note under the drive list while the app runs without administrator rights.
 const ADMIN_NOTE: &str = "Scans of a whole NTFS drive are faster as administrator.";
+/// Longest DOS device target, in UTF-16 units (a `subst` target is a path).
+const TARGET_UNITS: usize = 1024;
+/// Longest file system name, in UTF-16 units, plus the end mark (`MAX_PATH + 1`).
+const FS_UNITS: usize = 261;
 /// Longest volume label, in UTF-16 units, plus the end mark (`MAX_PATH + 1`).
 const LABEL_UNITS: usize = 261;
 
@@ -79,16 +83,15 @@ pub fn keep(drive_type: u32, ready: bool) -> Option<DriveKind> {
     }
 }
 
-/// True when a DOS device target is a `subst` drive: `??C:Users`. A physical volume is `DeviceHarddiskVolume3`.
+/// True when a DOS device target is a `subst` drive: `\??\C:\Users`. A physical volume is `\Device\HarddiskVolume3`.
 pub fn is_subst(target: &str) -> bool {
-    let _ = target;
-    false
+    // `\??\` then a drive path (`C:...`). `\??\Volume{...}` and `\Device\...` are volumes, not folders.
+    target.strip_prefix(r"\??\").is_some_and(|rest| rest.as_bytes().get(1) == Some(&b':'))
 }
 
 /// The note under the drive list: shown when the app is not elevated and a listed drive is NTFS, else "".
 pub fn admin_note(drives: &[DriveInfo], is_admin: bool) -> String {
-    let _ = (drives, is_admin, ADMIN_NOTE);
-    String::new()
+    if !is_admin && drives.iter().any(|d| d.is_ntfs) { ADMIN_NOTE.to_string() } else { String::new() }
 }
 
 /// The ready fixed and removable drives `api` reports, in letter order.
@@ -102,6 +105,10 @@ pub fn list_with(api: &impl DriveApi) -> Vec<DriveInfo> {
             // Only fixed and removable drives are asked for a label: a network drive can take long to answer.
             let drive_type = api.drive_type(&root);
             if !matches!(drive_type, DRIVE_FIXED | DRIVE_REMOVABLE) {
+                return None;
+            }
+            // A `subst` drive is a folder under another name: "Choose folder" covers it.
+            if is_subst(&api.dos_target(&root)) {
                 return None;
             }
             let volume = api.volume(&root);
@@ -126,6 +133,12 @@ pub fn list() -> Vec<DriveInfo> {
     drives
 }
 
+/// True when the NUL terminated UTF-16 text `buf` equals `want`, ignoring case.
+fn utf16_eq_ignore_case(buf: &[u16], want: &str) -> bool {
+    let end = buf.iter().position(|&u| u == 0).unwrap_or(buf.len());
+    String::from_utf16_lossy(&buf[..end]).eq_ignore_ascii_case(want)
+}
+
 fn wide(s: &str) -> Vec<u16> {
     std::ffi::OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
 }
@@ -145,19 +158,30 @@ impl DriveApi for Win32Drives {
         unsafe { GetDriveTypeW(root.as_ptr()) }
     }
 
-    fn dos_target(&self, _root: &str) -> String {
-        String::new()
+    fn dos_target(&self, root: &str) -> String {
+        // `QueryDosDeviceW` wants `C:`, not `C:\`.
+        let device = wide(root.trim_end_matches('\\'));
+        let mut target = [0u16; TARGET_UNITS];
+        // SAFETY: `device` is NUL terminated; `target` has the length given.
+        let len = unsafe { QueryDosDeviceW(device.as_ptr(), target.as_mut_ptr(), TARGET_UNITS as u32) };
+        if len == 0 {
+            return String::new();
+        }
+        // The answer is a list of NUL terminated strings; the first one is the current target.
+        let end = target.iter().position(|&u| u == 0).unwrap_or(TARGET_UNITS);
+        String::from_utf16_lossy(&target[..end])
     }
 
     fn volume(&self, root: &str) -> Option<Volume> {
         let root = wide(root);
         let mut label = [0u16; LABEL_UNITS];
-        // SAFETY: `root` is NUL terminated; `label` has the length given; the other outputs are not wanted.
+        let mut fs_name = [0u16; FS_UNITS];
+        // SAFETY: `root` is NUL terminated; `label` has the length given; `fs_name` has the length given; the other outputs are not wanted.
         let ok = unsafe {
-            GetVolumeInformationW(root.as_ptr(), label.as_mut_ptr(), LABEL_UNITS as u32, null_mut(), null_mut(), null_mut(), null_mut(), 0)
+            GetVolumeInformationW(root.as_ptr(), label.as_mut_ptr(), LABEL_UNITS as u32, null_mut(), null_mut(), null_mut(), fs_name.as_mut_ptr(), FS_UNITS as u32)
         };
         let end = label.iter().position(|&u| u == 0).unwrap_or(LABEL_UNITS);
-        (ok != 0).then(|| Volume { label: String::from_utf16_lossy(&label[..end]), is_ntfs: false })
+        (ok != 0).then(|| Volume { label: String::from_utf16_lossy(&label[..end]), is_ntfs: utf16_eq_ignore_case(&fs_name, "NTFS") })
     }
 
     fn space(&self, root: &str) -> Option<(u64, u64)> {
@@ -406,9 +430,9 @@ mod tests {
         let cases: [(&[DriveInfo], bool, &str); 7] = [
             (&[], false, ""),
             (&[], true, ""),
-            (&[fat.clone()], false, ""),
-            (&[ntfs.clone()], true, ""),
-            (&[ntfs.clone()], false, note),
+            (std::slice::from_ref(&fat), false, ""),
+            (std::slice::from_ref(&ntfs), true, ""),
+            (std::slice::from_ref(&ntfs), false, note),
             (&[fat.clone(), ntfs.clone()], false, note),
             (&[fat.clone(), ntfs.clone()], true, ""),
         ];

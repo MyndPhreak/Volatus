@@ -15,7 +15,15 @@ export struct DriveButton {
 /// A glass button for one drive: name, free space and a used/free bar.
 component DriveTile inherits Rectangle {
     in property <DriveButton> drive;
+    /// The first button takes the focus when it appears, so the keyboard works at once.
+    in property <bool> take-focus;
     callback clicked();
+
+    init => {
+        if (root.take-focus) {
+            focus.focus();
+        }
+    }
 
     height: 84px;
     border-radius: 8px;
@@ -65,7 +73,7 @@ component DriveTile inherits Rectangle {
         // The light edge on top of the glass.
         Rectangle {
             x: 8px;
-            y: 0px;
+            y: root.border-width;
             width: parent.width - 16px;
             height: 1px;
             background: Glass.highlight;
@@ -85,6 +93,8 @@ export component StartScreen inherits Rectangle {
     in property <[DriveButton]> drives;
     /// The host is still looking for drives.
     in property <bool> loading;
+    /// One note under the drive list, or "".
+    in property <string> admin-note;
     /// Why the screen is shown: the hint, "Scan stopped" or the error of the last scan.
     in property <string> message;
     in property <bool> message-is-error;
@@ -116,9 +126,18 @@ export component StartScreen inherits Rectangle {
                     color: Glass.dim;
                     accessible-role: text;
                 }
-                for d in root.drives : DriveTile {
+                for d[i] in root.drives : DriveTile {
                     drive: d;
+                    take-focus: i == 0;
                     clicked => { root.scan-drive(d.root); }
+                }
+                if root.admin-note != "" : Text {
+                    text: root.admin-note;
+                    wrap: word-wrap;
+                    horizontal-alignment: center;
+                    font-size: 12px;
+                    color: Glass.dim;
+                    accessible-role: text;
                 }
                 Button {
                     height: 36px;

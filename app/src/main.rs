@@ -512,7 +512,9 @@ fn refresh_drives(ui: &MainWindow) {
     ui.set_drives_loading(true);
     let weak = ui.as_weak();
     std::thread::spawn(move || {
-        let buttons = drives::drive_buttons(&drives::list());
+        let list = drives::list();
+        let note = drives::admin_note(&list, elevate::is_admin());
+        let buttons = drives::drive_buttons(&list);
         // Err means the event loop has stopped: nothing left to update.
         let _ = slint::invoke_from_event_loop(move || {
             let Some(ui) = weak.upgrade() else { return };
@@ -520,6 +522,7 @@ fn refresh_drives(ui: &MainWindow) {
                 return;
             }
             ui.set_drive_buttons(ModelRc::new(VecModel::from(buttons.into_iter().map(drive_button).collect::<Vec<_>>())));
+            ui.set_admin_note(note.into());
             ui.set_drives_loading(false);
         });
     });
