@@ -1,0 +1,91 @@
+import { Palette } from "std-widgets.slint";
+
+/// Names of the keys the host uses, shared by the file tree and the treemap.
+export global Keys {
+    /// Name of the key for the host, or "" for a key the host does not use.
+    public pure function name(text: string) -> string {
+        if (text == Key.UpArrow) { return "up"; }
+        if (text == Key.DownArrow) { return "down"; }
+        if (text == Key.LeftArrow) { return "left"; }
+        if (text == Key.RightArrow) { return "right"; }
+        if (text == Key.Return) { return "enter"; }
+        if (text == " ") { return "space"; }
+        if (text == Key.Backspace) { return "backspace"; }
+        return "";
+    }
+}
+
+/// The treemap picture (drawn by the host on a worker) with the layers above it: the
+/// selection outline, the empty-folder text and the focus ring.
+export component TreemapView inherits Rectangle {
+    /// The picture, in physical pixels, stretched over the whole view.
+    in property <image> source;
+    /// True when the shown folder has no file with a size.
+    in property <bool> empty;
+    in property <bool> has-selection;
+    in property <length> selection-x;
+    in property <length> selection-y;
+    in property <length> selection-width;
+    in property <length> selection-height;
+
+    /// A click at a point in logical pixels.
+    callback clicked(float, float);
+    /// A double-click at a point in logical pixels.
+    callback double-clicked(float, float);
+    /// Key press: "up", "down", "left", "right", "enter" or "backspace".
+    callback key(string);
+    /// The view changed size, in logical pixels.
+    callback resized(float, float);
+
+    // The image's pixel size must not feed back into the layout: each new image
+    // would change the map size and start another layout.
+    preferred-width: 0px;
+    preferred-height: 0px;
+    clip: true;
+    changed width => { root.resized(self.width / 1px, self.height / 1px); }
+    changed height => { root.resized(self.width / 1px, self.height / 1px); }
+    Image {
+        width: 100%;
+        height: 100%;
+        source: root.source;
+        image-fit: fill;
+    }
+    if root.empty : Text {
+        text: "No files with a size in this folder.";
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        wrap: word-wrap;
+        color: Palette.foreground;
+        accessible-role: text;
+    }
+    if root.has-selection : Rectangle {
+        x: root.selection-x;
+        y: root.selection-y;
+        width: root.selection-width;
+        height: root.selection-height;
+        border-width: 2px;
+        border-color: Palette.foreground;
+    }
+    map-focus := FocusScope {
+        accessible-role: image;
+        accessible-label: "Treemap";
+        accessible-description: "Press an arrow key to move the selection. Press Enter to open the folder. Press Backspace to go up one folder.";
+        key-pressed(event) => {
+            if (Keys.name(event.text) == "" || event.text == " ") { return reject; }
+            root.key(Keys.name(event.text));
+            return accept;
+        }
+        TouchArea {
+            mouse-cursor: pointer;
+            clicked => {
+                map-focus.focus();
+                root.clicked(self.mouse-x / 1px, self.mouse-y / 1px);
+            }
+            double-clicked => { root.double-clicked(self.mouse-x / 1px, self.mouse-y / 1px); }
+        }
+    }
+    Rectangle {
+        border-width: map-focus.has-focus ? 2px : 0px;
+        border-color: Palette.accent-background;
+    }
+}

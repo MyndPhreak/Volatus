@@ -2,7 +2,7 @@
 //! types, so it is unit tested. The window maps key presses to these calls.
 
 use crate::tree_view::Row;
-use scan::{NodeId, Tree};
+use scan::NodeId;
 use treemap::Rect;
 
 /// What a Left or Right key does in the file tree.
@@ -85,16 +85,9 @@ pub fn neighbour_rect(rects: &[Rect], selected: Option<NodeId>, dir: Dir) -> Opt
         .map(|(n, _)| n)
 }
 
-/// The folder the Enter key opens in the treemap: `node` if it is a folder with content.
-pub fn enter_target(tree: &Tree, node: NodeId) -> Option<NodeId> {
-    let n = tree.node(node);
-    (n.is_dir && n.first_child.is_some()).then_some(node)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use scan::rollup::{RawEntry, rollup};
 
     fn row(id: u32, depth: u32, expanded: bool, has_children: bool) -> Row {
         Row { node: NodeId(id), depth, expanded, has_children }
@@ -269,48 +262,5 @@ mod tests {
     fn neighbour_rect_no_rects_gives_none() {
         assert_eq!(neighbour_rect(&[], Some(NodeId(1)), Dir::Right), None);
         assert_eq!(neighbour_rect(&[], None, Dir::Right), None);
-    }
-
-    // ---- enter_target ----
-    // root(0): a(1) { a1(3) }, e(2) empty folder, c(4) file
-    fn tree() -> Tree {
-        let e = |id: u64, parent: u64, name: &str, size: u64, is_dir: bool| RawEntry {
-            id,
-            parent,
-            name: name.into(),
-            size,
-            allocated: size,
-            is_dir,
-        };
-        let entries = vec![
-            e(0, 0, "root", 0, true),
-            e(1, 0, "a", 0, true),
-            e(2, 0, "e", 0, true),
-            e(3, 1, "a1", 10, false),
-            e(4, 0, "c", 5, false),
-        ];
-        rollup(0, entries).unwrap().tree
-    }
-
-    fn id_of(t: &Tree, name: &str) -> NodeId {
-        t.children(t.root()).find(|&c| t.name(c) == name).unwrap()
-    }
-
-    #[test]
-    fn enter_target_folder_with_content_is_the_target() {
-        let t = tree();
-        assert_eq!(enter_target(&t, id_of(&t, "a")), Some(id_of(&t, "a")));
-    }
-
-    #[test]
-    fn enter_target_file_gives_none() {
-        let t = tree();
-        assert_eq!(enter_target(&t, id_of(&t, "c")), None);
-    }
-
-    #[test]
-    fn enter_target_empty_folder_gives_none() {
-        let t = tree();
-        assert_eq!(enter_target(&t, id_of(&t, "e")), None);
     }
 }

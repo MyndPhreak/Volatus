@@ -1,4 +1,5 @@
 import { Button, ComboBox, LineEdit, VerticalBox, HorizontalBox, ProgressIndicator, Palette, ListView } from "std-widgets.slint";
+import { Keys, TreemapView } from "treemap.slint";
 
 /// One visible line of the file tree. Text is formatted by the host.
 export struct TreeRow {
@@ -53,6 +54,9 @@ export component MainWindow inherits Window {
     // The window must start transparent so the Mica backdrop shows through (set at window creation).
     // If Mica is not available, the host sets `mica` to false and the Fluent palette fills the window.
     in property <bool> mica: true;
+    /// The system theme is dark. The host draws the treemap for it.
+    out property <bool> dark: Palette.color-scheme == ColorScheme.dark;
+    changed dark => { root.theme-changed(); }
     background: root.mica ? transparent : Palette.background;
     preferred-width: 1100px;
     preferred-height: 700px;
@@ -81,6 +85,8 @@ export component MainWindow inherits Window {
     in property <length> selection-y;
     in property <length> selection-width;
     in property <length> selection-height;
+    /// The shown folder has no file with a size.
+    in property <bool> map-empty;
 
     // Elevation
     in property <bool> show-elevate;
@@ -101,6 +107,8 @@ export component MainWindow inherits Window {
     callback map-key(string);
     callback treemap-resized(float, float);
     callback restart-admin();
+    /// The system theme changed between light and dark.
+    callback theme-changed();
 
     /// Puts the drive box back to its label. The path was changed by hand or by Browse.
     public function reset-drive() {
@@ -114,18 +122,6 @@ export component MainWindow inherits Window {
         } else if ((i + 1) * 24px > -list.content-y + list.visible-height) {
             list.content-y = -((i + 1) * 24px - list.visible-height);
         }
-    }
-
-    /// Name of the key for the host, or "" for a key the host does not use.
-    pure function key-name(text: string) -> string {
-        if (text == Key.UpArrow) { return "up"; }
-        if (text == Key.DownArrow) { return "down"; }
-        if (text == Key.LeftArrow) { return "left"; }
-        if (text == Key.RightArrow) { return "right"; }
-        if (text == Key.Return) { return "enter"; }
-        if (text == " ") { return "space"; }
-        if (text == Key.Backspace) { return "backspace"; }
-        return "";
     }
 
     VerticalBox {
@@ -239,8 +235,8 @@ export component MainWindow inherits Window {
                         accessible-label: "File tree";
                         accessible-value: root.selected-row >= 0 ? root.rows[root.selected-row].name : "";
                         key-pressed(event) => {
-                            if (root.key-name(event.text) == "") { return reject; }
-                            root.tree-key(root.key-name(event.text));
+                            if (Keys.name(event.text) == "") { return reject; }
+                            root.tree-key(Keys.name(event.text));
                             return accept;
                         }
                         list := ListView {
@@ -311,51 +307,19 @@ export component MainWindow inherits Window {
                             overflow: elide;
                         }
                     }
-                    map := Rectangle {
+                    TreemapView {
                         vertical-stretch: 1;
-                        // The image's pixel size must not feed back into the layout: each new image
-                        // would change the map size and start another layout.
-                        preferred-width: 0px;
-                        preferred-height: 0px;
-                        clip: true;
-                        changed width => { root.treemap-resized(self.width / 1px, self.height / 1px); }
-                        changed height => { root.treemap-resized(self.width / 1px, self.height / 1px); }
-                        Image {
-                            width: 100%;
-                            height: 100%;
-                            source: root.treemap;
-                            image-fit: fill;
-                        }
-                        if root.has-selection : Rectangle {
-                            x: root.selection-x;
-                            y: root.selection-y;
-                            width: root.selection-width;
-                            height: root.selection-height;
-                            border-width: 2px;
-                            border-color: Palette.foreground;
-                        }
-                        map-focus := FocusScope {
-                            accessible-role: image;
-                            accessible-label: "Treemap";
-                            accessible-description: "Press an arrow key to move the selection. Press Enter to open the folder. Press Backspace to go up one folder.";
-                            key-pressed(event) => {
-                                if (root.key-name(event.text) == "" || event.text == " ") { return reject; }
-                                root.map-key(root.key-name(event.text));
-                                return accept;
-                            }
-                            TouchArea {
-                                mouse-cursor: pointer;
-                                clicked => {
-                                    map-focus.focus();
-                                    root.treemap-click(self.mouse-x / 1px, self.mouse-y / 1px);
-                                }
-                                double-clicked => { root.treemap-open(self.mouse-x / 1px, self.mouse-y / 1px); }
-                            }
-                        }
-                        Rectangle {
-                            border-width: map-focus.has-focus ? 2px : 0px;
-                            border-color: Palette.accent-background;
-                        }
+                        source: root.treemap;
+                        empty: root.map-empty;
+                        has-selection: root.has-selection;
+                        selection-x: root.selection-x;
+                        selection-y: root.selection-y;
+                        selection-width: root.selection-width;
+                        selection-height: root.selection-height;
+                        clicked(x, y) => { root.treemap-click(x, y); }
+                        double-clicked(x, y) => { root.treemap-open(x, y); }
+                        key(k) => { root.map-key(k); }
+                        resized(w, h) => { root.treemap-resized(w, h); }
                     }
                 }
             }

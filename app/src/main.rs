@@ -30,7 +30,7 @@ use std::rc::Rc;
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 use tree_view::{Row, SortKey, ViewState};
-use treemap::Rect;
+use treemap::{Chrome, Rect, Theme};
 
 slint::include_modules!();
 
@@ -197,6 +197,7 @@ fn sync_selection(ui: &MainWindow) {
 /// a second and resizes are debounced. Upgrade path: a cancel flag per request.
 fn relayout(ui: &MainWindow) {
     let scale = ui.window().scale_factor();
+    let theme = if ui.get_dark() { Theme::Dark } else { Theme::Light };
     let Some((data, root, generation, seq, w, h)) = SESSION.with_borrow_mut(|s| {
         let l = s.loaded.as_ref()?;
         let (lw, lh) = s.map_size;
@@ -209,9 +210,12 @@ fn relayout(ui: &MainWindow) {
     };
     let weak = ui.as_weak();
     std::thread::spawn(move || {
-        let rects = treemap::layout(&data.tree, root, w, h);
-        let image = (w > 0 && h > 0)
-            .then(|| SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(&treemap::render(&rects, w, h), w, h));
+        let chrome = Chrome::scaled(f64::from(scale));
+        let rects = treemap::layout_framed(&data.tree, root, w, h, chrome);
+        let image = (w > 0 && h > 0).then(|| {
+            let px = treemap::render_framed(&data.tree, &rects, w, h, chrome, theme);
+            SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(&px, w, h)
+        });
         // Err means the event loop has stopped: nothing left to update.
         let _ = slint::invoke_from_event_loop(move || {
             let current = SESSION.with_borrow(|s| (s.scan.generation(), s.layout_seq));
@@ -224,6 +228,8 @@ fn relayout(ui: &MainWindow) {
 
 /// Shows a finished layout of `root`: the image, its rects, the title and the selection.
 fn show_layout(ui: &MainWindow, root: NodeId, rects: Vec<Rect>, image: Option<SharedPixelBuffer<Rgba8Pixel>>) {
+    // A map with an area but nothing to draw: the folder has no file with a size.
+    let empty = image.is_some() && rects.is_empty();
     let Some((title, can_go_up)) = with_loaded(|l| {
         l.rects = rects;
         let tree = &l.data.tree;
@@ -234,6 +240,7 @@ fn show_layout(ui: &MainWindow, root: NodeId, rects: Vec<Rect>, image: Option<Sh
     if let Some(px) = image {
         ui.set_treemap(Image::from_rgba8(px));
     }
+    ui.set_map_empty(empty);
     ui.set_treemap_can_go_up(can_go_up);
     ui.set_treemap_title(title.into());
     sync_selection(ui);
@@ -297,6 +304,7 @@ fn clear(ui: &MainWindow) {
     ui.set_treemap(Image::default());
     ui.set_treemap_title(SharedString::new());
     ui.set_treemap_can_go_up(false);
+    ui.set_map_empty(false);
     ui.set_has_selection(false);
     ui.set_selected_row(-1);
 }
@@ -413,26 +421,34 @@ fn toggle_row(ui: &MainWindow, i: i32) {
     }
 }
 
-/// Shows `folder` in the treemap.
-fn open_folder(ui: &MainWindow, folder: NodeId) {
-    with_loaded(|l| l.view_root = folder);
-    relayout(ui);
+/// Shows `folder` in the treemap. Lays it out again only if it is not the shown folder.
+fn show_folder(ui: &MainWindow, folder: NodeId) {
+    if with_loaded(|l| std::mem::replace(&mut l.view_root, folder) != folder) == Some(true) {
+        relayout(ui);
+    }
 }
 
-/// Shows the parent of the treemap folder.
+/// Opens `node` in the treemap (`tree_view::open_target`): a folder shows itself, a file
+/// shows its folder with the file selected. Every open path comes here.
+fn open_node(ui: &MainWindow, node: NodeId) {
+    if let Some((folder, selected)) = with_loaded(|l| tree_view::open_target(&l.data.tree, node)).flatten() {
+        show_folder(ui, folder);
+        select(ui, selected);
+    }
+}
+
+/// Shows the parent of the treemap folder and selects the folder it left.
 fn go_up(ui: &MainWindow) {
-    with_loaded(|l| {
-        if let Some(p) = l.data.tree.node(l.view_root).parent {
-            l.view_root = p;
-        }
-    });
-    relayout(ui);
+    if let Some((parent, left)) = with_loaded(|l| l.data.tree.node(l.view_root).parent.map(|p| (p, l.view_root))).flatten() {
+        show_folder(ui, parent);
+        select(ui, left);
+    }
 }
 
-/// Opens the selected node in the treemap if it is a folder with content.
+/// Opens the selected node in the treemap.
 fn open_selected(ui: &MainWindow) {
-    if let Some(folder) = with_loaded(|l| l.selected.and_then(|n| nav::enter_target(&l.data.tree, n))).flatten() {
-        open_folder(ui, folder);
+    if let Some(node) = with_loaded(|l| l.selected).flatten() {
+        open_node(ui, node);
     }
 }
 
@@ -546,13 +562,9 @@ fn wire_tree_and_treemap(ui: &MainWindow) {
         move |x, y| {
             let Some(ui) = weak.upgrade() else { return };
             let (x, y) = to_physical(&ui, x, y);
-            let target = with_loaded(|l| {
-                let leaf = tree_view::hit_test(&l.rects, x, y)?;
-                tree_view::drill_target(&l.data.tree, l.view_root, leaf)
-            })
-            .flatten();
-            if let Some(folder) = target {
-                open_folder(&ui, folder);
+            // The rects of the shown image, even while a newer layout is on its way.
+            if let Some(n) = with_loaded(|l| tree_view::hit_test(&l.rects, x, y)).flatten() {
+                open_node(&ui, n);
             }
         }
     });
@@ -561,6 +573,14 @@ fn wire_tree_and_treemap(ui: &MainWindow) {
         move || {
             if let Some(ui) = weak.upgrade() {
                 go_up(&ui);
+            }
+        }
+    });
+    ui.on_theme_changed({
+        let weak = ui.as_weak();
+        move || {
+            if let Some(ui) = weak.upgrade() {
+                relayout(&ui);
             }
         }
     });

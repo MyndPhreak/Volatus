@@ -138,24 +138,12 @@ pub fn selection_bounds(rects: &[Rect], selected: NodeId) -> Option<(f64, f64, f
 rects.iter().find(|r| r.node == selected).map(|r| (r.x, r.y, r.w, r.h))
 }
 
-/// The folder to zoom into when `leaf` is picked: the child of `view_root` on the path to
-/// `leaf`, if that child is a folder. `None` if the leaf is a direct file of `view_root`.
-pub fn drill_target(tree: &Tree, view_root: NodeId, leaf: NodeId) -> Option<NodeId> {
-let mut cur = leaf;
-loop {
-    let parent = tree.node(cur).parent?;
-    if parent == view_root {
-        return tree.node(cur).is_dir.then_some(cur);
-    }
-    cur = parent;
-}
-}
-
 /// What opening `node` shows: `(folder to show, node to select)`. A folder with content opens
 /// itself; a file opens its folder with the file selected; an empty folder opens nothing.
 /// Does not depend on the current view, so a node from an older layout still opens its own folder.
 pub fn open_target(tree: &Tree, node: NodeId) -> Option<(NodeId, NodeId)> {
-    todo!("open_target {node:?} {}", tree.name(node))
+    let n = tree.node(node);
+    if n.is_dir { n.first_child.map(|_| (node, node)) } else { n.parent.map(|p| (p, node)) }
 }
 
 /// The folder the treemap must show so that `selected` is drawn in it: the current view if
@@ -728,32 +716,5 @@ mod tests {
         let s1 = find(&t, find(&t, find(&t, t.root(), "a"), "sub"), "s1");
         let rects = [rect(b.0, 0.0, 0.0, 50.0, 50.0), rect(find(&t, b, "b1").0, 2.0, 18.0, 20.0, 20.0)];
         assert_eq!(outline_node(&t, &rects, s1), None);
-    }
-
-    // ---- drill_target ----
-    #[test]
-    fn drill_target_leaf_in_subfolder_returns_child_of_view_root() {
-        let t = sample();
-        let a = find(&t, t.root(), "a");
-        let sub = find(&t, a, "sub");
-        let s1 = find(&t, sub, "s1");
-        assert_eq!(drill_target(&t, t.root(), s1), Some(a));
-        assert_eq!(drill_target(&t, a, s1), Some(sub));
-    }
-
-    #[test]
-    fn drill_target_file_directly_under_view_root_is_none() {
-        let t = sample();
-        let c = find(&t, t.root(), "c");
-        assert_eq!(drill_target(&t, t.root(), c), None);
-    }
-
-    #[test]
-    fn drill_target_leaf_outside_view_root_is_none() {
-        let t = sample();
-        let a = find(&t, t.root(), "a");
-        let b = find(&t, t.root(), "b");
-        let b1 = find(&t, b, "b1");
-        assert_eq!(drill_target(&t, a, b1), None);
     }
 }
