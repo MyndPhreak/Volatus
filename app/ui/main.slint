@@ -131,6 +131,8 @@ export component MainWindow inherits Window {
     in property <string> map-note;
     /// Labels of the treemap frames.
     in property <[FrameLabel]> labels;
+    /// Labels of the treemap file tiles.
+    in property <[FileLabel]> file-labels;
 
     // File-type footer
     /// The biggest file types of the scan, then "Other".
@@ -382,13 +384,19 @@ export component MainWindow inherits Window {
                     CrumbBar {
                         height: 28px;
                         crumbs: root.crumbs;
-                        open(i) => { root.crumb-open(i); }
+                        // The crumbs are rebuilt for the opened folder, so the focus goes to the
+                        // map, which shows that folder.
+                        open(i) => {
+                            root.crumb-open(i);
+                            map.focus-map();
+                        }
                     }
-                    TreemapView {
+                    map := TreemapView {
                         vertical-stretch: 1;
                         source: root.treemap;
                         note: root.map-note;
                         labels: root.labels;
+                        file-labels: root.file-labels;
                         has-selection: root.has-selection;
                         selection-x: root.selection-x;
                         selection-y: root.selection-y;

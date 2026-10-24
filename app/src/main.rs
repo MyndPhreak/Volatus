@@ -42,9 +42,10 @@ const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 const RESIZE_DEBOUNCE: Duration = Duration::from_millis(80);
 /// Narrowest frame label, in logical pixels: room for a few characters and "…".
 const LABEL_MIN_WIDTH: f64 = 24.0;
-/// Most frame labels on the map, largest frames first. Measured at 3840x2160 and 200%, release:
-/// 750 labels and a new image show in at most 43.6 ms, 1000 in up to 55.5 ms (target 50 ms).
-/// The C: drive has 557 frames with a label band at that size, so the cap rarely applies.
+/// Most labels on the map, frames and file tiles together: the frames first, then the largest
+/// tiles. Measured at 3840x2160 and 200%, release (P8.P6b, 5 runs): 750 labels (554 frames and 196
+/// files) and a new image show in at most 48.7 ms, 1000 in up to 113.8 ms (target 50 ms). The C:
+/// drive has 554 frames and 76 file tiles with a label at that size, so the cap rarely applies.
 const LABEL_CAP: usize = 750;
 /// Least file tile that shows its name, in logical pixels: room for a few characters and "…".
 const FILE_LABEL_MIN_WIDTH: f64 = 40.0;
@@ -247,7 +248,7 @@ fn relayout(ui: &MainWindow) {
             let px = treemap::render_framed(&data.tree, &rects, w, h, chrome, theme);
             SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(&px, w, h)
         });
-        let labels = frame_labels(&data.tree, &rects, chrome, f64::from(scale));
+        let labels = map_labels(&data.tree, &rects, chrome, f64::from(scale), theme);
         // Err means the event loop has stopped: nothing left to update.
         let _ = slint::invoke_from_event_loop(move || {
             let current = SESSION.with_borrow(|s| (s.scan.generation(), s.layout_seq));
@@ -273,15 +274,33 @@ fn frame_labels(tree: &Tree, rects: &[Rect], chrome: Chrome, scale: f64) -> Vec<
 /// The labels of the file tiles in `rects` (physical pixels) for the window, in logical pixels:
 /// at most `cap`, the largest tiles first, with the text colour of each tile in `theme`.
 fn file_labels(tree: &Tree, rects: &[Rect], scale: f64, theme: Theme, cap: usize) -> Vec<FileLabel> {
-    let _ = (tree, rects, scale, theme, cap);
-    todo!()
+    let px = |v: f64| (v / scale) as f32;
+    let (min_w, min_h) = (FILE_LABEL_MIN_WIDTH * scale, FILE_LABEL_MIN_HEIGHT * scale);
+    treemap::file_label_spots(tree, rects, min_w, min_h, cap)
+        .iter()
+        .map(|r| {
+            let (name, size) = tree_view::file_label(tree, r.node);
+            let [red, green, blue] = treemap::filetype::ink(treemap::filetype::colour(treemap::filetype::category_of(&name), theme));
+            FileLabel {
+                x: px(r.x),
+                y: px(r.y),
+                width: px(r.w),
+                height: px(r.h),
+                name: name.into(),
+                size: size.into(),
+                ink: slint::Color::from_rgb_u8(red, green, blue),
+                two_lines: r.h >= FILE_LABEL_TWO_LINES * scale,
+            }
+        })
+        .collect()
 }
 
 /// All labels of the map under the one `LABEL_CAP`: the frames first, then the file tiles in the
 /// room the frames leave.
 fn map_labels(tree: &Tree, rects: &[Rect], chrome: Chrome, scale: f64, theme: Theme) -> (Vec<FrameLabel>, Vec<FileLabel>) {
-    let _ = (tree, rects, chrome, scale, theme);
-    todo!()
+    let frames = frame_labels(tree, rects, chrome, scale);
+    let files = file_labels(tree, rects, scale, theme, LABEL_CAP.saturating_sub(frames.len()));
+    (frames, files)
 }
 
 /// Shows a finished layout of `root`: the image, its rects and labels, the crumbs and the selection.
@@ -290,7 +309,7 @@ fn show_layout(
     root: NodeId,
     rects: Vec<Rect>,
     image: Option<SharedPixelBuffer<Rgba8Pixel>>,
-    labels: Vec<FrameLabel>,
+    (labels, file_labels): (Vec<FrameLabel>, Vec<FileLabel>),
 ) {
     let Some((crumbs, note)) = with_loaded(|l| {
         let tree = &l.data.tree;
@@ -304,8 +323,13 @@ fn show_layout(
         ui.set_treemap(Image::from_rgba8(px));
     }
     ui.set_labels(ModelRc::new(VecModel::from(labels)));
+    ui.set_file_labels(ModelRc::new(VecModel::from(file_labels)));
     ui.set_map_note(note.into());
-    ui.set_crumbs(ModelRc::new(VecModel::from(crumbs)));
+    // A new model rebuilds the crumbs and drops the keyboard focus of a crumb, so a relayout of the
+    // same folder (resize, theme) keeps the model.
+    if !ui.get_crumbs().iter().eq(crumbs.iter().cloned()) {
+        ui.set_crumbs(ModelRc::new(VecModel::from(crumbs)));
+    }
     sync_selection(ui);
     note_treemap_shown(ui);
 }
@@ -435,6 +459,7 @@ fn clear(ui: &MainWindow) {
     ui.set_treemap(Image::default());
     ui.set_crumbs(ModelRc::default());
     ui.set_labels(ModelRc::default());
+    ui.set_file_labels(ModelRc::default());
     ui.set_map_note(SharedString::new());
     sync_types(ui);
     ui.set_has_selection(false);

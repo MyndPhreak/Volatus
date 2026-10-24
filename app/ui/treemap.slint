@@ -134,12 +134,14 @@ export component CrumbBar inherits Rectangle {
 }
 
 /// The treemap picture (drawn by the host on a worker) with the layers above it: the frame
-/// labels, the map text, the selection outline and the focus ring.
+/// and file labels, the map text, the selection outline and the focus ring.
 export component TreemapView inherits Rectangle {
     /// The picture, in physical pixels, stretched over the whole view.
     in property <image> source;
     /// Labels of the frames, from the same layout as the picture.
     in property <[FrameLabel]> labels;
+    /// Labels of the file tiles, from the same layout as the picture.
+    in property <[FileLabel]> file-labels;
     /// Text over the map when it shows nothing, or "".
     in property <string> note;
     in property <bool> has-selection;
@@ -156,6 +158,11 @@ export component TreemapView inherits Rectangle {
     callback key(string);
     /// The view changed size, in logical pixels.
     callback resized(float, float);
+
+    /// Gives the map the keyboard focus.
+    public function focus-map() {
+        map-focus.focus();
+    }
 
     // The image's pixel size must not feed back into the layout: each new image
     // would change the map size and start another layout.
@@ -197,6 +204,39 @@ export component TreemapView inherits Rectangle {
             overflow: elide;
             vertical-alignment: center;
             color: Palette.foreground.transparentize(40%);
+            accessible-role: none;
+        }
+    }
+    // File names on their tiles, in the tile's ink. The name comes first: the size follows it on
+    // the same line only when both fit, or goes on a second line in a tile high enough for two.
+    for f in root.file-labels : Rectangle {
+        x: f.x;
+        y: f.y;
+        width: f.width;
+        height: f.height;
+        file-name := Text {
+            x: 4px;
+            y: 0px;
+            width: min(self.preferred-width, parent.width - 8px);
+            height: min(parent.height, 16px);
+            text: f.name;
+            font-size: 11px;
+            overflow: elide;
+            vertical-alignment: center;
+            color: f.ink;
+            accessible-role: none;
+        }
+        Text {
+            x: f.two-lines ? 4px : file-name.x + file-name.width + 4px;
+            y: f.two-lines ? 14px : 0px;
+            width: f.two-lines ? parent.width - 8px : max(0px, parent.width - self.x - 4px);
+            height: 16px;
+            visible: f.two-lines || self.preferred-width <= self.width;
+            text: f.two-lines ? f.size : "(" + f.size + ")";
+            font-size: 11px;
+            overflow: elide;
+            vertical-alignment: center;
+            color: f.ink;
             accessible-role: none;
         }
     }

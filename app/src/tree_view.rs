@@ -196,8 +196,7 @@ pub fn frame_label(tree: &Tree, node: NodeId) -> (String, String) {
 /// The label of file `node` on its tile: (name, size), as `("pagefile.sys", "64.0 GB")`. The
 /// name is kept unchanged; the window cuts it with "…" when it does not fit.
 pub fn file_label(tree: &Tree, node: NodeId) -> (String, String) {
-    let _ = (tree, node);
-    todo!()
+    (tree.name(node).to_string(), crate::model::format_size(tree.node(node).size))
 }
 
 /// Text of the crumb that stands for the folders `crumbs` leaves out.

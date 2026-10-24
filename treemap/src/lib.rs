@@ -153,12 +153,7 @@ pub fn label_spots(tree: &Tree, rects: &[Rect], chrome: Chrome, min_w: f64, cap:
         .filter(|(_, r)| tree.node(r.node).is_dir && chrome.has_header(r) && r.w - 2.0 * p >= min_w)
         .map(|(i, r)| (i, Rect { node: r.node, x: r.x + p, y: r.y, w: r.w - 2.0 * p, h: chrome.header }))
         .collect();
-    if spots.len() > cap {
-        let area = |i: usize| rects[i].w * rects[i].h;
-        spots.select_nth_unstable_by(cap, |a, b| area(b.0).total_cmp(&area(a.0)).then(a.0.cmp(&b.0)));
-        spots.truncate(cap);
-        spots.sort_unstable_by_key(|s| s.0);
-    }
+    keep_largest(&mut spots, rects, cap);
     spots.into_iter().map(|(_, s)| s).collect()
 }
 
@@ -168,8 +163,21 @@ pub fn label_spots(tree: &Tree, rects: &[Rect], chrome: Chrome, min_w: f64, cap:
 /// At most `cap` spots: the largest tiles by area (ties: the first in `rects`), in the order of
 /// `rects`. The caller gives the room the frame labels leave, so frames come first.
 pub fn file_label_spots(tree: &Tree, rects: &[Rect], min_w: f64, min_h: f64, cap: usize) -> Vec<Rect> {
-    let _ = (tree, rects, min_w, min_h, cap);
-    todo!()
+    let mut spots: Vec<(usize, Rect)> =
+        rects.iter().copied().enumerate().filter(|(_, r)| !tree.node(r.node).is_dir && r.w >= min_w && r.h >= min_h).collect();
+    keep_largest(&mut spots, rects, cap);
+    spots.into_iter().map(|(_, s)| s).collect()
+}
+
+/// Keeps the `cap` spots whose rects (`rects[i]` for spot `(i, _)`) are the largest by area, ties
+/// to the first, in the order of `rects`. O(n).
+fn keep_largest(spots: &mut Vec<(usize, Rect)>, rects: &[Rect], cap: usize) {
+    if spots.len() > cap {
+        let area = |i: usize| rects[i].w * rects[i].h;
+        spots.select_nth_unstable_by(cap, |a, b| area(b.0).total_cmp(&area(a.0)).then(a.0.cmp(&b.0)));
+        spots.truncate(cap);
+        spots.sort_unstable_by_key(|s| s.0);
+    }
 }
 
 /// Places `areas` (sorted largest first) inside `b` as rows along the short side. Rects go
@@ -405,6 +413,9 @@ fn draw_frame(px: &mut [u32], wu: usize, b: &Bounds, radius: f64, unit: usize, g
     }
 }
 
+/// White over a tile's colour at its top edge: the top highlight (`filetype::ink` reads it too).
+pub(crate) const TILE_HIGHLIGHT: f64 = 0.28;
+
 /// An opaque tile in colour `c`, lit from the top, with a `unit` gap on its right and bottom
 /// when it has room. Rounded tiles also get a light ring.
 fn draw_tile(px: &mut [u32], wu: usize, b: &Bounds, radius: f64, unit: usize, c: [u8; 3]) {
@@ -414,9 +425,9 @@ fn draw_tile(px: &mut [u32], wu: usize, b: &Bounds, radius: f64, unit: usize, c:
     let lighten = |c: [u8; 3], a: f64| c.map(|v| (f64::from(v) + (255.0 - f64::from(v)) * a).round() as u8);
     let height = (t.y1 - t.y0) as f64;
     for y in t.y0..t.y1 {
-        // White 0.28 at the top edge, gone at 55% of the height.
+        // White TILE_HIGHLIGHT at the top edge, gone at 55% of the height.
         let s = ((y - t.y0) as f64 + 0.5) / height;
-        let body = lighten(c, 0.28 * (1.0 - s / 0.55).max(0.0));
+        let body = lighten(c, TILE_HIGHLIGHT * (1.0 - s / 0.55).max(0.0));
         let rim = lighten(body, 0.14);
         let (body, rim) = (u32::from_le_bytes([body[0], body[1], body[2], 255]), u32::from_le_bytes([rim[0], rim[1], rim[2], 255]));
         let row = &mut px[y * wu..(y + 1) * wu];

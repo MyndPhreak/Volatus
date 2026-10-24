@@ -127,8 +127,22 @@ pub fn colour(c: Category, theme: Theme) -> [u8; 3] {
 /// Text colour for a label on a tile of colour `tile`: black or white, whichever has the higher
 /// worst contrast over the tile, from its plain colour to its lit top edge.
 pub fn ink(tile: [u8; 3]) -> [u8; 3] {
-    let _ = tile;
-    todo!()
+    const BLACK: [u8; 3] = [0, 0, 0];
+    const WHITE: [u8; 3] = [255, 255, 255];
+    // WCAG relative luminance; contrast (L1 + 0.05) / (L2 + 0.05).
+    let lum = |c: [u8; 3]| {
+        let lin = |v: u8| {
+            let v = f64::from(v) / 255.0;
+            if v <= 0.040_45 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+        };
+        0.2126 * lin(c[0]) + 0.7152 * lin(c[1]) + 0.0722 * lin(c[2])
+    };
+    let lit = tile.map(|v| (f64::from(v) + (255.0 - f64::from(v)) * crate::TILE_HIGHLIGHT).round() as u8);
+    // The lit top is the lightest part of the tile and the plain colour the darkest: black reads
+    // worst on the plain colour, white worst on the lit top.
+    let on_black = (lum(tile) + 0.05) / 0.05;
+    let on_white = 1.05 / (lum(lit) + 0.05);
+    if on_black >= on_white { BLACK } else { WHITE }
 }
 
 /// Bytes and file count of one extension.
