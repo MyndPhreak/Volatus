@@ -131,6 +131,13 @@ impl ScanControl {
         true
     }
 
+    /// "New scan": leaves a finished scan and goes back to `Idle`. The id stays, so a late result
+    /// of the finished scan must also be checked against the data the window shows.
+    /// `false`, and no change, in any other state.
+    pub fn reset(&mut self) -> bool {
+        false
+    }
+
     /// Applies `event` from scan `generation`. `false`, and no change, if that scan is not current.
     pub fn apply(&mut self, generation: u64, event: Event) -> bool {
         if !self.is_current(generation) {
@@ -145,6 +152,11 @@ impl ScanControl {
     pub fn finish<T>(&mut self, generation: u64, summary: Summary, result: T) -> Option<T> {
         self.apply(generation, Event::Finished(summary)).then_some(result)
     }
+}
+
+/// True when the window shows the start screen: nothing is scanning and no result is shown.
+pub fn shows_start(_state: &ScanState) -> bool {
+    false
 }
 
 /// Binary units, one decimal above 1 KB: `1.5 MB`.
@@ -540,7 +552,51 @@ mod tests {
     // ---- banner_text ----
     #[test]
     fn banner_text_idle_tells_user_what_to_do() {
-        assert_eq!(banner_text(&ScanState::Idle, false), "Choose a folder or drive. Then select Scan.");
+        assert_eq!(banner_text(&ScanState::Idle, false), "Select a drive or a folder to scan.");
+    }
+
+    // ---- shows_start ----
+    #[test]
+    fn shows_start_each_state_matches_its_screen() {
+        let cases = [
+            (ScanState::Idle, true),
+            (ScanState::Scanning { files: 0, dirs: 0 }, false),
+            (ScanState::Done(summary(Method::Walk, 0)), false),
+            (ScanState::Error("e".into()), true),
+            (ScanState::Cancelled, true),
+        ];
+        for (state, want) in cases {
+            assert_eq!(shows_start(&state), want, "state {state:?}");
+        }
+    }
+
+    // ---- reset ----
+    fn control_in(state: ScanState) -> ScanControl {
+        ScanControl { state, generation: 7, cancel: Arc::new(AtomicBool::new(false)) }
+    }
+
+    #[test]
+    fn reset_done_goes_to_idle_and_keeps_the_generation() {
+        let mut c = control_in(ScanState::Done(summary(Method::Walk, 0)));
+        assert!(c.reset());
+        assert_eq!(c.state(), &ScanState::Idle);
+        assert_eq!(c.generation(), 7);
+    }
+
+    #[test]
+    fn reset_other_states_change_nothing() {
+        let others = [
+            ScanState::Idle,
+            ScanState::Scanning { files: 1, dirs: 2 },
+            ScanState::Error("e".into()),
+            ScanState::Cancelled,
+        ];
+        for state in others {
+            let mut c = control_in(state.clone());
+            assert!(!c.reset(), "state {state:?}");
+            assert_eq!(c.state(), &state);
+            assert_eq!(c.generation(), 7);
+        }
     }
 
     #[test]

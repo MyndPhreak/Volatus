@@ -8,6 +8,7 @@
 
 mod browse;
 mod cli;
+mod drives;
 mod elevate;
 mod footer;
 mod model;
@@ -354,12 +355,22 @@ fn count_types(ui: &MainWindow, data: Arc<Data>) {
         // Err means the event loop has stopped: nothing left to update.
         let _ = slint::invoke_from_event_loop(move || {
             let Some(ui) = weak.upgrade() else { return };
-            if SESSION.with_borrow(|s| s.scan.is_current(generation)) {
-                with_loaded(|l| l.chips = Some(chips));
+            if store_chips(generation, &data, chips) {
                 sync_types(&ui);
             }
         });
     });
+}
+
+/// Keeps the footer `chips` counted for `data` of scan `generation`. `false`, and nothing kept, for a
+/// late result: of an older scan, or for data the window no longer shows (`ScanControl::reset`
+/// keeps the generation, so the generation alone does not tell).
+fn store_chips(generation: u64, _data: &Arc<Data>, chips: Vec<footer::Chip>) -> bool {
+    let current = SESSION.with_borrow(|s| s.scan.is_current(generation));
+    if current {
+        with_loaded(|l| l.chips = Some(chips));
+    }
+    current
 }
 
 /// Pushes the footer chips into the window, in the tile colours of the current theme.
@@ -802,7 +813,15 @@ fn restart_admin(path: &str, launch: impl FnOnce(&str, bool) -> Result<(), Strin
 
 #[cfg(test)]
 mod tests {
-    use super::{SESSION, frame_labels, restart_admin};
+    use super::{Data, Loaded, RowModel, SESSION, frame_labels, restart_admin, store_chips};
+    use crate::footer::Chip;
+    use crate::model::{Event, Summary};
+    use crate::tree_view::ViewState;
+    use scan::Method;
+    use slint::ModelNotify;
+    use std::rc::Rc;
+    use std::sync::Arc;
+    use treemap::filetype::Category;
     use scan::rollup::{RawEntry, rollup};
     use std::cell::RefCell;
     use treemap::{Chrome, Rect};
@@ -830,6 +849,109 @@ mod tests {
     #[test]
     fn frame_labels_at_scale_two_narrowest_banded_frame_gets_a_24_px_label() {
         assert_eq!(labels_of_one_frame(56.0, 48.0, 2.0), vec![(2.0, 0.0, 24.0, 16.0)]);
+    }
+
+    fn data() -> Arc<Data> {
+        let entries = vec![
+            RawEntry { id: 0, parent: 0, name: "root".into(), size: 0, allocated: 0, is_dir: true },
+            RawEntry { id: 1, parent: 0, name: "a.txt".into(), size: 10, allocated: 10, is_dir: false },
+        ];
+        let tree = rollup(0, entries).unwrap().tree;
+        Arc::new(Data { counts: crate::tree_view::file_counts(&tree), tree })
+    }
+
+    fn loaded(data: &Arc<Data>) -> Loaded {
+        let root = data.tree.root();
+        let model = Rc::new(RowModel { data: data.clone(), rows: RefCell::new(Vec::new()), notify: ModelNotify::default() });
+        Loaded { data: data.clone(), model, view: ViewState::new(root), selected: None, view_root: root, rects: Vec::new(), chips: None }
+    }
+
+    fn chips() -> Vec<Chip> {
+        vec![Chip { label: ".txt".into(), percent: "100.0%".into(), share: 1.0, category: Category::Document }]
+    }
+
+    fn summary() -> Summary {
+        Summary {
+            method: Method::Walk,
+            files: 1,
+            dirs: 1,
+            skipped: 0,
+            elapsed: std::time::Duration::ZERO,
+            phases: Default::default(),
+            total: 10,
+        }
+    }
+
+    /// Scan 1 finished with `data` on screen. Returns its generation.
+    fn show_finished_scan(data: &Arc<Data>) -> u64 {
+        SESSION.with_borrow_mut(|s| {
+            let (generation, _) = s.scan.start().unwrap();
+            assert!(s.scan.apply(generation, Event::Finished(summary())));
+            s.loaded = Some(loaded(data));
+            generation
+        })
+    }
+
+    fn kept_chips() -> Option<Vec<Chip>> {
+        SESSION.with_borrow(|s| s.loaded.as_ref().and_then(|l| l.chips.clone()))
+    }
+
+    #[test]
+    fn store_chips_result_of_the_shown_scan_is_kept() {
+        let d = data();
+        let generation = show_finished_scan(&d);
+        assert!(store_chips(generation, &d, chips()));
+        assert_eq!(kept_chips(), Some(chips()));
+    }
+
+    #[test]
+    fn store_chips_late_result_after_reset_is_dropped() {
+        let d = data();
+        let generation = show_finished_scan(&d);
+        SESSION.with_borrow_mut(|s| {
+            assert!(s.scan.reset());
+            s.loaded = None;
+        });
+        assert!(!store_chips(generation, &d, chips()));
+        assert_eq!(kept_chips(), None);
+    }
+
+    #[test]
+    fn store_chips_late_result_of_a_scan_before_cancel_and_new_scan_is_dropped() {
+        let old = data();
+        let old_generation = show_finished_scan(&old);
+        let new = data();
+        SESSION.with_borrow_mut(|s| {
+            assert!(s.scan.reset());
+            let (generation, _) = s.scan.start().unwrap();
+            assert!(s.scan.cancel());
+            let (generation2, _) = s.scan.start().unwrap();
+            assert!(generation2 > generation);
+            assert!(s.scan.apply(generation2, Event::Finished(summary())));
+            s.loaded = Some(loaded(&new));
+        });
+        assert!(!store_chips(old_generation, &old, chips()));
+        assert_eq!(kept_chips(), None);
+    }
+
+    #[test]
+    fn store_chips_late_result_for_other_data_of_the_same_generation_is_dropped() {
+        // reset keeps the generation: the scan id alone cannot tell old data from new data.
+        let shown = data();
+        let late = data();
+        let generation = show_finished_scan(&shown);
+        assert!(!store_chips(generation, &late, chips()));
+        assert_eq!(kept_chips(), None);
+    }
+
+    #[test]
+    fn store_chips_same_data_after_a_theme_change_is_still_kept() {
+        // A theme change does not replace the data or the scan: the chips (categories) are theme free.
+        let d = data();
+        let generation = show_finished_scan(&d);
+        assert!(store_chips(generation, &d, chips()));
+        assert!(store_chips(generation, &d, chips()));
+        assert_eq!(kept_chips(), Some(chips()));
     }
 
     fn run(timing: bool) -> (Result<(), String>, Option<(String, bool)>) {
