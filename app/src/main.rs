@@ -747,8 +747,35 @@ fn restart_admin(path: &str, launch: impl FnOnce(&str, bool) -> Result<(), Strin
 
 #[cfg(test)]
 mod tests {
-    use super::{SESSION, restart_admin};
+    use super::{SESSION, frame_labels, restart_admin};
+    use scan::rollup::{RawEntry, rollup};
     use std::cell::RefCell;
+    use treemap::{Chrome, Rect};
+
+    /// The labels of one folder "f" drawn as `w` x `h` physical pixels at `scale`:
+    /// (x, y, width, height) in logical pixels.
+    fn labels_of_one_frame(w: f64, h: f64, scale: f64) -> Vec<(f32, f32, f32, f32)> {
+        let entries = vec![
+            RawEntry { id: 0, parent: 0, name: "root".into(), size: 0, allocated: 0, is_dir: true },
+            RawEntry { id: 1, parent: 0, name: "f".into(), size: 0, allocated: 0, is_dir: true },
+            RawEntry { id: 2, parent: 1, name: "g".into(), size: 10, allocated: 10, is_dir: false },
+        ];
+        let tree = rollup(0, entries).unwrap().tree;
+        let f = tree.children(tree.root()).next().unwrap();
+        let rects = [Rect { node: f, x: 0.0, y: 0.0, w, h }];
+        frame_labels(&tree, &rects, Chrome::scaled(scale), scale).iter().map(|l| (l.x, l.y, l.width, l.height)).collect()
+    }
+
+    /// 28 x 24 is the smallest frame with a band; its band is 24 px, the narrowest label.
+    #[test]
+    fn frame_labels_narrowest_banded_frame_gets_a_24_px_label() {
+        assert_eq!(labels_of_one_frame(28.0, 24.0, 1.0), vec![(2.0, 0.0, 24.0, 16.0)]);
+    }
+
+    #[test]
+    fn frame_labels_at_scale_two_narrowest_banded_frame_gets_a_24_px_label() {
+        assert_eq!(labels_of_one_frame(56.0, 48.0, 2.0), vec![(2.0, 0.0, 24.0, 16.0)]);
+    }
 
     fn run(timing: bool) -> (Result<(), String>, Option<(String, bool)>) {
         SESSION.with_borrow_mut(|s| s.timing = timing);

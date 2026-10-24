@@ -162,15 +162,22 @@ fn chrome_scaled_two_is_band_32_inset_4() {
 #[test]
 fn has_header_height_boundary() {
     let r = |h: f64| Rect { node: NodeId(1), x: 0.0, y: 0.0, w: 100.0, h };
-    assert!(!ONE.has_header(&r(31.99)));
-    assert!(ONE.has_header(&r(32.0)));
+    assert!(!ONE.has_header(&r(23.99)));
+    assert!(ONE.has_header(&r(24.0)));
 }
 
 #[test]
 fn has_header_width_boundary() {
     let r = |w: f64| Rect { node: NodeId(1), x: 0.0, y: 0.0, w, h: 100.0 };
-    assert!(!ONE.has_header(&r(47.99)));
-    assert!(ONE.has_header(&r(48.0)));
+    assert!(!ONE.has_header(&r(27.99)));
+    assert!(ONE.has_header(&r(28.0)));
+}
+
+#[test]
+fn has_header_at_scale_two_boundaries_are_56_by_48() {
+    let c = Chrome::scaled(2.0);
+    let r = |w: f64, h: f64| Rect { node: NodeId(1), x: 0.0, y: 0.0, w, h };
+    assert_eq!([c.has_header(&r(55.99, 48.0)), c.has_header(&r(56.0, 47.99)), c.has_header(&r(56.0, 48.0))], [false, false, true]);
 }
 
 #[test]
@@ -527,9 +534,21 @@ fn label_spots_band_narrower_than_min_w_gets_none() {
 #[test]
 fn label_spots_folder_without_a_band_gets_none() {
     let tree = sample();
-    let rects = [at(&tree, "n1", 0.0, 0.0, 100.0, 31.99)];
+    let rects = [at(&tree, "n1", 0.0, 0.0, 100.0, 23.99)];
 
     assert!(label_spots(&tree, &rects, ONE, 24.0, 10).is_empty());
+}
+
+/// The narrowest frame with a band: its band is exactly 24 px, so `min_w` 24 keeps it and
+/// anything wider removes it. `min_w`, not the band rule, decides at this edge.
+#[test]
+fn label_spots_narrowest_banded_frame_is_kept_at_min_w_24() {
+    let tree = sample();
+    let rects = [at(&tree, "n1", 0.0, 0.0, 28.0, 24.0)];
+
+    let spots = label_spots(&tree, &rects, ONE, 24.0, 10);
+
+    assert_eq!(spots, vec![at(&tree, "n1", 2.0, 0.0, 24.0, 16.0)]);
 }
 
 #[test]
