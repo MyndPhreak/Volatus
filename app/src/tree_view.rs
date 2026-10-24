@@ -193,6 +193,18 @@ pub fn frame_label(tree: &Tree, node: NodeId) -> (String, String) {
     (format!("{}\\", tree.name(node)), crate::model::format_size(tree.node(node).size))
 }
 
+/// Text of the crumb that stands for the folders `crumbs` leaves out.
+pub const CRUMB_GAP: &str = "…";
+
+/// The crumbs above the treemap for `view_root`: its folders from the scan root down, each with
+/// the node it opens. The scan root shows its path without a trailing `\` (`"C:\"` -> `"C:"`).
+/// A chain of more than 6 shows the first, a `CRUMB_GAP` crumb (`None`, opens nothing) and the
+/// last 4. Names are kept unchanged; the window elides them.
+pub fn crumbs(tree: &Tree, view_root: NodeId) -> Vec<(Option<NodeId>, String)> {
+    let _ = (tree, view_root);
+    Vec::new()
+}
+
 /// Order of two siblings: the chosen column, flipped if descending, then name, then id.
 fn compare(tree: &Tree, counts: &[u64], view: &ViewState, a: NodeId, b: NodeId) -> Ordering {
     let name = |n: NodeId| tree.name(n).chars().flat_map(char::to_lowercase);
@@ -779,6 +791,107 @@ mod tests {
     fn frame_label_unicode_name_is_kept_unchanged() {
         let (t, folder) = one_folder("Données 日本語 ✓", 2048);
         assert_eq!(frame_label(&t, folder), ("Données 日本語 ✓\\".to_string(), "2.0 KB".to_string()));
+    }
+
+    // ---- crumbs ----
+    /// A chain of folders: the root named `root_name`, then one folder per name in `names`, each
+    /// in the one before, and a file "f" in the last. The folders from the root down.
+    fn chain(root_name: &str, names: &[&str]) -> (Tree, Vec<NodeId>) {
+        let dir = |id: u64, parent: u64, name: &str| RawEntry { id, parent, name: name.into(), size: 0, allocated: 0, is_dir: true };
+        let mut entries = vec![dir(0, 0, root_name)];
+        for (i, name) in names.iter().enumerate() {
+            entries.push(dir(i as u64 + 1, i as u64, name));
+        }
+        let last = names.len() as u64;
+        entries.push(RawEntry { id: last + 1, parent: last, name: "f".into(), size: 1, allocated: 1, is_dir: false });
+        let t = rollup(0, entries).unwrap().tree;
+        let mut folders = vec![t.root()];
+        for name in names {
+            let next = find(&t, *folders.last().unwrap(), name);
+            folders.push(next);
+        }
+        (t, folders)
+    }
+
+    /// The crumbs expected for the folders `shown` (index into `folders`, `None` = the gap) with `texts`.
+    fn expected(folders: &[NodeId], shown: &[Option<usize>], texts: &[&str]) -> Vec<(Option<NodeId>, String)> {
+        shown.iter().zip(texts).map(|(i, s)| (i.map(|i| folders[i]), (*s).to_string())).collect()
+    }
+
+    #[test]
+    fn crumbs_drive_root_shows_the_drive_without_its_backslash() {
+        let (t, f) = chain("C:\\", &[]);
+        assert_eq!(crumbs(&t, t.root()), expected(&f, &[Some(0)], &["C:"]));
+    }
+
+    #[test]
+    fn crumbs_folder_scan_root_keeps_its_full_path() {
+        let (t, f) = chain("C:\\Users\\mynd\\DEV", &[]);
+        assert_eq!(crumbs(&t, t.root()), expected(&f, &[Some(0)], &["C:\\Users\\mynd\\DEV"]));
+    }
+
+    #[test]
+    fn crumbs_tree_with_only_the_root_is_one_crumb_for_the_root() {
+        let t = rollup(0, vec![RawEntry { id: 0, parent: 0, name: "D:\\".into(), size: 0, allocated: 0, is_dir: true }])
+            .unwrap()
+            .tree;
+        assert_eq!(crumbs(&t, t.root()), vec![(Some(t.root()), "D:".to_string())]);
+    }
+
+    #[test]
+    fn crumbs_nested_folder_lists_every_folder_from_the_root() {
+        let (t, f) = chain("C:\\", &["Users", "mynd"]);
+        assert_eq!(crumbs(&t, f[2]), expected(&f, &[Some(0), Some(1), Some(2)], &["C:", "Users", "mynd"]));
+    }
+
+    #[test]
+    fn crumbs_six_levels_shows_all_six() {
+        let (t, f) = chain("C:\\", &["a", "b", "c", "d", "e"]);
+        let all: Vec<Option<usize>> = (0..6).map(Some).collect();
+        assert_eq!(crumbs(&t, f[5]), expected(&f, &all, &["C:", "a", "b", "c", "d", "e"]));
+    }
+
+    #[test]
+    fn crumbs_seven_levels_shows_the_first_the_gap_and_the_last_four() {
+        let (t, f) = chain("C:\\", &["a", "b", "c", "d", "e", "g"]);
+        let shown = [Some(0), None, Some(3), Some(4), Some(5), Some(6)];
+        assert_eq!(crumbs(&t, f[6]), expected(&f, &shown, &["C:", CRUMB_GAP, "c", "d", "e", "g"]));
+    }
+
+    #[test]
+    fn crumbs_nine_levels_shows_the_first_the_gap_and_the_last_four() {
+        let (t, f) = chain("C:\\", &["a", "b", "c", "d", "e", "g", "h", "i"]);
+        let shown = [Some(0), None, Some(5), Some(6), Some(7), Some(8)];
+        assert_eq!(crumbs(&t, f[8]), expected(&f, &shown, &["C:", CRUMB_GAP, "e", "g", "h", "i"]));
+    }
+
+    #[test]
+    fn crumbs_fifty_levels_deep_shows_six_crumbs_ending_at_the_view() {
+        let names: Vec<String> = (1..50).map(|i| format!("d{i}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let (t, f) = chain("C:\\", &refs);
+        let shown = [Some(0), None, Some(46), Some(47), Some(48), Some(49)];
+        assert_eq!(crumbs(&t, f[49]), expected(&f, &shown, &["C:", CRUMB_GAP, "d46", "d47", "d48", "d49"]));
+    }
+
+    #[test]
+    fn crumbs_names_with_a_backslash_or_unicode_are_kept_unchanged() {
+        let (t, f) = chain("C:\\", &["a\\b", "Données 日本語 ✓"]);
+        assert_eq!(crumbs(&t, f[2]), expected(&f, &[Some(0), Some(1), Some(2)], &["C:", "a\\b", "Données 日本語 ✓"]));
+    }
+
+    #[test]
+    fn crumbs_very_long_name_is_kept_whole() {
+        let long = "x".repeat(300);
+        let (t, f) = chain("C:\\", &[&long]);
+        assert_eq!(crumbs(&t, f[1]), expected(&f, &[Some(0), Some(1)], &["C:", &long]));
+    }
+
+    #[test]
+    fn crumbs_of_a_file_end_with_the_file_after_its_folders() {
+        let (t, f) = chain("C:\\", &["a"]);
+        let file = find(&t, f[1], "f");
+        assert_eq!(crumbs(&t, file), vec![(Some(f[0]), "C:".into()), (Some(f[1]), "a".into()), (Some(file), "f".into())]);
     }
 
     // ---- map_note ----
