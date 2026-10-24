@@ -221,7 +221,7 @@ fn render_framed_program_tile_has_the_light_program_colour_in_light() {
 
 #[test]
 fn render_framed_tile_with_no_extension_is_other_grey() {
-    assert_eq!(tile_body(Theme::Dark, "README"), [0x6e, 0x6e, 0x6e]);
+    assert_eq!(tile_body(Theme::Dark, "README"), [0x75, 0x75, 0x75]);
 }
 
 // ---- type_totals ----

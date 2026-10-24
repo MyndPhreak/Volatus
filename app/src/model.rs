@@ -183,8 +183,20 @@ pub fn format_size(bytes: u64) -> String {
 /// reorders text (bidi and other format controls, control characters, line and paragraph
 /// separators) becomes U+FFFD, so a name cannot show other text than it holds. A name with none
 /// is returned borrowed. The stored name is not changed.
-pub fn display_name(_name: &str) -> Cow<'_, str> {
-    todo!("display_name")
+pub fn display_name(name: &str) -> Cow<'_, str> {
+    // Format controls (Cf) that show nothing or reorder text, the C0 and C1 controls, and the line
+    // and paragraph separators. U+200D joins emoji sequences; it is replaced too, so such an
+    // emoji shows as its parts.
+    let hidden = |c: char| {
+        c.is_control()
+            || matches!(c, '\u{AD}' | '\u{61C}' | '\u{180E}' | '\u{200B}'..='\u{200F}' | '\u{2028}'..='\u{202E}'
+                | '\u{2060}'..='\u{206F}' | '\u{FEFF}' | '\u{FFF9}'..='\u{FFFB}' | '\u{E0001}' | '\u{E0020}'..='\u{E007F}')
+    };
+    if name.chars().any(hidden) {
+        Cow::Owned(name.chars().map(|c| if hidden(c) { '\u{FFFD}' } else { c }).collect())
+    } else {
+        Cow::Borrowed(name)
+    }
 }
 
 /// `1234567` -> `1,234,567`.

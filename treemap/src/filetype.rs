@@ -107,7 +107,7 @@ pub fn colour(c: Category, theme: Theme) -> [u8; 3] {
         (Theme::Dark, Document) => 0xa3a8f0,
         (Theme::Dark, Audio) => 0xe5533a,
         (Theme::Dark, DiskImage) => 0x4aa3b0,
-        (Theme::Dark, Other) => 0x6e6e6e,
+        (Theme::Dark, Other) => 0x757575,
         (Theme::Light, Program) => 0x3888db,
         (Theme::Light, Archive) => 0xc37124,
         (Theme::Light, Data) => 0x8d891d,

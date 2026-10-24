@@ -43,10 +43,12 @@ const RESIZE_DEBOUNCE: Duration = Duration::from_millis(80);
 /// Narrowest frame label, in logical pixels: room for a few characters and "…".
 const LABEL_MIN_WIDTH: f64 = 24.0;
 /// Most labels on the map, frames and file tiles together: the frames first, then the largest
-/// tiles. Measured at 3840x2160 and 200%, release (P8.P6b, 5 runs): 750 labels (554 frames and 196
-/// files) and a new image show in at most 48.7 ms, 1000 in up to 113.8 ms (target 50 ms). The C:
-/// drive has 554 frames and 76 file tiles with a label at that size, so the cap rarely applies.
-const LABEL_CAP: usize = 750;
+/// tiles. Measured at 3840x2160 and 200%, release, 3 runs of 10 frames, each with a new image
+/// (P8.P6b fix 1): 650 labels (554 frames and 96 files) show in a median of 36.6 to 38.1 ms and a
+/// worst of 43.6 ms, 13% under the 50 ms target. 750 gave a worst of 49.8 ms (0.4% margin), 1000
+/// a median of 50.7 to 55.7 ms. The C: drive has 554 frames and 76 file tiles with a label at that
+/// size (630), so the cap rarely applies.
+const LABEL_CAP: usize = 650;
 /// Least file tile that shows its name, in logical pixels: room for a few characters and "…".
 const FILE_LABEL_MIN_WIDTH: f64 = 40.0;
 const FILE_LABEL_MIN_HEIGHT: f64 = 14.0;
@@ -90,7 +92,7 @@ impl Model for RowModel {
         let node = tree.node(row.node);
         let parent_size = node.parent.map_or(node.size, |p| tree.node(p).size);
         Some(TreeRow {
-            name: tree.name(row.node).into(),
+            name: model::display_name(tree.name(row.node)).as_ref().into(),
             size: format_size(node.size).into(),
             percent: tree_view::format_percent(node.size, parent_size).into(),
             files: group_digits(self.data.counts[row.node.0 as usize]).into(),

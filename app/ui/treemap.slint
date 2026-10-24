@@ -231,7 +231,8 @@ export component TreemapView inherits Rectangle {
             y: f.two-lines ? 14px : 0px;
             width: f.two-lines ? parent.width - 8px : max(0px, parent.width - self.x - 4px);
             height: 16px;
-            visible: f.two-lines || self.preferred-width <= self.width;
+            // The size shows whole (number and unit) or not at all: never cut to "29.1…".
+            visible: self.preferred-width <= self.width;
             text: f.two-lines ? f.size : "(" + f.size + ")";
             font-size: 11px;
             overflow: elide;

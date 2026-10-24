@@ -1,6 +1,7 @@
 //! Tree and treemap view logic: file counts, row flattening, sorting, expansion, selection
 //! helpers and treemap hit-testing. Plain functions, no Slint types, so it is unit tested.
 
+use crate::model::display_name;
 use scan::{NodeId, Tree};
 use std::cmp::Ordering;
 use std::collections::HashSet;
@@ -190,13 +191,13 @@ pub fn map_note(tree: &Tree, root: NodeId, rects: &[Rect], has_area: bool) -> &'
 /// The label of folder `node` on its frame: (name with a trailing `\`, size), as
 /// `("Local\\", "306.0 GB")`.
 pub fn frame_label(tree: &Tree, node: NodeId) -> (String, String) {
-    (format!("{}\\", tree.name(node)), crate::model::format_size(tree.node(node).size))
+    (format!("{}\\", display_name(tree.name(node))), crate::model::format_size(tree.node(node).size))
 }
 
 /// The label of file `node` on its tile: (name, size), as `("pagefile.sys", "64.0 GB")`. The
 /// name is kept unchanged; the window cuts it with "…" when it does not fit.
 pub fn file_label(tree: &Tree, node: NodeId) -> (String, String) {
-    (tree.name(node).to_string(), crate::model::format_size(tree.node(node).size))
+    (display_name(tree.name(node)).into_owned(), crate::model::format_size(tree.node(node).size))
 }
 
 /// Text of the crumb that stands for the folders `crumbs` leaves out.
@@ -216,7 +217,7 @@ pub fn crumbs(tree: &Tree, view_root: NodeId) -> Vec<(Option<NodeId>, String)> {
     let text = |n: NodeId| {
         let name = tree.name(n);
         let root_text = name.trim_end_matches(['\\', '/']);
-        if n == chain[0] && !root_text.is_empty() { root_text.to_string() } else { name.to_string() }
+        display_name(if n == chain[0] && !root_text.is_empty() { root_text } else { name }).into_owned()
     };
     let mut out: Vec<(Option<NodeId>, String)> = Vec::new();
     if chain.len() > CRUMB_MAX {
