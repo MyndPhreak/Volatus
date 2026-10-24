@@ -234,23 +234,36 @@ pub fn crumbs(tree: &Tree, view_root: NodeId) -> Vec<(Option<NodeId>, String)> {
 /// file) or the number of files under it (a folder), as `("C:\\Windows\\a.dll", "12.0 MB. DLL
 /// file.")` or `("C:\\Users", "306.0 GB. 1,234 files.")`. Every name of the path goes through
 /// `display_name`; the file type comes from the stored name, so a hidden character cannot change it.
-#[allow(dead_code)] // Stub until P7.T2 uses it.
 pub fn tooltip_lines(tree: &Tree, counts: &[u64], node: NodeId) -> (String, String) {
-    let _ = (tree, counts, node);
-    todo!()
+    let n = tree.node(node);
+    let what = if n.is_dir {
+        let files = counts[node.0 as usize];
+        format!("{} {}.", crate::model::group_digits(files), if files == 1 { "file" } else { "files" })
+    } else {
+        match treemap::filetype::extension(tree.name(node)) {
+            Some(ext) => format!("{} file.", ext.to_ascii_uppercase()),
+            None => "File with no extension.".to_string(),
+        }
+    };
+    let path = display_name(&tree.path(node).to_string_lossy()).into_owned();
+    (path, format!("{}. {what}", crate::model::format_size(n.size)))
 }
 
 /// Where a tooltip `size` long starts on one axis of a map `extent` long, for the pointer at
 /// `pointer` (all in logical pixels): `gap` after the pointer when it fits, else `TIP_FLIP_GAP`
 /// before it, else as far as it fits inside the map; 0 when it is longer than the map.
-#[allow(dead_code)] // Stub until P7.T2 uses it.
 pub fn tip_position(pointer: f32, size: f32, extent: f32, gap: f32) -> f32 {
-    let _ = (pointer, size, extent, gap);
-    todo!()
+    let (after, before) = (pointer + gap, pointer - TIP_FLIP_GAP - size);
+    if after + size <= extent {
+        after
+    } else if before >= 0.0 {
+        before
+    } else {
+        (extent - size).max(0.0)
+    }
 }
 
 /// Space between the pointer and a tooltip shown before it (left or above), in logical pixels.
-#[allow(dead_code)] // Stub until P7.T2 uses it.
 pub const TIP_FLIP_GAP: f32 = 8.0;
 
 /// Order of two siblings: the chosen column, flipped if descending, then name, then id.

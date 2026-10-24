@@ -54,6 +54,8 @@ const FILE_LABEL_MIN_WIDTH: f64 = 40.0;
 const FILE_LABEL_MIN_HEIGHT: f64 = 14.0;
 /// File tiles at least this high, in logical pixels, show the size on a second line.
 const FILE_LABEL_TWO_LINES: f64 = 32.0;
+/// Time the pointer stays on one treemap node before its tooltip shows.
+const TIP_DELAY: Duration = Duration::from_millis(400);
 /// Most file-type chips in the footer before "Other".
 const FOOTER_CHIPS: usize = 8;
 
@@ -168,6 +170,8 @@ thread_local! {
     });
     /// Starts one relayout after the window stops changing the treemap size.
     static RESIZE_TIMER: Timer = Timer::default();
+    /// Shows the tooltip of the hovered node after `TIP_DELAY`.
+    static TIP_TIMER: Timer = Timer::default();
 }
 
 /// Applies `event` from scan `generation` and shows the new state. Dropped if a newer scan
@@ -343,6 +347,7 @@ fn hover_of(data: &Data, rects: &[Rect], node: NodeId, scale: f64, theme: Theme)
     let [red, green, blue] = treemap::filetype::colour(treemap::filetype::category_of(tree.name(node)), theme);
     // The same label rules as on the map, for the tile alone at its own origin (none for a folder).
     let label = file_labels(tree, &[Rect { node, x: 0.0, y: 0.0, w, h }], scale, theme, 1).pop();
+    let (title, detail) = tree_view::tooltip_lines(tree, &data.counts, node);
     Hover {
         visible: true,
         x: px(x),
@@ -353,8 +358,8 @@ fn hover_of(data: &Data, rects: &[Rect], node: NodeId, scale: f64, theme: Theme)
         color: slint::Color::from_rgb_u8(red, green, blue),
         labelled: label.is_some(),
         label: label.unwrap_or_default(),
-        title: SharedString::new(),
-        detail: SharedString::new(),
+        title: title.into(),
+        detail: detail.into(),
     }
 }
 
@@ -403,12 +408,33 @@ fn refresh_hover(ui: &MainWindow) {
     }
 }
 
-/// Pushes the hover properties of `node` (`None`: nothing hovered) into the window.
+/// Pushes the hover properties of `node` (`None`: nothing hovered) into the window. The tooltip
+/// of the old node hides; the one of the new node shows after `TIP_DELAY`, at the pointer.
 fn show_hover(ui: &MainWindow, node: Option<NodeId>) {
     let scale = f64::from(ui.window().scale_factor());
     let theme = if ui.get_dark() { Theme::Dark } else { Theme::Light };
-    let hover = node.and_then(|n| with_loaded(|l| hover_of(&l.data, &l.rects, n, scale, theme)));
-    ui.set_hover(hover.unwrap_or_default());
+    let hover = node.and_then(|n| with_loaded(|l| hover_of(&l.data, &l.rects, n, scale, theme))).unwrap_or_default();
+    let shown = hover.visible;
+    ui.set_hover(hover);
+    hide_tip(ui);
+    if shown {
+        let weak = ui.as_weak();
+        TIP_TIMER.with(|t| {
+            t.start(TimerMode::SingleShot, TIP_DELAY, move || {
+                let Some(ui) = weak.upgrade() else { return };
+                let (x, y) = SESSION.with_borrow(|s| s.pointer);
+                ui.set_tip_x(x);
+                ui.set_tip_y(y);
+                ui.set_tip_visible(true);
+            })
+        });
+    }
+}
+
+/// Hides the tooltip, also one still waiting for `TIP_DELAY`. It shows again for the next node.
+fn hide_tip(ui: &MainWindow) {
+    TIP_TIMER.with(Timer::stop);
+    ui.set_tip_visible(false);
 }
 
 /// Shows a finished layout of `root`: the image, its rects and labels, the crumbs and the selection.
@@ -898,6 +924,15 @@ fn wire_tree_and_treemap(ui: &MainWindow) {
             }
         }
     });
+    ui.on_treemap_hide_tip({
+        let weak = ui.as_weak();
+        move || {
+            if let Some(ui) = weak.upgrade() {
+                hide_tip(&ui);
+            }
+        }
+    });
+    ui.on_tip_position(tree_view::tip_position);
     ui.on_theme_changed({
         let weak = ui.as_weak();
         move || {

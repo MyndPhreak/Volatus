@@ -1,4 +1,5 @@
 import { Palette } from "std-widgets.slint";
+import { Glass } from "theme.slint";
 
 /// Names of the keys the host uses, shared by the file tree and the treemap.
 export global Keys {
@@ -207,11 +208,19 @@ export component TreemapView inherits Rectangle {
     in property <Hover> hover;
     /// The renderer draws drop shadows: the hovered tile glows. Without them it gets a bright border.
     in property <bool> glow: true;
+    /// The tooltip of the hovered node shows, near the map point (tip-x, tip-y).
+    in property <bool> tip-visible;
+    in property <length> tip-x;
+    in property <length> tip-y;
 
     /// The pointer moved over the map, with no button down, to a point in logical pixels.
     callback hovered(float, float);
     /// The pointer left the map.
     callback left();
+    /// A button press or a scroll on the map: the tooltip hides.
+    callback hide-tip();
+    /// Where the tooltip starts on one axis: (pointer, tooltip size, map size, gap after the pointer).
+    pure callback tip-position(float, float, float, float) -> float;
     /// A click at a point in logical pixels.
     callback clicked(float, float);
     /// A double-click at a point in logical pixels.
@@ -340,6 +349,39 @@ export component TreemapView inherits Rectangle {
             }
         }
     }
+    // The tooltip of the hovered node, above the hover and inside the map: after the pointer when it
+    // fits, else before it (the host's tip-position). A long path wraps at any character.
+    if root.tip-visible && root.hover.visible : Rectangle {
+        width: min(tip-lines.preferred-width, min(root.width, 520px));
+        height: tip-lines.preferred-height;
+        x: root.tip-position(root.tip-x / 1px, self.width / 1px, root.width / 1px, 16) * 1px;
+        y: root.tip-position(root.tip-y / 1px, self.height / 1px, root.height / 1px, 20) * 1px;
+        border-radius: 6px;
+        background: Palette.background;
+        border-width: 1px;
+        border-color: Glass.border;
+        drop-shadow-blur: 8px;
+        drop-shadow-color: #00000066;
+        tip-lines := VerticalLayout {
+            padding-left: 8px;
+            padding-right: 8px;
+            padding-top: 5px;
+            padding-bottom: 6px;
+            spacing: 2px;
+            Text {
+                text: root.hover.title;
+                font-size: 12px;
+                wrap: char-wrap;
+                color: Palette.foreground;
+            }
+            Text {
+                text: root.hover.detail;
+                font-size: 12px;
+                wrap: word-wrap;
+                color: Palette.foreground.transparentize(30%);
+            }
+        }
+    }
     map-focus := FocusScope {
         accessible-role: image;
         accessible-label: "Treemap";
@@ -355,7 +397,13 @@ export component TreemapView inherits Rectangle {
             pointer-event(event) => {
                 if (event.kind == PointerEventKind.move) {
                     root.hovered(self.mouse-x / 1px, self.mouse-y / 1px);
+                } else if (event.kind == PointerEventKind.down) {
+                    root.hide-tip();
                 }
+            }
+            scroll-event(event) => {
+                root.hide-tip();
+                return reject;
             }
             changed has-hover => {
                 if (!self.has-hover) {
