@@ -230,6 +230,26 @@ pub fn crumbs(tree: &Tree, view_root: NodeId) -> Vec<(Option<NodeId>, String)> {
     out
 }
 
+/// The two lines of the tooltip of `node`: its full path, then its size and its file type (a
+/// file) or the number of files under it (a folder), as `("C:\\Windows\\a.dll", "12.0 MB. DLL
+/// file.")` or `("C:\\Users", "306.0 GB. 1,234 files.")`. Every name of the path goes through
+/// `display_name`; the file type comes from the stored name, so a hidden character cannot change it.
+pub fn tooltip_lines(tree: &Tree, counts: &[u64], node: NodeId) -> (String, String) {
+    let _ = (tree, counts, node);
+    todo!()
+}
+
+/// Where a tooltip `size` long starts on one axis of a map `extent` long, for the pointer at
+/// `pointer` (all in logical pixels): `gap` after the pointer when it fits, else `TIP_FLIP_GAP`
+/// before it, else as far as it fits inside the map; 0 when it is longer than the map.
+pub fn tip_position(pointer: f32, size: f32, extent: f32, gap: f32) -> f32 {
+    let _ = (pointer, size, extent, gap);
+    todo!()
+}
+
+/// Space between the pointer and a tooltip shown before it (left or above), in logical pixels.
+pub const TIP_FLIP_GAP: f32 = 8.0;
+
 /// Order of two siblings: the chosen column, flipped if descending, then name, then id.
 fn compare(tree: &Tree, counts: &[u64], view: &ViewState, a: NodeId, b: NodeId) -> Ordering {
     let name = |n: NodeId| tree.name(n).chars().flat_map(char::to_lowercase);

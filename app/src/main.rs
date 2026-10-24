@@ -23,8 +23,8 @@ use model::{
 use nav::{Dir, TreeMove};
 use scan::{NodeId, Progress, ScanError, Tree};
 use slint::{
-    ComponentHandle, Image, Model, ModelNotify, ModelRc, ModelTracker, Rgba8Pixel, SharedPixelBuffer, SharedString,
-    Timer, TimerMode, VecModel, Weak,
+    ComponentHandle, Image, Model, ModelNotify, ModelRc, ModelTracker, Rgba8Pixel, SetRenderingNotifierError,
+    SharedPixelBuffer, SharedString, Timer, TimerMode, VecModel, Weak,
 };
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -140,6 +140,10 @@ struct Session {
     run: Option<TimingRun>,
     /// Id of the latest drive list request. Results of older requests are dropped.
     drives_seq: u64,
+    /// The treemap node under the pointer, from the shown rects.
+    hovered: Option<NodeId>,
+    /// Times the hovered node changed (`note_hover`). With `--timing` it is printed at exit.
+    hover_changes: u64,
 }
 
 thread_local! {
@@ -153,6 +157,8 @@ thread_local! {
         timing: false,
         run: None,
         drives_seq: 0,
+        hovered: None,
+        hover_changes: 0,
     });
     /// Starts one relayout after the window stops changing the treemap size.
     static RESIZE_TIMER: Timer = Timer::default();
@@ -303,6 +309,29 @@ fn map_labels(tree: &Tree, rects: &[Rect], chrome: Chrome, scale: f64, theme: Th
     let frames = frame_labels(tree, rects, chrome, scale);
     let files = file_labels(tree, rects, scale, theme, LABEL_CAP.saturating_sub(frames.len()));
     (frames, files)
+}
+
+/// Keeps `node` as the hovered node. `true` when it is not the node hovered before: only then does
+/// the window get new hover properties.
+fn note_hover(node: Option<NodeId>) -> bool {
+    let _ = node;
+    todo!()
+}
+
+/// What the window shows for hovered `node` in the shown `rects` (physical pixels), in logical
+/// pixels: a file tile lifts in its file-type colour in `theme` and keeps its label when the tile
+/// is big enough for one; a folder frame gets a highlight. Not visible when `node` is not drawn.
+fn hover_of(data: &Data, rects: &[Rect], node: NodeId, scale: f64, theme: Theme) -> Hover {
+    let _ = (data, rects, node, scale, theme);
+    todo!()
+}
+
+/// The hover glow is drawn as a drop shadow, which the software renderer does not draw. A renderer
+/// that takes a rendering notifier (FemtoVG on OpenGL) draws it; the software renderer returns
+/// `Unsupported`, and then the hovered tile gets a brighter border instead.
+fn glow_drawn(notifier: Result<(), SetRenderingNotifierError>) -> bool {
+    let _ = notifier;
+    todo!()
 }
 
 /// Shows a finished layout of `root`: the image, its rects and labels, the crumbs and the selection.
@@ -920,9 +949,11 @@ fn restart_admin(path: &str, launch: impl FnOnce(&str, bool) -> Result<(), Strin
 #[cfg(test)]
 mod tests {
     use super::{
-        Data, FILE_LABEL_MIN_HEIGHT, FILE_LABEL_MIN_WIDTH, FILE_LABEL_TWO_LINES, FileLabel, FrameLabel, LABEL_CAP, Loaded,
-        RowModel, SESSION, file_labels, frame_labels, map_labels, restart_admin, store_chips,
+        Data, FILE_LABEL_MIN_HEIGHT, FILE_LABEL_MIN_WIDTH, FILE_LABEL_TWO_LINES, FileLabel, FrameLabel, Hover, LABEL_CAP,
+        Loaded, RowModel, SESSION, file_labels, frame_labels, glow_drawn, hover_of, map_labels, note_hover, restart_admin,
+        store_chips,
     };
+    use slint::SetRenderingNotifierError;
     use scan::{NodeId, Tree};
     use treemap::Theme;
     use crate::footer::Chip;
@@ -1133,6 +1164,118 @@ mod tests {
         let rects = [Rect { node: file, x: 0.0, y: 0.0, w: 200.0, h: 100.0 }];
         let names: Vec<String> = file_labels(&tree, &rects, 1.0, Theme::Dark, usize::MAX).iter().map(|l| l.name.to_string()).collect();
         assert_eq!(names, ["invoice\u{FFFD}fdp.exe"]);
+    }
+
+    #[test]
+    fn hover_of_label_name_shows_a_placeholder() {
+        let (tree, _, file) = spoofed();
+        let data = Data { counts: crate::tree_view::file_counts(&tree), tree };
+        let hover = hover_of(&data, &[Rect { node: file, x: 0.0, y: 0.0, w: 200.0, h: 100.0 }], file, 1.0, Theme::Dark);
+        assert_eq!(hover.label.name.as_str(), "invoice\u{FFFD}fdp.exe");
+    }
+
+    // ---- hover ----
+    #[test]
+    fn note_hover_changes_only_when_the_node_changes() {
+        let (a, b) = (Some(NodeId(1)), Some(NodeId(2)));
+        let changed: Vec<bool> = [a, a, b, b, None, None, a].into_iter().map(note_hover).collect();
+        assert_eq!(changed, [true, false, true, false, true, false, true]);
+    }
+
+    #[test]
+    fn note_hover_leave_with_nothing_hovered_is_no_change() {
+        assert!(!note_hover(None));
+    }
+
+    #[test]
+    fn note_hover_counts_each_change() {
+        let (a, b) = (Some(NodeId(1)), Some(NodeId(2)));
+        for node in [a, a, b, b, None, None, a] {
+            note_hover(node);
+        }
+        assert_eq!(SESSION.with_borrow(|s| s.hover_changes), 4);
+    }
+
+    /// `hover_of` for one file "clip0.mp4" of 10 bytes, or one empty folder "d0", drawn as the
+    /// physical rect `(x, y, w, h)`.
+    fn hover_of_one(folder: bool, (x, y, w, h): (f64, f64, f64, f64), scale: f64, theme: Theme) -> Hover {
+        let (tree, dirs, files) = if folder { flat(1, &[]) } else { flat(0, &[10]) };
+        let node = if folder { dirs[0] } else { files[0] };
+        let data = Data { counts: crate::tree_view::file_counts(&tree), tree };
+        hover_of(&data, &[Rect { node, x, y, w, h }], node, scale, theme)
+    }
+
+    fn place(h: &Hover) -> (bool, f32, f32, f32, f32) {
+        (h.visible, h.x, h.y, h.width, h.height)
+    }
+
+    #[test]
+    fn hover_of_file_tile_at_scale_two_is_in_logical_pixels() {
+        let hover = hover_of_one(false, (10.0, 20.0, 80.0, 28.0), 2.0, Theme::Dark);
+        assert_eq!(place(&hover), (true, 5.0, 10.0, 40.0, 14.0));
+    }
+
+    #[test]
+    fn hover_of_file_tile_lifts() {
+        assert!(hover_of_one(false, (0.0, 0.0, 80.0, 28.0), 1.0, Theme::Dark).lift);
+    }
+
+    #[test]
+    fn hover_of_folder_frame_is_shown_and_does_not_lift() {
+        let hover = hover_of_one(true, (0.0, 0.0, 400.0, 300.0), 1.0, Theme::Dark);
+        assert_eq!((hover.visible, hover.lift), (true, false));
+    }
+
+    #[test]
+    fn hover_of_file_colour_is_its_file_type_colour_in_each_theme() {
+        let colour = |theme: Theme| {
+            let [r, g, b] = treemap::filetype::colour(Category::Video, theme);
+            slint::Color::from_rgb_u8(r, g, b)
+        };
+        let got = [Theme::Dark, Theme::Light].map(|t| hover_of_one(false, (0.0, 0.0, 80.0, 28.0), 1.0, t).color);
+        assert_eq!(got, [colour(Theme::Dark), colour(Theme::Light)]);
+    }
+
+    #[test]
+    fn hover_of_tile_big_enough_keeps_its_label_in_tile_coordinates() {
+        let hover = hover_of_one(false, (100.0, 50.0, 200.0, 100.0), 2.0, Theme::Dark);
+        let l = &hover.label;
+        assert!(hover.labelled);
+        assert_eq!((l.name.as_str(), l.x, l.y, l.width, l.height, l.two_lines), ("clip0.mp4", 0.0, 0.0, 100.0, 50.0, true));
+    }
+
+    #[test]
+    fn hover_of_tile_too_narrow_for_a_label_has_none() {
+        let hover = hover_of_one(false, (0.0, 0.0, FILE_LABEL_MIN_WIDTH - 0.01, 100.0), 1.0, Theme::Dark);
+        assert!(!hover.labelled);
+    }
+
+    #[test]
+    fn hover_of_folder_frame_has_no_file_label() {
+        assert!(!hover_of_one(true, (0.0, 0.0, 400.0, 300.0), 1.0, Theme::Dark).labelled);
+    }
+
+    #[test]
+    fn hover_of_node_not_drawn_is_not_visible() {
+        let (tree, _, files) = flat(0, &[10]);
+        let data = Data { counts: crate::tree_view::file_counts(&tree), tree };
+        assert!(!hover_of(&data, &[], files[0], 1.0, Theme::Dark).visible);
+    }
+
+    // ---- glow or border ----
+    #[test]
+    fn glow_drawn_renderer_with_a_notifier_draws_the_glow() {
+        assert!(glow_drawn(Ok(())));
+    }
+
+    #[test]
+    fn glow_drawn_software_renderer_gets_the_border() {
+        assert!(!glow_drawn(Err(SetRenderingNotifierError::Unsupported)));
+    }
+
+    #[test]
+    fn glow_drawn_notifier_already_set_is_a_renderer_that_draws_the_glow() {
+        assert!(glow_drawn(Err(SetRenderingNotifierError::AlreadySet)));
     }
 
     fn data() -> Arc<Data> {

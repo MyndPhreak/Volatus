@@ -39,6 +39,27 @@ export struct FileLabel {
     two-lines: bool,
 }
 
+/// The node under the pointer, in logical pixels. Set by the host only when that node changes.
+export struct Hover {
+    /// A node is under the pointer.
+    visible: bool,
+    x: length,
+    y: length,
+    width: length,
+    height: length,
+    /// A file tile: it lifts and glows in `color`. A folder frame gets a light highlight.
+    lift: bool,
+    /// The colour of the file type of the tile.
+    color: color,
+    /// The tile is big enough for its name: `label` is shown on the lifted tile.
+    labelled: bool,
+    /// The label of the tile, in the tile's own coordinates.
+    label: FileLabel,
+    /// The tooltip: the full path, then the size and the file type or the number of files.
+    title: string,
+    detail: string,
+}
+
 /// One crumb above the treemap. Text is formatted by the host.
 export struct Crumb {
     text: string,
