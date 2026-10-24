@@ -298,3 +298,6 @@ The owner wants folder names on the frames "even if they get cut off". P3 change
 
 Note (P8.P3): the Window property `map-empty` (bool) became `map-note` (string), the text shown over the map (`tree_view::map_note`).
 Note (P8.P3 fix 1, owner decision above): `Chrome::has_header` is now `w >= 1.75 * header && h >= 1.5 * header` (28 x 24 logical px), not 3x / 2x, so the 24 px label minimum decides which frames get a name; on C: at 4K/200% that is 557 labels, not 327.
+
+## Decision 2026-10-24 (owner): file names on the file tiles too
+Besides folder frames, file tiles big enough for some text show their file name (and size), elided. Same label layer, cap and 50 ms budget as frames; frames keep priority at the cap; tiles too small stay blank; the tooltip shows the full name. Implemented as P6b after P6.

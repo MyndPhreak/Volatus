@@ -83,3 +83,6 @@ None. The builder check raised seven questions; none needed the owner (answered 
 
 ## Decision 2026-10-23 (owner): label every frame, cut off if needed
 Folder names go on every frame that has room for a few characters, elided with an ellipsis when too long. This replaces the earlier "only when big enough" and the label cap of 300; the cap is set by measurement. The tooltip shows the full name.
+
+## Decision 2026-10-24 (owner): file names on the file tiles too
+File tiles that can hold some text show their file name and size, elided with an ellipsis. Folder labels keep priority when the label cap is reached.
