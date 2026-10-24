@@ -78,6 +78,7 @@ export component TreemapView inherits Rectangle {
             overflow: elide;
             vertical-alignment: center;
             color: Palette.foreground;
+            accessible-role: none;
         }
         Text {
             x: label-name.x + label-name.width + 4px;
@@ -88,6 +89,7 @@ export component TreemapView inherits Rectangle {
             overflow: elide;
             vertical-alignment: center;
             color: Palette.foreground.transparentize(40%);
+            accessible-role: none;
         }
     }
     if root.note != "" : Text {
