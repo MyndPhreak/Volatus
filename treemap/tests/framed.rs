@@ -1,6 +1,6 @@
 use scan::rollup::{RawEntry, rollup};
 use scan::{NodeId, Tree};
-use treemap::{Chrome, Rect, Theme, label_spots, layout, layout_framed, render_framed};
+use treemap::{Chrome, Rect, Theme, file_label_spots, label_spots, layout, layout_framed, render_framed};
 
 const W: u32 = 800;
 const H: u32 = 600;
@@ -630,4 +630,155 @@ fn label_spots_of_a_real_layout_are_the_bands_of_the_frames() {
     let frames: Vec<NodeId> = rects.iter().filter(|r| tree.node(r.node).is_dir && ONE.has_header(r)).map(|r| r.node).collect();
     assert!(frames.len() >= 3, "{frames:?}");
     assert_eq!(spots.iter().map(|s| s.node).collect::<Vec<_>>(), frames);
+}
+
+// ---- file_label_spots ----
+
+/// The least tile for a file name at 100%: 40 x 14 logical px.
+const FILE_MIN: (f64, f64) = (40.0, 14.0);
+
+#[test]
+fn file_label_spots_tile_at_the_least_size_gets_its_tile() {
+    let tree = sample();
+    let rects = [at(&tree, "n3", 10.0, 20.0, 40.0, 14.0)];
+
+    let spots = file_label_spots(&tree, &rects, FILE_MIN.0, FILE_MIN.1, 10);
+
+    assert_eq!(spots, vec![at(&tree, "n3", 10.0, 20.0, 40.0, 14.0)]);
+}
+
+#[test]
+fn file_label_spots_tile_narrower_than_min_w_gets_none() {
+    let tree = sample();
+    let rects = [at(&tree, "n3", 10.0, 20.0, 39.99, 300.0)];
+
+    assert!(file_label_spots(&tree, &rects, FILE_MIN.0, FILE_MIN.1, 10).is_empty());
+}
+
+#[test]
+fn file_label_spots_tile_lower_than_min_h_gets_none() {
+    let tree = sample();
+    let rects = [at(&tree, "n3", 10.0, 20.0, 400.0, 13.99)];
+
+    assert!(file_label_spots(&tree, &rects, FILE_MIN.0, FILE_MIN.1, 10).is_empty());
+}
+
+#[test]
+fn file_label_spots_folder_gets_none() {
+    let tree = sample();
+    let rects = [at(&tree, "n1", 0.0, 0.0, 400.0, 300.0)];
+
+    assert!(file_label_spots(&tree, &rects, FILE_MIN.0, FILE_MIN.1, 10).is_empty());
+}
+
+#[test]
+fn file_label_spots_zero_size_and_nan_tiles_get_none() {
+    let tree = sample();
+    let rects = [
+        at(&tree, "n3", 0.0, 0.0, 0.0, 0.0),
+        at(&tree, "n11", 0.0, 0.0, f64::NAN, 50.0),
+        at(&tree, "n12", 0.0, 0.0, 50.0, f64::NAN),
+        at(&tree, "n21", 0.0, 0.0, -80.0, 50.0),
+    ];
+
+    assert!(file_label_spots(&tree, &rects, FILE_MIN.0, FILE_MIN.1, 10).is_empty());
+}
+
+/// Files in depth-first order; by area n21 > n11 > n12 > n3.
+fn four_tiles(tree: &Tree) -> [Rect; 4] {
+    [
+        at(tree, "n11", 0.0, 0.0, 100.0, 50.0),
+        at(tree, "n12", 0.0, 50.0, 80.0, 50.0),
+        at(tree, "n21", 200.0, 0.0, 300.0, 200.0),
+        at(tree, "n3", 0.0, 100.0, 60.0, 40.0),
+    ]
+}
+
+#[test]
+fn file_label_spots_more_than_cap_keeps_the_largest_in_rects_order() {
+    let tree = sample();
+    let rects = four_tiles(&tree);
+
+    let spots = file_label_spots(&tree, &rects, FILE_MIN.0, FILE_MIN.1, 2);
+
+    let names: Vec<&str> = spots.iter().map(|s| tree.name(s.node)).collect();
+    assert_eq!(names, ["n11", "n21"]);
+}
+
+#[test]
+fn file_label_spots_cap_above_the_count_keeps_every_tile() {
+    let tree = sample();
+    let rects = four_tiles(&tree);
+
+    let spots = file_label_spots(&tree, &rects, FILE_MIN.0, FILE_MIN.1, 5);
+
+    let names: Vec<&str> = spots.iter().map(|s| tree.name(s.node)).collect();
+    assert_eq!(names, ["n11", "n12", "n21", "n3"]);
+}
+
+#[test]
+fn file_label_spots_equal_areas_keep_the_first_in_rects() {
+    let tree = sample();
+    let rects = [at(&tree, "n21", 0.0, 0.0, 100.0, 50.0), at(&tree, "n11", 100.0, 0.0, 50.0, 100.0)];
+
+    let spots = file_label_spots(&tree, &rects, FILE_MIN.0, FILE_MIN.1, 1);
+
+    let names: Vec<&str> = spots.iter().map(|s| tree.name(s.node)).collect();
+    assert_eq!(names, ["n21"]);
+}
+
+#[test]
+fn file_label_spots_cap_zero_is_empty() {
+    let tree = sample();
+    let rects = four_tiles(&tree);
+
+    assert!(file_label_spots(&tree, &rects, FILE_MIN.0, FILE_MIN.1, 0).is_empty());
+}
+
+/// At 100%, 150% and 200% the least tile is 40 x 14 logical px times the scale: kept at the
+/// edge, dropped 0.01 px under it on either side.
+#[test]
+fn file_label_spots_least_tile_scales_with_the_display_scale() {
+    let tree = sample();
+    let mut wrong = Vec::new();
+    for scale in [1.0, 1.5, 2.0] {
+        let (mw, mh) = (FILE_MIN.0 * scale, FILE_MIN.1 * scale);
+        for (w, h, kept) in [(mw, mh, true), (mw - 0.01, mh, false), (mw, mh - 0.01, false)] {
+            let rects = [at(&tree, "n3", 0.0, 0.0, w, h)];
+            if file_label_spots(&tree, &rects, mw, mh, 10).len() != usize::from(kept) {
+                wrong.push(format!("scale {scale}: {w} x {h} kept should be {kept}"));
+            }
+        }
+    }
+
+    assert!(wrong.is_empty(), "{wrong:?}");
+}
+
+#[test]
+fn file_label_spots_of_a_real_layout_are_the_big_enough_file_tiles() {
+    let tree = sample();
+    let rects = layout_framed(&tree, tree.root(), W, H, ONE);
+
+    let spots = file_label_spots(&tree, &rects, FILE_MIN.0, FILE_MIN.1, usize::MAX);
+
+    let tiles: Vec<Rect> =
+        rects.iter().filter(|r| !tree.node(r.node).is_dir && r.w >= FILE_MIN.0 && r.h >= FILE_MIN.1).copied().collect();
+    assert!(tiles.len() >= 5, "{tiles:?}");
+    assert_eq!(spots, tiles);
+}
+
+#[test]
+fn file_label_spots_of_a_real_layout_overlap_no_frame_band() {
+    let tree = sample();
+    let rects = layout_framed(&tree, tree.root(), W, H, ONE);
+    let bands = label_spots(&tree, &rects, ONE, 24.0, usize::MAX);
+
+    let spots = file_label_spots(&tree, &rects, FILE_MIN.0, FILE_MIN.1, usize::MAX);
+
+    let hits: Vec<(NodeId, NodeId)> = spots
+        .iter()
+        .flat_map(|s| bands.iter().filter(move |b| s.x < b.x + b.w && b.x < s.x + s.w && s.y < b.y + b.h && b.y < s.y + s.h).map(move |b| (s.node, b.node)))
+        .collect();
+    assert!(!spots.is_empty() && !bands.is_empty());
+    assert!(hits.is_empty(), "{hits:?}");
 }

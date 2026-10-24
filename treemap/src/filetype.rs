@@ -124,6 +124,13 @@ pub fn colour(c: Category, theme: Theme) -> [u8; 3] {
     [r, g, b]
 }
 
+/// Text colour for a label on a tile of colour `tile`: black or white, whichever has the higher
+/// worst contrast over the tile, from its plain colour to its lit top edge.
+pub fn ink(tile: [u8; 3]) -> [u8; 3] {
+    let _ = tile;
+    todo!()
+}
+
 /// Bytes and file count of one extension.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeTotal {

@@ -25,6 +25,20 @@ export struct FrameLabel {
     size: string,
 }
 
+/// The label of one file tile, on the tile, in logical pixels. Text is formatted by the host.
+export struct FileLabel {
+    x: length,
+    y: length,
+    width: length,
+    height: length,
+    name: string,
+    size: string,
+    /// Text colour that reads on the tile colour.
+    ink: color,
+    /// The size goes on a second line under the name.
+    two-lines: bool,
+}
+
 /// One crumb above the treemap. Text is formatted by the host.
 export struct Crumb {
     text: string,

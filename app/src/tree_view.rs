@@ -193,6 +193,13 @@ pub fn frame_label(tree: &Tree, node: NodeId) -> (String, String) {
     (format!("{}\\", tree.name(node)), crate::model::format_size(tree.node(node).size))
 }
 
+/// The label of file `node` on its tile: (name, size), as `("pagefile.sys", "64.0 GB")`. The
+/// name is kept unchanged; the window cuts it with "…" when it does not fit.
+pub fn file_label(tree: &Tree, node: NodeId) -> (String, String) {
+    let _ = (tree, node);
+    todo!()
+}
+
 /// Text of the crumb that stands for the folders `crumbs` leaves out.
 pub const CRUMB_GAP: &str = "…";
 /// Most crumbs shown with no gap.
@@ -809,6 +816,40 @@ mod tests {
     fn frame_label_unicode_name_is_kept_unchanged() {
         let (t, folder) = one_folder("Données 日本語 ✓", 2048);
         assert_eq!(frame_label(&t, folder), ("Données 日本語 ✓\\".to_string(), "2.0 KB".to_string()));
+    }
+
+    // ---- file_label ----
+    /// root(0){ file `name`(1) of `size` bytes }
+    fn one_file(name: &str, size: u64) -> (Tree, NodeId) {
+        let e = |id: u64, name: &str, size: u64, is_dir: bool| RawEntry { id, parent: 0, name: name.into(), size, allocated: size, is_dir };
+        let t = rollup(0, vec![e(0, "root", 0, true), e(1, name, size, false)]).unwrap().tree;
+        let file = find(&t, t.root(), name);
+        (t, file)
+    }
+
+    #[test]
+    fn file_label_file_is_name_and_size() {
+        let (t, file) = one_file("pagefile.sys", 64 * (1 << 30));
+        assert_eq!(file_label(&t, file), ("pagefile.sys".to_string(), "64.0 GB".to_string()));
+    }
+
+    #[test]
+    fn file_label_unicode_name_is_kept_unchanged() {
+        let (t, file) = one_file("Données 日本語 ✓.txt", 2048);
+        assert_eq!(file_label(&t, file), ("Données 日本語 ✓.txt".to_string(), "2.0 KB".to_string()));
+    }
+
+    #[test]
+    fn file_label_200_character_name_is_kept_whole() {
+        let name = format!("{}.bin", "x".repeat(196));
+        let (t, file) = one_file(&name, 5);
+        assert_eq!(file_label(&t, file), (name, "5 B".to_string()));
+    }
+
+    #[test]
+    fn file_label_zero_byte_file_shows_zero_bytes() {
+        let (t, file) = one_file("empty.log", 0);
+        assert_eq!(file_label(&t, file), ("empty.log".to_string(), "0 B".to_string()));
     }
 
     // ---- crumbs ----

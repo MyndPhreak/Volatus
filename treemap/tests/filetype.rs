@@ -1,6 +1,6 @@
 use scan::rollup::{RawEntry, rollup};
 use scan::{NodeId, Tree};
-use treemap::filetype::{Category, category_of, colour, extension, type_totals};
+use treemap::filetype::{Category, category_of, colour, extension, ink, type_totals};
 use treemap::{Chrome, Rect, Theme, layout_framed, render_framed};
 
 /// Files `(name, size)` directly under a root folder.
@@ -361,4 +361,43 @@ fn category_of_build_files_is_code_not_program() {
     let cats: Vec<Category> = names.iter().map(|n| category_of(n)).collect();
 
     assert_eq!(cats, vec![Category::Code; names.len()]);
+}
+
+// ---- ink: label text on a tile ----
+
+/// `c` lit as the top edge of its tile: white 0.28 over it (`render_framed`).
+fn lit_top(c: [u8; 3]) -> [u8; 3] {
+    c.map(|v| (f64::from(v) + (255.0 - f64::from(v)) * 0.28).round() as u8)
+}
+
+/// Least contrast of a label's text: 4:1 over the whole tile, from its plain colour to its lit top.
+#[test]
+fn ink_has_4_to_1_contrast_on_every_tile_colour_in_both_themes() {
+    let mut low = Vec::new();
+    for theme in [Theme::Dark, Theme::Light] {
+        for c in Category::ALL {
+            let tile = colour(c, theme);
+            let worst = contrast(ink(tile), tile).min(contrast(ink(tile), lit_top(tile)));
+            if worst < 4.0 {
+                low.push(format!("{theme:?} {c:?} {worst:.2}:1"));
+            }
+        }
+    }
+
+    assert!(low.is_empty(), "{low:?}");
+}
+
+#[test]
+fn ink_on_a_dark_tile_is_white() {
+    assert_eq!(ink([0x20, 0x20, 0x20]), [255, 255, 255]);
+}
+
+#[test]
+fn ink_on_a_light_tile_is_black() {
+    assert_eq!(ink([0xf0, 0xf0, 0xf0]), [0, 0, 0]);
+}
+
+#[test]
+fn ink_on_the_dark_program_blue_is_black() {
+    assert_eq!(ink(colour(Category::Program, Theme::Dark)), [0, 0, 0]);
 }

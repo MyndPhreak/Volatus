@@ -46,6 +46,11 @@ const LABEL_MIN_WIDTH: f64 = 24.0;
 /// 750 labels and a new image show in at most 43.6 ms, 1000 in up to 55.5 ms (target 50 ms).
 /// The C: drive has 557 frames with a label band at that size, so the cap rarely applies.
 const LABEL_CAP: usize = 750;
+/// Least file tile that shows its name, in logical pixels: room for a few characters and "…".
+const FILE_LABEL_MIN_WIDTH: f64 = 40.0;
+const FILE_LABEL_MIN_HEIGHT: f64 = 14.0;
+/// File tiles at least this high, in logical pixels, show the size on a second line.
+const FILE_LABEL_TWO_LINES: f64 = 32.0;
 /// Most file-type chips in the footer before "Other".
 const FOOTER_CHIPS: usize = 8;
 
@@ -263,6 +268,20 @@ fn frame_labels(tree: &Tree, rects: &[Rect], chrome: Chrome, scale: f64) -> Vec<
             FrameLabel { x: px(r.x), y: px(r.y), width: px(r.w), height: px(r.h), name: name.into(), size: size.into() }
         })
         .collect()
+}
+
+/// The labels of the file tiles in `rects` (physical pixels) for the window, in logical pixels:
+/// at most `cap`, the largest tiles first, with the text colour of each tile in `theme`.
+fn file_labels(tree: &Tree, rects: &[Rect], scale: f64, theme: Theme, cap: usize) -> Vec<FileLabel> {
+    let _ = (tree, rects, scale, theme, cap);
+    todo!()
+}
+
+/// All labels of the map under the one `LABEL_CAP`: the frames first, then the file tiles in the
+/// room the frames leave.
+fn map_labels(tree: &Tree, rects: &[Rect], chrome: Chrome, scale: f64, theme: Theme) -> (Vec<FrameLabel>, Vec<FileLabel>) {
+    let _ = (tree, rects, chrome, scale, theme);
+    todo!()
 }
 
 /// Shows a finished layout of `root`: the image, its rects and labels, the crumbs and the selection.
@@ -873,7 +892,12 @@ fn restart_admin(path: &str, launch: impl FnOnce(&str, bool) -> Result<(), Strin
 
 #[cfg(test)]
 mod tests {
-    use super::{Data, Loaded, RowModel, SESSION, frame_labels, restart_admin, store_chips};
+    use super::{
+        Data, FILE_LABEL_MIN_HEIGHT, FILE_LABEL_MIN_WIDTH, FILE_LABEL_TWO_LINES, FileLabel, FrameLabel, LABEL_CAP, Loaded,
+        RowModel, SESSION, file_labels, frame_labels, map_labels, restart_admin, store_chips,
+    };
+    use scan::{NodeId, Tree};
+    use treemap::Theme;
     use crate::footer::Chip;
     use crate::model::{Event, Summary};
     use crate::tree_view::ViewState;
@@ -909,6 +933,131 @@ mod tests {
     #[test]
     fn frame_labels_at_scale_two_narrowest_banded_frame_gets_a_24_px_label() {
         assert_eq!(labels_of_one_frame(56.0, 48.0, 2.0), vec![(2.0, 0.0, 24.0, 16.0)]);
+    }
+
+    // ---- file labels ----
+    /// Under the root: `folders` empty folders "d0", "d1", …, then files "clip0.mp4", "clip1.mp4", …
+    /// of the sizes in `files`. Returns the tree, the folders and the files, in that order.
+    fn flat(folders: usize, files: &[u64]) -> (Tree, Vec<NodeId>, Vec<NodeId>) {
+        let mut e = vec![RawEntry { id: 0, parent: 0, name: "root".into(), size: 0, allocated: 0, is_dir: true }];
+        e.extend((0..folders).map(|i| RawEntry { id: i as u64 + 1, parent: 0, name: format!("d{i}"), size: 0, allocated: 0, is_dir: true }));
+        e.extend(files.iter().enumerate().map(|(i, &s)| RawEntry {
+            id: (folders + i) as u64 + 1,
+            parent: 0,
+            name: format!("clip{i}.mp4"),
+            size: s,
+            allocated: s,
+            is_dir: false,
+        }));
+        let tree = rollup(0, e).unwrap().tree;
+        let by_name = |n: String| tree.children(tree.root()).find(|&c| tree.name(c) == n).unwrap();
+        let dirs = (0..folders).map(|i| by_name(format!("d{i}"))).collect();
+        let fs = (0..files.len()).map(|i| by_name(format!("clip{i}.mp4"))).collect();
+        (tree, dirs, fs)
+    }
+
+    /// The file labels of one file "clip0.mp4" of 10 bytes drawn as the physical rect (x, y, w, h).
+    fn file_labels_of_one_tile(x: f64, y: f64, w: f64, h: f64, scale: f64, theme: Theme) -> Vec<FileLabel> {
+        let (tree, _, files) = flat(0, &[10]);
+        file_labels(&tree, &[Rect { node: files[0], x, y, w, h }], scale, theme, usize::MAX)
+    }
+
+    fn geometry(labels: &[FileLabel]) -> Vec<(f32, f32, f32, f32, bool)> {
+        labels.iter().map(|l| (l.x, l.y, l.width, l.height, l.two_lines)).collect()
+    }
+
+    #[test]
+    fn file_labels_at_scale_two_are_in_logical_pixels() {
+        let labels = file_labels_of_one_tile(10.0, 20.0, 80.0, 28.0, 2.0, Theme::Dark);
+        assert_eq!(geometry(&labels), vec![(5.0, 10.0, 40.0, 14.0, false)]);
+    }
+
+    #[test]
+    fn file_labels_text_is_the_file_name_and_size() {
+        let labels = file_labels_of_one_tile(0.0, 0.0, 200.0, 100.0, 1.0, Theme::Dark);
+        let text: Vec<(String, String)> = labels.iter().map(|l| (l.name.to_string(), l.size.to_string())).collect();
+        assert_eq!(text, vec![("clip0.mp4".to_string(), "10 B".to_string())]);
+    }
+
+    #[test]
+    fn file_labels_least_tile_at_scale_one_and_a_half_is_kept() {
+        let (w, h) = (FILE_LABEL_MIN_WIDTH * 1.5, FILE_LABEL_MIN_HEIGHT * 1.5);
+        let labels = file_labels_of_one_tile(0.0, 0.0, w, h, 1.5, Theme::Dark);
+        assert_eq!(geometry(&labels), vec![(0.0, 0.0, FILE_LABEL_MIN_WIDTH as f32, FILE_LABEL_MIN_HEIGHT as f32, false)]);
+    }
+
+    #[test]
+    fn file_labels_tile_under_the_least_size_at_scale_one_and_a_half_gets_none() {
+        let (w, h) = (FILE_LABEL_MIN_WIDTH * 1.5, FILE_LABEL_MIN_HEIGHT * 1.5);
+        let narrow = file_labels_of_one_tile(0.0, 0.0, w - 0.01, h, 1.5, Theme::Dark);
+        let low = file_labels_of_one_tile(0.0, 0.0, w, h - 0.01, 1.5, Theme::Dark);
+        assert_eq!((narrow.len(), low.len()), (0, 0));
+    }
+
+    #[test]
+    fn file_labels_tile_as_high_as_two_lines_gets_two_lines() {
+        let labels = file_labels_of_one_tile(0.0, 0.0, 200.0, FILE_LABEL_TWO_LINES * 2.0, 2.0, Theme::Dark);
+        assert_eq!(labels.iter().map(|l| l.two_lines).collect::<Vec<_>>(), vec![true]);
+    }
+
+    #[test]
+    fn file_labels_tile_under_two_lines_high_gets_one_line() {
+        let labels = file_labels_of_one_tile(0.0, 0.0, 200.0, FILE_LABEL_TWO_LINES * 2.0 - 0.01, 2.0, Theme::Dark);
+        assert_eq!(labels.iter().map(|l| l.two_lines).collect::<Vec<_>>(), vec![false]);
+    }
+
+    #[test]
+    fn file_labels_ink_is_the_ink_of_the_tile_colour_in_each_theme() {
+        let ink = |theme: Theme| {
+            let [r, g, b] = treemap::filetype::ink(treemap::filetype::colour(Category::Video, theme));
+            slint::Color::from_rgb_u8(r, g, b)
+        };
+        let got: Vec<slint::Color> = [Theme::Dark, Theme::Light]
+            .into_iter()
+            .flat_map(|t| file_labels_of_one_tile(0.0, 0.0, 200.0, 100.0, 1.0, t))
+            .map(|l| l.ink)
+            .collect();
+        assert_eq!(got, vec![ink(Theme::Dark), ink(Theme::Light)]);
+    }
+
+    #[test]
+    fn file_labels_folder_gets_none() {
+        let (tree, dirs, _) = flat(1, &[]);
+        let labels = file_labels(&tree, &[Rect { node: dirs[0], x: 0.0, y: 0.0, w: 400.0, h: 300.0 }], 1.0, Theme::Dark, usize::MAX);
+        assert!(labels.is_empty());
+    }
+
+    /// `frames` folders with a band (100 x 50 each) and files "clip{i}.mp4" of 50 + i by 20 px, at 100%.
+    fn map_of(frames: usize, files: usize) -> (Vec<FrameLabel>, Vec<FileLabel>) {
+        let (tree, dirs, fs) = flat(frames, &vec![10; files]);
+        let mut rects: Vec<Rect> = dirs.iter().map(|&n| Rect { node: n, x: 0.0, y: 0.0, w: 100.0, h: 50.0 }).collect();
+        rects.extend(fs.iter().enumerate().map(|(i, &n)| Rect { node: n, x: 0.0, y: 0.0, w: 50.0 + i as f64, h: 20.0 }));
+        map_labels(&tree, &rects, Chrome::scaled(1.0), 1.0, Theme::Dark)
+    }
+
+    #[test]
+    fn map_labels_frames_come_first_and_files_fill_the_room_left() {
+        let (frames, files) = map_of(LABEL_CAP - 10, 30);
+        assert_eq!((frames.len(), files.len()), (LABEL_CAP - 10, 10));
+    }
+
+    #[test]
+    fn map_labels_files_in_the_room_left_are_the_largest() {
+        let (_, files) = map_of(LABEL_CAP - 3, 8);
+        let names: Vec<String> = files.iter().map(|l| l.name.to_string()).collect();
+        assert_eq!(names, ["clip5.mp4", "clip6.mp4", "clip7.mp4"]);
+    }
+
+    #[test]
+    fn map_labels_frames_over_the_cap_leave_no_room_for_files() {
+        let (frames, files) = map_of(LABEL_CAP + 5, 5);
+        assert_eq!((frames.len(), files.len()), (LABEL_CAP, 0));
+    }
+
+    #[test]
+    fn map_labels_few_labels_keep_every_frame_and_file() {
+        let (frames, files) = map_of(2, 3);
+        assert_eq!((frames.len(), files.len()), (2, 3));
     }
 
     fn data() -> Arc<Data> {

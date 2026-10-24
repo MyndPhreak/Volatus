@@ -162,6 +162,16 @@ pub fn label_spots(tree: &Tree, rects: &[Rect], chrome: Chrome, min_w: f64, cap:
     spots.into_iter().map(|(_, s)| s).collect()
 }
 
+/// Where the file names go: the tile of each file in `rects` that is at least `min_w` x `min_h`.
+/// Folders get none.
+///
+/// At most `cap` spots: the largest tiles by area (ties: the first in `rects`), in the order of
+/// `rects`. The caller gives the room the frame labels leave, so frames come first.
+pub fn file_label_spots(tree: &Tree, rects: &[Rect], min_w: f64, min_h: f64, cap: usize) -> Vec<Rect> {
+    let _ = (tree, rects, min_w, min_h, cap);
+    todo!()
+}
+
 /// Places `areas` (sorted largest first) inside `b` as rows along the short side. Rects go
 /// to `out` as `(x, y, w, h)`, in the order of `areas`. With `fills`, the last row takes
 /// exactly what is left of `b`, so float drift cannot leave a gap.

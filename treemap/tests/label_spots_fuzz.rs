@@ -1,7 +1,7 @@
 //! label_spots invariants over random framed layouts (from the P8.P3 verifier's fuzz proof).
 use scan::rollup::{RawEntry, rollup};
 use scan::{NodeId, Tree};
-use treemap::{Chrome, Rect, label_spots, layout_framed};
+use treemap::{Chrome, Rect, file_label_spots, label_spots, layout_framed};
 
 struct Lcg(u64);
 impl Lcg {
@@ -126,4 +126,71 @@ fn label_spots_degenerate_inputs_are_empty_and_do_not_panic() {
     ];
     assert!(label_spots(&tree, &bad, Chrome::scaled(1.0), 24.0, 750).is_empty());
     assert!(label_spots(&tree, &bad, Chrome::NONE, 0.0, 750).is_empty());
+}
+
+/// The whole label layer under one cap, as the app builds it: frame bands first (`label_spots`),
+/// then file tiles (`file_label_spots`) in the room left.
+#[test]
+fn file_label_spots_invariants_hold_over_300_random_layouts() {
+    let (mut checked, mut capped_cases, mut frames_full) = (0usize, 0usize, 0usize);
+    let mut per_scale = [0usize; 5];
+    for seed in 0..300u64 {
+        let mut rng = Lcg(seed.wrapping_mul(0xA24B_AED4_963E_E407) ^ 0xF11E);
+        let tree = random_tree(&mut rng);
+        let scale = SCALES[(seed % 5) as usize];
+        let (w, h) = (rng.below(2000) as u32, rng.below(1400) as u32);
+        let chrome = Chrome::scaled(scale);
+        let rects = layout_framed(&tree, tree.root(), w, h, chrome);
+        let (min_w, min_h) = (40.0 * scale, 14.0 * scale);
+        let cap = [0usize, 1, 3, 10, 40, 750, usize::MAX][rng.below(7) as usize];
+        let bands = label_spots(&tree, &rects, chrome, 24.0 * scale, cap);
+        let room = cap.saturating_sub(bands.len());
+
+        let spots = file_label_spots(&tree, &rects, min_w, min_h, room);
+
+        let eligible: Vec<(usize, &Rect)> =
+            rects.iter().enumerate().filter(|(_, r)| !tree.node(r.node).is_dir && r.w >= min_w && r.h >= min_h).collect();
+        // One cap for the layer; frames first, files fill what is left and nothing below it is dropped.
+        assert!(bands.len() + spots.len() <= cap, "seed {seed}: over the cap");
+        assert_eq!(spots.len(), eligible.len().min(room), "seed {seed}");
+        if eligible.len() > room {
+            capped_cases += 1;
+        }
+        if room == 0 && cap > 0 && !eligible.is_empty() {
+            frames_full += 1;
+        }
+        let mut last = None;
+        let mut kept_area = f64::MAX;
+        for s in &spots {
+            // Each spot is the tile of an eligible file, in rects order, on the map.
+            let (i, r) = *eligible.iter().find(|(_, r)| r.node == s.node).unwrap_or_else(|| panic!("seed {seed}: spot for non-eligible node"));
+            assert!(last.is_none_or(|l| l < i), "seed {seed}: order");
+            last = Some(i);
+            assert_eq!(s, r, "seed {seed}: spot is not its tile");
+            assert!(s.x + s.w <= f64::from(w) + 1e-9 && s.y + s.h <= f64::from(h) + 1e-9, "seed {seed}: off map");
+            kept_area = kept_area.min(r.w * r.h);
+        }
+        // Largest first: every dropped tile is no bigger than every kept one.
+        for (_, r) in &eligible {
+            if !spots.iter().any(|s| s.node == r.node) {
+                assert!(r.w * r.h <= kept_area + 1e-9, "seed {seed}: dropped a larger tile");
+            }
+        }
+        // A file label overlaps no frame band and no rect other than its tile and its folders.
+        let all_bands = label_spots(&tree, &rects, chrome, 0.0, usize::MAX);
+        for s in &spots {
+            for b in &all_bands {
+                assert!(!overlap(s, b), "seed {seed}: file {} overlaps the band of {}", tree.name(s.node), tree.name(b.node));
+            }
+            for r in &rects {
+                if r.node != s.node && !is_ancestor(&tree, r.node, s.node) {
+                    assert!(!overlap(s, r), "seed {seed}: file {} overlaps {}", tree.name(s.node), tree.name(r.node));
+                }
+            }
+        }
+        checked += spots.len();
+        per_scale[(seed % 5) as usize] += spots.len();
+    }
+    eprintln!("FUZZ files 300 seeds: {checked} spots, {capped_cases} capped cases, {frames_full} with no room left, per scale {per_scale:?}");
+    assert!(checked > 1000 && capped_cases > 20 && frames_full > 5 && per_scale.iter().all(|&n| n > 50), "{checked} {capped_cases} {frames_full} {per_scale:?}");
 }
