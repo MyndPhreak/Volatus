@@ -38,6 +38,12 @@ slint::include_modules!();
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 /// Quiet time after the last treemap size change before it is laid out again.
 const RESIZE_DEBOUNCE: Duration = Duration::from_millis(80);
+/// Narrowest frame label, in logical pixels: room for a few characters and "…".
+const LABEL_MIN_WIDTH: f64 = 24.0;
+/// Most frame labels on the map, largest frames first. Measured at 3840x2160 and 200%, release:
+/// 750 labels and a new image show in at most 40 ms, 1000 in up to 55 ms (target 50 ms).
+/// The C: drive has 328 frames with a label band at that size, so the cap rarely applies.
+const LABEL_CAP: usize = 750;
 
 /// A finished scan plus its derived per-node data. Shared with treemap layout threads.
 struct Data {
@@ -220,31 +226,50 @@ fn relayout(ui: &MainWindow) {
             let px = treemap::render_framed(&data.tree, &rects, w, h, chrome, theme);
             SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(&px, w, h)
         });
+        let labels = frame_labels(&data.tree, &rects, chrome, f64::from(scale));
         // Err means the event loop has stopped: nothing left to update.
         let _ = slint::invoke_from_event_loop(move || {
             let current = SESSION.with_borrow(|s| (s.scan.generation(), s.layout_seq));
             if let Some(ui) = weak.upgrade().filter(|_| current == (generation, seq)) {
-                show_layout(&ui, root, rects, image);
+                show_layout(&ui, root, rects, image, labels);
             }
         });
     });
 }
 
-/// Shows a finished layout of `root`: the image, its rects, the title and the selection.
-fn show_layout(ui: &MainWindow, root: NodeId, rects: Vec<Rect>, image: Option<SharedPixelBuffer<Rgba8Pixel>>) {
-    // A map with an area but nothing to draw: the folder has no file with a size.
-    let empty = image.is_some() && rects.is_empty();
-    let Some((title, can_go_up)) = with_loaded(|l| {
-        l.rects = rects;
+/// The labels of the frames in `rects` (physical pixels) for the window, in logical pixels.
+fn frame_labels(tree: &Tree, rects: &[Rect], chrome: Chrome, scale: f64) -> Vec<FrameLabel> {
+    let px = |v: f64| (v / scale) as f32;
+    treemap::label_spots(tree, rects, chrome, LABEL_MIN_WIDTH * scale, LABEL_CAP)
+        .iter()
+        .map(|r| {
+            let (name, size) = tree_view::frame_label(tree, r.node);
+            FrameLabel { x: px(r.x), y: px(r.y), width: px(r.w), height: px(r.h), name: name.into(), size: size.into() }
+        })
+        .collect()
+}
+
+/// Shows a finished layout of `root`: the image, its rects and labels, the title and the selection.
+fn show_layout(
+    ui: &MainWindow,
+    root: NodeId,
+    rects: Vec<Rect>,
+    image: Option<SharedPixelBuffer<Rgba8Pixel>>,
+    labels: Vec<FrameLabel>,
+) {
+    let Some((title, can_go_up, note)) = with_loaded(|l| {
         let tree = &l.data.tree;
-        (tree.path(root).display().to_string(), tree.node(root).parent.is_some())
+        let note = tree_view::map_note(tree, root, &rects, image.is_some());
+        l.rects = rects;
+        (tree.path(root).display().to_string(), tree.node(root).parent.is_some(), note)
     }) else {
         return;
     };
     if let Some(px) = image {
         ui.set_treemap(Image::from_rgba8(px));
     }
-    ui.set_map_empty(empty);
+    ui.set_labels(ModelRc::new(VecModel::from(labels)));
+    ui.set_map_note(note.into());
     ui.set_treemap_can_go_up(can_go_up);
     ui.set_treemap_title(title.into());
     sync_selection(ui);
@@ -314,7 +339,8 @@ fn clear(ui: &MainWindow) {
     ui.set_treemap(Image::default());
     ui.set_treemap_title(SharedString::new());
     ui.set_treemap_can_go_up(false);
-    ui.set_map_empty(false);
+    ui.set_labels(ModelRc::default());
+    ui.set_map_note(SharedString::new());
     ui.set_has_selection(false);
     ui.set_selected_row(-1);
 }

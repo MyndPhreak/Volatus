@@ -15,13 +15,25 @@ export global Keys {
     }
 }
 
-/// The treemap picture (drawn by the host on a worker) with the layers above it: the
-/// selection outline, the empty-folder text and the focus ring.
+/// The label of one frame, on its band, in logical pixels. Text is formatted by the host.
+export struct FrameLabel {
+    x: length,
+    y: length,
+    width: length,
+    height: length,
+    name: string,
+    size: string,
+}
+
+/// The treemap picture (drawn by the host on a worker) with the layers above it: the frame
+/// labels, the map text, the selection outline and the focus ring.
 export component TreemapView inherits Rectangle {
     /// The picture, in physical pixels, stretched over the whole view.
     in property <image> source;
-    /// True when the shown folder has no file with a size.
-    in property <bool> empty;
+    /// Labels of the frames, from the same layout as the picture.
+    in property <[FrameLabel]> labels;
+    /// Text over the map when it shows nothing, or "".
+    in property <string> note;
     in property <bool> has-selection;
     in property <length> selection-x;
     in property <length> selection-y;
@@ -50,8 +62,36 @@ export component TreemapView inherits Rectangle {
         source: root.source;
         image-fit: fill;
     }
-    if root.empty : Text {
-        text: "No files with a size in this folder.";
+    // Above the picture, so no frame cuts a label off. The name keeps its full width when it
+    // fits and is cut with "…" when it does not; the size takes what is left.
+    for l in root.labels : Rectangle {
+        x: l.x;
+        y: l.y;
+        width: l.width;
+        height: l.height;
+        label-name := Text {
+            x: 3px;
+            width: min(self.preferred-width, parent.width - 6px);
+            height: parent.height;
+            text: l.name;
+            font-size: 11px;
+            overflow: elide;
+            vertical-alignment: center;
+            color: Palette.foreground;
+        }
+        Text {
+            x: label-name.x + label-name.width + 4px;
+            width: max(0px, parent.width - self.x - 3px);
+            height: parent.height;
+            text: "(" + l.size + ")";
+            font-size: 11px;
+            overflow: elide;
+            vertical-alignment: center;
+            color: Palette.foreground.transparentize(40%);
+        }
+    }
+    if root.note != "" : Text {
+        text: root.note;
         horizontal-alignment: center;
         vertical-alignment: center;
         wrap: word-wrap;

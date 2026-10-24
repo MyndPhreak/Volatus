@@ -1,5 +1,6 @@
 import { Button, ComboBox, LineEdit, VerticalBox, HorizontalBox, ProgressIndicator, Palette, ListView } from "std-widgets.slint";
-import { Keys, TreemapView } from "treemap.slint";
+import { FrameLabel, Keys, TreemapView } from "treemap.slint";
+export { FrameLabel }
 
 /// One visible line of the file tree. Text is formatted by the host.
 export struct TreeRow {
@@ -85,8 +86,10 @@ export component MainWindow inherits Window {
     in property <length> selection-y;
     in property <length> selection-width;
     in property <length> selection-height;
-    /// The shown folder has no file with a size.
-    in property <bool> map-empty;
+    /// Text over the treemap when it shows nothing, or "".
+    in property <string> map-note;
+    /// Labels of the treemap frames.
+    in property <[FrameLabel]> labels;
 
     // Elevation
     in property <bool> show-elevate;
@@ -310,7 +313,8 @@ export component MainWindow inherits Window {
                     TreemapView {
                         vertical-stretch: 1;
                         source: root.treemap;
-                        empty: root.map-empty;
+                        note: root.map-note;
+                        labels: root.labels;
                         has-selection: root.has-selection;
                         selection-x: root.selection-x;
                         selection-y: root.selection-y;

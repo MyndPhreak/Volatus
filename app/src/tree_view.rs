@@ -180,13 +180,17 @@ pub const TOO_SMALL: &str = "The files in this folder are too small to show.";
 /// The text the treemap shows over the layout `rects` of `root`, or "" for none. A map with no
 /// area (`has_area` false) shows no text.
 pub fn map_note(tree: &Tree, root: NodeId, rects: &[Rect], has_area: bool) -> &'static str {
-    todo!()
+    match (has_area, rects.is_empty(), tree.node(root).size) {
+        (false, _, _) | (true, false, _) => "",
+        (true, true, 0) => NO_SIZES,
+        (true, true, _) => TOO_SMALL,
+    }
 }
 
 /// The label of folder `node` on its frame: (name with a trailing `\`, size), as
 /// `("Local\\", "306.0 GB")`.
 pub fn frame_label(tree: &Tree, node: NodeId) -> (String, String) {
-    todo!()
+    (format!("{}\\", tree.name(node)), crate::model::format_size(tree.node(node).size))
 }
 
 /// Order of two siblings: the chosen column, flipped if descending, then name, then id.

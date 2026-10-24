@@ -143,7 +143,20 @@ pub fn layout_framed(tree: &Tree, root: NodeId, w: u32, h: u32, chrome: Chrome) 
 /// At most `cap` spots: the largest folders by area (ties: the first in `rects`), in the order
 /// of `rects`, so a folder's label comes before the labels of its descendants.
 pub fn label_spots(tree: &Tree, rects: &[Rect], chrome: Chrome, min_w: f64, cap: usize) -> Vec<Rect> {
-    todo!()
+    let p = chrome.pad;
+    let mut spots: Vec<(usize, Rect)> = rects
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| tree.node(r.node).is_dir && chrome.has_header(r) && r.w - 2.0 * p >= min_w)
+        .map(|(i, r)| (i, Rect { node: r.node, x: r.x + p, y: r.y, w: r.w - 2.0 * p, h: chrome.header }))
+        .collect();
+    if spots.len() > cap {
+        let area = |i: usize| rects[i].w * rects[i].h;
+        spots.select_nth_unstable_by(cap, |a, b| area(b.0).total_cmp(&area(a.0)).then(a.0.cmp(&b.0)));
+        spots.truncate(cap);
+        spots.sort_unstable_by_key(|s| s.0);
+    }
+    spots.into_iter().map(|(_, s)| s).collect()
 }
 
 /// Places `areas` (sorted largest first) inside `b` as rows along the short side. Rects go
