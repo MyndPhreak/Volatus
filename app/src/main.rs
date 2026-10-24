@@ -144,6 +144,10 @@ struct Session {
     hovered: Option<NodeId>,
     /// Times the hovered node changed (`note_hover`). With `--timing` it is printed at exit.
     hover_changes: u64,
+    /// Latest pointer position over the treemap, in logical pixels.
+    pointer: (f32, f32),
+    /// Longest time one pointer move took on the UI thread. With `--timing` it is printed at exit.
+    hover_slowest: Duration,
 }
 
 thread_local! {
@@ -159,6 +163,8 @@ thread_local! {
         drives_seq: 0,
         hovered: None,
         hover_changes: 0,
+        pointer: (0.0, 0.0),
+        hover_slowest: Duration::ZERO,
     });
     /// Starts one relayout after the window stops changing the treemap size.
     static RESIZE_TIMER: Timer = Timer::default();
@@ -244,6 +250,10 @@ fn relayout(ui: &MainWindow) {
         let (w, h) = ((lw * scale).round() as u32, (lh * scale).round() as u32);
         let (data, root) = (l.data.clone(), l.view_root);
         s.layout_seq += 1;
+        // With `--timing`, each layout (and new picture) shows, so a hover that starts one is seen.
+        if s.timing {
+            eprintln!("Layout {}.", s.layout_seq);
+        }
         Some((data, root, s.scan.generation(), s.layout_seq, w, h))
     }) else {
         return;
@@ -314,24 +324,91 @@ fn map_labels(tree: &Tree, rects: &[Rect], chrome: Chrome, scale: f64, theme: Th
 /// Keeps `node` as the hovered node. `true` when it is not the node hovered before: only then does
 /// the window get new hover properties.
 fn note_hover(node: Option<NodeId>) -> bool {
-    let _ = node;
-    todo!()
+    SESSION.with_borrow_mut(|s| {
+        let changed = std::mem::replace(&mut s.hovered, node) != node;
+        s.hover_changes += u64::from(changed);
+        changed
+    })
 }
 
 /// What the window shows for hovered `node` in the shown `rects` (physical pixels), in logical
 /// pixels: a file tile lifts in its file-type colour in `theme` and keeps its label when the tile
 /// is big enough for one; a folder frame gets a highlight. Not visible when `node` is not drawn.
 fn hover_of(data: &Data, rects: &[Rect], node: NodeId, scale: f64, theme: Theme) -> Hover {
-    let _ = (data, rects, node, scale, theme);
-    todo!()
+    let Some((x, y, w, h)) = tree_view::selection_bounds(rects, node) else {
+        return Hover::default();
+    };
+    let tree = &data.tree;
+    let px = |v: f64| (v / scale) as f32;
+    let [red, green, blue] = treemap::filetype::colour(treemap::filetype::category_of(tree.name(node)), theme);
+    // The same label rules as on the map, for the tile alone at its own origin (none for a folder).
+    let label = file_labels(tree, &[Rect { node, x: 0.0, y: 0.0, w, h }], scale, theme, 1).pop();
+    Hover {
+        visible: true,
+        x: px(x),
+        y: px(y),
+        width: px(w),
+        height: px(h),
+        lift: !tree.node(node).is_dir,
+        color: slint::Color::from_rgb_u8(red, green, blue),
+        labelled: label.is_some(),
+        label: label.unwrap_or_default(),
+        title: SharedString::new(),
+        detail: SharedString::new(),
+    }
 }
 
 /// The hover glow is drawn as a drop shadow, which the software renderer does not draw. A renderer
 /// that takes a rendering notifier (FemtoVG on OpenGL) draws it; the software renderer returns
 /// `Unsupported`, and then the hovered tile gets a brighter border instead.
 fn glow_drawn(notifier: Result<(), SetRenderingNotifierError>) -> bool {
-    let _ = notifier;
-    todo!()
+    // AlreadySet: some renderer took a notifier, so it is not the software one. Any other error is
+    // read as "no shadows": the border shows on every renderer.
+    matches!(notifier, Ok(()) | Err(SetRenderingNotifierError::AlreadySet))
+}
+
+/// The node of the shown treemap under the window point (x, y) in logical pixels.
+fn node_at(ui: &MainWindow, x: f32, y: f32) -> Option<NodeId> {
+    let (x, y) = to_physical(ui, x, y);
+    with_loaded(|l| tree_view::hit_test(&l.rects, x, y)).flatten()
+}
+
+/// The pointer moved over the treemap to (x, y) in logical pixels. The window gets new hover
+/// properties only when the node under the pointer changes: no layout, no new picture.
+fn hover(ui: &MainWindow, x: f32, y: f32) {
+    let started = Instant::now();
+    SESSION.with_borrow_mut(|s| s.pointer = (x, y));
+    let node = node_at(ui, x, y);
+    if note_hover(node) {
+        show_hover(ui, node);
+    }
+    let took = started.elapsed();
+    SESSION.with_borrow_mut(|s| s.hover_slowest = s.hover_slowest.max(took));
+}
+
+/// The pointer left the treemap: nothing is hovered.
+fn leave(ui: &MainWindow) {
+    if note_hover(None) {
+        show_hover(ui, None);
+    }
+}
+
+/// The shown rects changed: the hover moves to the node under the pointer in the new layout. Only
+/// while the pointer is on the map.
+fn refresh_hover(ui: &MainWindow) {
+    if let Some((x, y)) = SESSION.with_borrow(|s| s.hovered.map(|_| s.pointer)) {
+        let node = node_at(ui, x, y);
+        note_hover(node);
+        show_hover(ui, node);
+    }
+}
+
+/// Pushes the hover properties of `node` (`None`: nothing hovered) into the window.
+fn show_hover(ui: &MainWindow, node: Option<NodeId>) {
+    let scale = f64::from(ui.window().scale_factor());
+    let theme = if ui.get_dark() { Theme::Dark } else { Theme::Light };
+    let hover = node.and_then(|n| with_loaded(|l| hover_of(&l.data, &l.rects, n, scale, theme)));
+    ui.set_hover(hover.unwrap_or_default());
 }
 
 /// Shows a finished layout of `root`: the image, its rects and labels, the crumbs and the selection.
@@ -362,6 +439,7 @@ fn show_layout(
         ui.set_crumbs(ModelRc::new(VecModel::from(crumbs)));
     }
     sync_selection(ui);
+    refresh_hover(ui);
     note_treemap_shown(ui);
 }
 
@@ -493,6 +571,7 @@ fn clear(ui: &MainWindow) {
     ui.set_file_labels(ModelRc::default());
     ui.set_map_note(SharedString::new());
     sync_types(ui);
+    leave(ui);
     ui.set_has_selection(false);
     ui.set_selected_row(-1);
 }
@@ -803,6 +882,22 @@ fn wire_tree_and_treemap(ui: &MainWindow) {
             }
         }
     });
+    ui.on_treemap_hover({
+        let weak = ui.as_weak();
+        move |x, y| {
+            if let Some(ui) = weak.upgrade() {
+                hover(&ui, x, y);
+            }
+        }
+    });
+    ui.on_treemap_leave({
+        let weak = ui.as_weak();
+        move || {
+            if let Some(ui) = weak.upgrade() {
+                leave(&ui);
+            }
+        }
+    });
     ui.on_theme_changed({
         let weak = ui.as_weak();
         move || {
@@ -886,6 +981,12 @@ fn main() {
     let args = cli::parse_args(std::env::args().skip(1));
     SESSION.with_borrow_mut(|s| s.timing = args.timing);
     let ui = MainWindow::new().expect("create window");
+    // The renderer is chosen when the window is made (winit falls back to software when OpenGL
+    // cannot start), so the answer is final here. The notifier itself does nothing.
+    if !glow_drawn(ui.window().set_rendering_notifier(|_, _| {})) {
+        eprintln!("This renderer draws no shadows. The hovered tile gets a border.");
+        ui.set_glow(false);
+    }
     ui.set_banner(banner_text(&ScanState::Idle, false).into());
     ui.on_scan_drive({
         let weak = ui.as_weak();
@@ -939,6 +1040,12 @@ fn main() {
         refresh_drives(&ui);
     }
     slint::run_event_loop().expect("run event loop");
+    SESSION.with_borrow(|s| {
+        if s.timing {
+            let slowest = s.hover_slowest.as_secs_f64() * 1000.0;
+            eprintln!("Hover changes: {}. Slowest hover: {slowest:.2} ms.", s.hover_changes);
+        }
+    });
 }
 
 /// Starts the elevated copy through `launch(path, timing)`. `--timing` is carried over from the session.

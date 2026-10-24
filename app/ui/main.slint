@@ -133,6 +133,10 @@ export component MainWindow inherits Window {
     in property <[FrameLabel]> labels;
     /// Labels of the treemap file tiles.
     in property <[FileLabel]> file-labels;
+    /// The treemap node under the pointer.
+    in property <Hover> hover;
+    /// The renderer draws drop shadows (false: the software renderer).
+    in property <bool> glow: true;
 
     // File-type footer
     /// The biggest file types of the scan, then "Other".
@@ -161,6 +165,10 @@ export component MainWindow inherits Window {
     /// Key press in the treemap: "up", "down", "left", "right", "enter" or "backspace".
     callback map-key(string);
     callback treemap-resized(float, float);
+    /// The pointer moved over the treemap, with no button down, to a point in logical pixels.
+    callback treemap-hover(float, float);
+    /// The pointer left the treemap.
+    callback treemap-leave();
     callback restart-admin();
     /// The system theme changed between light and dark.
     callback theme-changed();
@@ -402,6 +410,10 @@ export component MainWindow inherits Window {
                         selection-y: root.selection-y;
                         selection-width: root.selection-width;
                         selection-height: root.selection-height;
+                        hover: root.hover;
+                        glow: root.glow;
+                        hovered(x, y) => { root.treemap-hover(x, y); }
+                        left => { root.treemap-leave(); }
                         clicked(x, y) => { root.treemap-click(x, y); }
                         double-clicked(x, y) => { root.treemap-open(x, y); }
                         key(k) => { root.map-key(k); }
