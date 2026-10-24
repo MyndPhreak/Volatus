@@ -1129,7 +1129,7 @@ fn restart_admin(path: &str, launch: impl FnOnce(&str, bool) -> Result<(), Strin
 #[cfg(test)]
 mod tests {
     use super::{
-        Data, FILE_LABEL_MIN_HEIGHT, FILE_LABEL_MIN_WIDTH, FILE_LABEL_TWO_LINES, FileLabel, FrameLabel, Hover, LABEL_CAP,
+        Data, FILE_LABEL_MIN_HEIGHT, FILE_LABEL_MIN_WIDTH, FILE_LABEL_TWO_LINES, FileLabel, FrameLabel, Hover, LABEL_CAP, ZoomFrame, ZoomMove, frame_at,
         Loaded, RowModel, SESSION, file_labels, frame_labels, glow_drawn, hover_of, map_labels, note_hover, restart_admin,
         store_chips,
     };
@@ -1446,6 +1446,31 @@ mod tests {
         let (tree, _, files) = flat(0, &[10]);
         let data = Data { counts: crate::tree_view::file_counts(&tree), tree };
         assert!(!hover_of(&data, &[], files[0], 1.0, Theme::Dark).visible);
+    }
+
+    // ---- moving picture ----
+    fn zf(x: f32, y: f32, width: f32, height: f32, opacity: f32) -> ZoomFrame {
+        ZoomFrame { x, y, width, height, opacity }
+    }
+
+    fn shrink() -> ZoomMove {
+        ZoomMove { from: zf(0.0, 0.0, 800.0, 600.0, 1.0), to: zf(100.0, 50.0, 200.0, 150.0, 0.0) }
+    }
+
+    #[test]
+    fn frame_at_start_of_the_move_is_the_from_frame() {
+        assert_eq!(frame_at(&shrink(), 0.0), shrink().from);
+    }
+
+    #[test]
+    fn frame_at_end_of_the_move_is_the_to_frame() {
+        assert_eq!(frame_at(&shrink(), 1.0), shrink().to);
+    }
+
+    #[test]
+    fn frame_at_half_time_place_and_opacity_are_seven_eighths_of_the_way() {
+        // ease_out(0.5) = 0.875
+        assert_eq!(frame_at(&shrink(), 0.5), zf(87.5, 43.75, 275.0, 206.25, 0.125));
     }
 
     // ---- glow or border ----

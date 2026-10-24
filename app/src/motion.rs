@@ -82,6 +82,34 @@ mod tests {
         assert_eq!(got, [false, false, false, true, false, false, false, false]);
     }
 
+    const LEFT: Option<NodeId> = Some(NodeId(6));
+    const RECT: Option<Frame> = Some((4.0, 18.0, 40.0, 30.0));
+
+    #[test]
+    fn landing_after_up_old_picture_of_the_folder_left_shrinks_into_its_rect() {
+        assert_eq!(landing(true, false, LEFT, LEFT, RECT), Landing::Out(RECT.unwrap()));
+    }
+
+    #[test]
+    fn landing_after_up_old_picture_of_another_folder_does_not_move() {
+        assert_eq!(landing(true, false, LEFT, Some(NodeId(1)), RECT), Landing::Still);
+    }
+
+    #[test]
+    fn landing_after_up_folder_left_not_drawn_does_not_move() {
+        assert_eq!(landing(true, false, LEFT, LEFT, None), Landing::Still);
+    }
+
+    #[test]
+    fn landing_with_no_up_does_not_move() {
+        assert_eq!(landing(true, false, None, LEFT, RECT), Landing::Still);
+    }
+
+    #[test]
+    fn landing_after_up_with_motion_off_does_not_move() {
+        assert_eq!(landing(false, false, LEFT, LEFT, RECT), Landing::Still);
+    }
+
     #[cfg(windows)]
     #[test]
     fn client_area_animation_reads_the_setting() {
