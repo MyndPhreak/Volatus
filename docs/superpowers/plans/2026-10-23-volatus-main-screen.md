@@ -295,3 +295,6 @@ Default renderer is FemtoVG/OpenGL (no Skia): straight RGBA blends over Mica, gl
 
 ## Decision 2026-10-23 (owner): labels on every frame that can show some text
 The owner wants folder names on the frames "even if they get cut off". P3 changes: label every frame whose band can show at least a few characters (start: width >= 24 logical px, band height from `Chrome`), text elided with an ellipsis, largest frames first; replace the cap of 300 with a cap set by measurement (target: label layer update <= 50 ms per relayout at 4K/200%, report the cap chosen; the spike measured 600 elements at 19.7 ms). Frames too small for any text stay unlabeled. Hover and tooltip show the full name.
+
+Note (P8.P3): the Window property `map-empty` (bool) became `map-note` (string), the text shown over the map (`tree_view::map_note`).
+Note (P8.P3 fix 1, owner decision above): `Chrome::has_header` is now `w >= 1.75 * header && h >= 1.5 * header` (28 x 24 logical px), not 3x / 2x, so the 24 px label minimum decides which frames get a name; on C: at 4K/200% that is 557 labels, not 327.
