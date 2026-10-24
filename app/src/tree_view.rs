@@ -173,6 +173,25 @@ pub fn outline_node(tree: &Tree, rects: &[Rect], selected: NodeId) -> Option<Nod
     None
 }
 
+/// How the treemap moves when it shows folder `to` in place of the picture of `shown`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ZoomWay {
+    /// `to` is in the picture: the picture zooms into its rect `(x, y, w, h)`.
+    In((f64, f64, f64, f64)),
+    /// `to` holds the shown folder: when its layout lands, the old picture shrinks into the rect
+    /// of this folder (the one the picture showed).
+    Out(NodeId),
+    /// No motion: the same folder, a folder in another branch, a folder too small to draw, or no picture.
+    Still,
+}
+
+/// How the treemap moves from the picture of `shown`, drawn as `rects`, to folder `to`: in, when
+/// `to` is under `shown` and drawn; out, when `to` is above `shown`; else not at all.
+pub fn zoom_way(tree: &Tree, shown: Option<NodeId>, rects: &[Rect], to: NodeId) -> ZoomWay {
+    let _ = (tree, shown, rects, to);
+    todo!()
+}
+
 /// Map text for a folder with no file that has a size.
 pub const NO_SIZES: &str = "No files with a size in this folder.";
 /// Map text for a folder whose files are all too small to draw at this map size.
@@ -824,6 +843,74 @@ mod tests {
         let s1 = find(&t, find(&t, find(&t, t.root(), "a"), "sub"), "s1");
         let rects = [rect(b.0, 0.0, 0.0, 50.0, 50.0), rect(find(&t, b, "b1").0, 2.0, 18.0, 20.0, 20.0)];
         assert_eq!(outline_node(&t, &rects, s1), None);
+    }
+
+    // ---- zoom_way ----
+    /// The picture of the scan root with `a`, `sub` and `b` drawn (not `s1`).
+    fn root_picture(t: &Tree) -> Vec<Rect> {
+        let a = find(t, t.root(), "a");
+        let sub = find(t, a, "sub");
+        let b = find(t, t.root(), "b");
+        vec![rect(a.0, 2.0, 2.0, 100.0, 80.0), rect(sub.0, 4.0, 18.0, 40.0, 30.0), rect(b.0, 104.0, 2.0, 60.0, 80.0)]
+    }
+
+    #[test]
+    fn zoom_way_child_folder_in_the_picture_zooms_into_its_rect() {
+        let t = sample();
+        let a = find(&t, t.root(), "a");
+        assert_eq!(zoom_way(&t, Some(t.root()), &root_picture(&t), a), ZoomWay::In((2.0, 2.0, 100.0, 80.0)));
+    }
+
+    #[test]
+    fn zoom_way_deeper_folder_in_the_picture_zooms_into_its_rect() {
+        let t = sample();
+        let sub = find(&t, find(&t, t.root(), "a"), "sub");
+        assert_eq!(zoom_way(&t, Some(t.root()), &root_picture(&t), sub), ZoomWay::In((4.0, 18.0, 40.0, 30.0)));
+    }
+
+    #[test]
+    fn zoom_way_folder_under_the_picture_that_is_not_drawn_does_not_move() {
+        let t = sample();
+        let a = find(&t, t.root(), "a");
+        let rects = [rect(find(&t, t.root(), "b").0, 0.0, 0.0, 50.0, 50.0)];
+        assert_eq!(zoom_way(&t, Some(t.root()), &rects, a), ZoomWay::Still);
+    }
+
+    #[test]
+    fn zoom_way_parent_zooms_out_of_the_shown_folder() {
+        let t = sample();
+        let a = find(&t, t.root(), "a");
+        let sub = find(&t, a, "sub");
+        assert_eq!(zoom_way(&t, Some(sub), &[], a), ZoomWay::Out(sub));
+    }
+
+    #[test]
+    fn zoom_way_scan_root_from_a_deep_folder_zooms_out_of_the_shown_folder() {
+        let t = sample();
+        let sub = find(&t, find(&t, t.root(), "a"), "sub");
+        assert_eq!(zoom_way(&t, Some(sub), &[], t.root()), ZoomWay::Out(sub));
+    }
+
+    #[test]
+    fn zoom_way_same_folder_does_not_move() {
+        let t = sample();
+        assert_eq!(zoom_way(&t, Some(t.root()), &root_picture(&t), t.root()), ZoomWay::Still);
+    }
+
+    #[test]
+    fn zoom_way_folder_in_another_branch_does_not_move() {
+        let t = sample();
+        let a = find(&t, t.root(), "a");
+        let b = find(&t, t.root(), "b");
+        let rects = [rect(find(&t, a, "sub").0, 0.0, 0.0, 50.0, 50.0), rect(b.0, 50.0, 0.0, 50.0, 50.0)];
+        assert_eq!(zoom_way(&t, Some(a), &rects, b), ZoomWay::Still);
+    }
+
+    #[test]
+    fn zoom_way_no_picture_does_not_move() {
+        let t = sample();
+        let a = find(&t, t.root(), "a");
+        assert_eq!(zoom_way(&t, None, &root_picture(&t), a), ZoomWay::Still);
     }
 
     // ---- frame_label ----

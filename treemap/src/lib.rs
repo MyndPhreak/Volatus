@@ -180,6 +180,45 @@ fn keep_largest(spots: &mut Vec<(usize, Rect)>, rects: &[Rect], cap: usize) {
     }
 }
 
+/// Where a picture of a whole view is drawn, `(x, y, w, h)` in the view's pixels.
+pub type Frame = (f64, f64, f64, f64);
+
+/// The end frame of a zoom in: where the picture of a `w` x `h` view goes so that `target`, a
+/// rect of that picture, fills the view. Each axis has its own scale. The part of `target` outside
+/// the view is cut off first. `None` when nothing of `target` is in the view, when the view has
+/// no area, or when a value is not finite.
+pub fn zoom_frame(target: &Rect, w: f64, h: f64) -> Option<Frame> {
+    let _ = (target, w, h);
+    todo!()
+}
+
+/// The ease-out curve `1 - (1 - t)^3` of `t` cut to `0..=1`: fast at the start, slow at the end.
+/// NaN gives 1, the end.
+pub fn ease_out(t: f64) -> f64 {
+    let _ = t;
+    todo!()
+}
+
+/// The value at time `t` (`0..=1`, as for `ease_out`) of a move from `from` to `to`, eased out.
+pub fn eased(from: f64, to: f64, t: f64) -> f64 {
+    let _ = (from, to, t);
+    todo!()
+}
+
+/// The frame at time `t` (`0..=1`, as for `ease_out`) of a move from `from` to `to`, eased out.
+pub fn zoom_at(from: Frame, to: Frame, t: f64) -> Frame {
+    let _ = (from, to, t);
+    todo!()
+}
+
+/// The point of the picture of a `w` x `h` view, in the picture's own pixels, that is drawn under
+/// the view point (x, y) when the picture is drawn at `frame`. `None` when `frame` has no area or
+/// a value is not finite.
+pub fn unzoom(frame: Frame, w: f64, h: f64, x: f64, y: f64) -> Option<(f64, f64)> {
+    let _ = (frame, w, h, x, y);
+    todo!()
+}
+
 /// Places `areas` (sorted largest first) inside `b` as rows along the short side. Rects go
 /// to `out` as `(x, y, w, h)`, in the order of `areas`. With `fills`, the last row takes
 /// exactly what is left of `b`, so float drift cannot leave a gap.

@@ -12,6 +12,7 @@ mod drives;
 mod elevate;
 mod footer;
 mod model;
+mod motion;
 mod nav;
 mod tip;
 mod tree_view;
@@ -120,6 +121,8 @@ struct Loaded {
     view_root: NodeId,
     /// Treemap rects in physical pixels, from the last layout that arrived.
     rects: Vec<Rect>,
+    /// The folder of the shown picture and its `rects`; `None` before the first one.
+    shown_root: Option<NodeId>,
     /// Footer chips of the whole scan; `None` while the file types are counted.
     chips: Option<Vec<footer::Chip>>,
 }
@@ -493,6 +496,13 @@ fn show_layout(
     note_treemap_shown(ui);
 }
 
+/// The frame of move `m` at time `t` (0 to 1) of the move, eased out: `treemap::zoom_at` for the
+/// place and `treemap::eased` for the opacity, in logical pixels.
+fn frame_at(m: &ZoomMove, t: f32) -> ZoomFrame {
+    let _ = (m, t);
+    todo!()
+}
+
 /// The window's form of a crumb from `tree_view::crumbs`: its index is the node it opens, -1 for none.
 fn crumb((node, text): (Option<NodeId>, String)) -> Crumb {
     Crumb { text: text.into(), index: node.map_or(-1, |n| i32::try_from(n.0).unwrap_or(-1)) }
@@ -548,6 +558,7 @@ fn install(ui: &MainWindow, data: Arc<Data>) {
             selected: Some(root),
             view_root: root,
             rects: Vec::new(),
+            shown_root: None,
             chips: None,
         });
     });
@@ -1465,7 +1476,7 @@ mod tests {
     fn loaded(data: &Arc<Data>) -> Loaded {
         let root = data.tree.root();
         let model = Rc::new(RowModel { data: data.clone(), rows: RefCell::new(Vec::new()), notify: ModelNotify::default() });
-        Loaded { data: data.clone(), model, view: ViewState::new(root), selected: None, view_root: root, rects: Vec::new(), chips: None }
+        Loaded { data: data.clone(), model, view: ViewState::new(root), selected: None, view_root: root, rects: Vec::new(), shown_root: None, chips: None }
     }
 
     fn chips() -> Vec<Chip> {

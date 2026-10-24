@@ -1,6 +1,6 @@
 use scan::rollup::{RawEntry, rollup};
 use scan::{NodeId, Tree};
-use treemap::{Chrome, Rect, Theme, file_label_spots, label_spots, layout, layout_framed, render_framed};
+use treemap::{Chrome, Frame, Rect, Theme, ease_out, eased, file_label_spots, label_spots, layout, layout_framed, render_framed, unzoom, zoom_at, zoom_frame};
 
 const W: u32 = 800;
 const H: u32 = 600;
@@ -781,4 +781,195 @@ fn file_label_spots_of_a_real_layout_overlap_no_frame_band() {
         .collect();
     assert!(!spots.is_empty() && !bands.is_empty());
     assert!(hits.is_empty(), "{hits:?}");
+}
+
+// ---- zoom (P8) ----
+/// A rect of node 0 (the zoom functions do not look at the node).
+fn r(x: f64, y: f64, w: f64, h: f64) -> Rect {
+    Rect { node: NodeId(0), x, y, w, h }
+}
+
+const VW: f64 = W as f64;
+const VH: f64 = H as f64;
+
+fn near(a: Frame, b: Frame) -> bool {
+    [(a.0, b.0), (a.1, b.1), (a.2, b.2), (a.3, b.3)].iter().all(|(p, q)| (p - q).abs() < EPS)
+}
+
+#[test]
+fn zoom_frame_target_that_is_the_whole_view_is_the_view() {
+    assert_eq!(zoom_frame(&r(0.0, 0.0, VW, VH), VW, VH), Some((0.0, 0.0, VW, VH)));
+}
+
+#[test]
+fn zoom_frame_lower_right_quarter_doubles_the_picture() {
+    assert_eq!(zoom_frame(&r(VW / 2.0, VH / 2.0, VW / 2.0, VH / 2.0), VW, VH), Some((-VW, -VH, 2.0 * VW, 2.0 * VH)));
+}
+
+#[test]
+fn zoom_frame_puts_the_target_corners_on_the_view_corners() {
+    let mut wrong = Vec::new();
+    for t in [r(10.0, 20.0, 100.0, 50.0), r(0.0, 300.0, 800.0, 300.0), r(799.0, 599.0, 1.0, 1.0), r(123.4, 5.6, 7.8, 90.1)] {
+        let (fx, fy, fw, fh) = zoom_frame(&t, VW, VH).unwrap();
+        let (sx, sy) = (fw / VW, fh / VH);
+        let corners = (fx + t.x * sx, fy + t.y * sy, fx + (t.x + t.w) * sx, fy + (t.y + t.h) * sy);
+        if !near(corners, (0.0, 0.0, VW, VH)) {
+            wrong.push(format!("{t:?} -> {corners:?}"));
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:?}");
+}
+
+#[test]
+fn zoom_frame_end_frame_covers_the_whole_view() {
+    let mut wrong = Vec::new();
+    for t in [r(10.0, 20.0, 100.0, 50.0), r(0.0, 0.0, 1.0, VH), r(400.0, 0.0, 400.0, 1.0), r(0.0, 0.0, VW, VH)] {
+        let (fx, fy, fw, fh) = zoom_frame(&t, VW, VH).unwrap();
+        if !(fx <= 0.0 && fy <= 0.0 && fx + fw >= VW - EPS && fy + fh >= VH - EPS) {
+            wrong.push(format!("{t:?} -> {:?}", (fx, fy, fw, fh)));
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:?}");
+}
+
+#[test]
+fn zoom_frame_target_with_no_width_or_no_height_is_none() {
+    let got = [r(10.0, 10.0, 0.0, 50.0), r(10.0, 10.0, 50.0, 0.0), r(10.0, 10.0, 0.0, 0.0), r(10.0, 10.0, -5.0, 50.0)].map(|t| zoom_frame(&t, VW, VH));
+    assert_eq!(got, [None; 4]);
+}
+
+#[test]
+fn zoom_frame_target_outside_the_view_is_none() {
+    let got = [r(VW, 0.0, 10.0, 10.0), r(0.0, VH, 10.0, 10.0), r(-10.0, 0.0, 10.0, 10.0), r(0.0, -10.0, 10.0, 10.0)].map(|t| zoom_frame(&t, VW, VH));
+    assert_eq!(got, [None; 4]);
+}
+
+#[test]
+fn zoom_frame_target_partly_outside_is_cut_to_the_view() {
+    assert_eq!(zoom_frame(&r(-VW / 2.0, 0.0, VW, VH), VW, VH), Some((0.0, 0.0, 2.0 * VW, VH)));
+}
+
+#[test]
+fn zoom_frame_view_with_no_area_is_none() {
+    let t = r(0.0, 0.0, 10.0, 10.0);
+    let got = [(0.0, VH), (VW, 0.0), (-1.0, VH), (0.0, 0.0)].map(|(w, h)| zoom_frame(&t, w, h));
+    assert_eq!(got, [None; 4]);
+}
+
+#[test]
+fn zoom_frame_value_that_is_not_finite_is_none() {
+    let got = [
+        zoom_frame(&r(f64::NAN, 0.0, 10.0, 10.0), VW, VH),
+        zoom_frame(&r(0.0, 0.0, f64::INFINITY, 10.0), VW, VH),
+        zoom_frame(&r(0.0, 0.0, 10.0, 10.0), f64::NAN, VH),
+        zoom_frame(&r(0.0, 0.0, 10.0, 10.0), VW, f64::INFINITY),
+    ];
+    assert_eq!(got, [None; 4]);
+}
+
+#[test]
+fn zoom_frame_at_scale_two_is_twice_the_frame_at_scale_one() {
+    let (x, y, w, h) = (100.0, 50.0, 200.0, 120.0);
+    let one = zoom_frame(&r(x, y, w, h), VW, VH).unwrap();
+    let two = zoom_frame(&r(2.0 * x, 2.0 * y, 2.0 * w, 2.0 * h), 2.0 * VW, 2.0 * VH).unwrap();
+    assert!(near(two, (2.0 * one.0, 2.0 * one.1, 2.0 * one.2, 2.0 * one.3)), "{one:?} {two:?}");
+}
+
+#[test]
+fn ease_out_starts_at_zero_and_ends_at_one() {
+    assert_eq!((ease_out(0.0), ease_out(1.0)), (0.0, 1.0));
+}
+
+#[test]
+fn ease_out_rises_at_every_step() {
+    let v: Vec<f64> = (0..=100).map(|i| ease_out(f64::from(i) / 100.0)).collect();
+    assert!(v.windows(2).all(|p| p[1] > p[0]), "{v:?}");
+}
+
+#[test]
+fn ease_out_is_fast_at_the_start_and_slow_at_the_end() {
+    let steps: Vec<f64> = (0..10).map(|i| ease_out(f64::from(i + 1) / 10.0) - ease_out(f64::from(i) / 10.0)).collect();
+    assert!((ease_out(0.5) - 0.875).abs() < EPS, "{}", ease_out(0.5));
+    assert!(steps.windows(2).all(|p| p[1] < p[0]), "{steps:?}");
+}
+
+#[test]
+fn ease_out_time_outside_zero_to_one_is_cut() {
+    assert_eq!([-1.0, 2.0, f64::NEG_INFINITY, f64::INFINITY].map(ease_out), [0.0, 1.0, 0.0, 1.0]);
+}
+
+#[test]
+fn ease_out_nan_is_the_end() {
+    assert_eq!(ease_out(f64::NAN), 1.0);
+}
+
+#[test]
+fn eased_fade_in_goes_from_clear_to_solid() {
+    assert_eq!((eased(0.0, 1.0, 0.0), eased(0.0, 1.0, 1.0)), (0.0, 1.0));
+}
+
+#[test]
+fn eased_fade_out_goes_from_solid_to_clear() {
+    assert_eq!((eased(1.0, 0.0, 0.0), eased(1.0, 0.0, 1.0)), (1.0, 0.0));
+}
+
+#[test]
+fn eased_fade_in_rises_at_every_step_and_stays_in_zero_to_one() {
+    let v: Vec<f64> = (-10..=110).map(|i| eased(0.0, 1.0, f64::from(i) / 100.0)).collect();
+    assert!(v.iter().all(|a| (0.0..=1.0).contains(a)), "{v:?}");
+    assert!(v[10..=110].windows(2).all(|p| p[1] > p[0]), "{v:?}");
+}
+
+#[test]
+fn eased_nan_time_is_the_end_value() {
+    assert_eq!(eased(0.0, 1.0, f64::NAN), 1.0);
+}
+
+#[test]
+fn zoom_at_starts_at_from_and_ends_at_to() {
+    let (from, to) = ((0.0, 0.0, VW, VH), (-VW, -VH, 2.0 * VW, 2.0 * VH));
+    assert_eq!((zoom_at(from, to, 0.0), zoom_at(from, to, 1.0)), (from, to));
+}
+
+#[test]
+fn zoom_at_every_value_moves_one_way_from_from_to_to() {
+    let (from, to) = ((0.0, 0.0, VW, VH), (-50.0, -400.0, 3.0 * VW, 1.5 * VH));
+    let v: Vec<Frame> = (0..=50).map(|i| zoom_at(from, to, f64::from(i) / 50.0)).collect();
+    let ok = v.windows(2).all(|p| p[1].0 < p[0].0 && p[1].1 < p[0].1 && p[1].2 > p[0].2 && p[1].3 > p[0].3);
+    assert!(ok, "{v:?}");
+}
+
+#[test]
+fn zoom_at_nan_time_is_the_end_frame() {
+    let (from, to) = ((0.0, 0.0, VW, VH), (10.0, 20.0, 30.0, 40.0));
+    assert_eq!(zoom_at(from, to, f64::NAN), to);
+}
+
+#[test]
+fn unzoom_picture_at_the_view_gives_the_same_point() {
+    assert_eq!(unzoom((0.0, 0.0, VW, VH), VW, VH, 123.0, 45.0), Some((123.0, 45.0)));
+}
+
+#[test]
+fn unzoom_doubled_picture_centre_of_the_view_is_three_quarters_into_the_picture() {
+    assert_eq!(unzoom((-VW, -VH, 2.0 * VW, 2.0 * VH), VW, VH, VW / 2.0, VH / 2.0), Some((0.75 * VW, 0.75 * VH)));
+}
+
+#[test]
+fn unzoom_of_the_zoom_frame_puts_the_view_corners_on_the_target() {
+    let t = r(100.0, 50.0, 200.0, 120.0);
+    let frame = zoom_frame(&t, VW, VH).unwrap();
+    let (a, b) = (unzoom(frame, VW, VH, 0.0, 0.0).unwrap(), unzoom(frame, VW, VH, VW, VH).unwrap());
+    assert!(near((a.0, a.1, b.0, b.1), (t.x, t.y, t.x + t.w, t.y + t.h)), "{a:?} {b:?}");
+}
+
+#[test]
+fn unzoom_frame_with_no_area_or_not_finite_is_none() {
+    let got = [
+        unzoom((0.0, 0.0, 0.0, VH), VW, VH, 1.0, 1.0),
+        unzoom((0.0, 0.0, VW, 0.0), VW, VH, 1.0, 1.0),
+        unzoom((f64::NAN, 0.0, VW, VH), VW, VH, 1.0, 1.0),
+        unzoom((0.0, 0.0, VW, VH), VW, VH, f64::INFINITY, 1.0),
+    ];
+    assert_eq!(got, [None; 4]);
 }

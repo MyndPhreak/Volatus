@@ -61,6 +61,21 @@ export struct Hover {
     detail: string,
 }
 
+/// Where a moving picture is drawn over the map, in logical pixels, and how solid it is.
+export struct ZoomFrame {
+    x: length,
+    y: length,
+    width: length,
+    height: length,
+    opacity: float,
+}
+
+/// A move of a picture over the map: from one frame to another.
+export struct ZoomMove {
+    from: ZoomFrame,
+    to: ZoomFrame,
+}
+
 /// One crumb above the treemap. Text is formatted by the host.
 export struct Crumb {
     text: string,
