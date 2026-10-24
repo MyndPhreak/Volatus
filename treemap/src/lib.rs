@@ -50,6 +50,50 @@ pub fn layout(tree: &Tree, root: NodeId, w: u32, h: u32) -> Vec<Rect> {
     out
 }
 
+/// Frame chrome of the framed layout, in physical pixels: a label band on top of a folder
+/// and an inset on its other sides. Derived per rect, never stored, so the layout, the
+/// renderer and the label layer all get the same answer from the same rect.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Chrome {
+    /// Height of the label band of a folder big enough for one.
+    pub header: f64,
+    /// Inset between a folder's edge and its children.
+    pub pad: f64,
+}
+
+impl Chrome {
+    /// No band and no inset: `layout_framed` then gives the same rects as `layout`.
+    pub const NONE: Chrome = Chrome { header: 0.0, pad: 0.0 };
+
+    /// The chrome at a display scale factor (1.0 = 96 DPI).
+    pub fn scaled(scale: f64) -> Chrome {
+        todo!("Chrome::scaled {scale}")
+    }
+
+    /// True when `r` is big enough for a label band.
+    pub fn has_header(&self, r: &Rect) -> bool {
+        todo!("Chrome::has_header {r:?}")
+    }
+
+    /// The area `(x, y, w, h)` inside folder `r` where its children go.
+    pub fn inner(&self, r: &Rect) -> (f64, f64, f64, f64) {
+        todo!("Chrome::inner {r:?}")
+    }
+}
+
+/// Light or dark window theme: picks the glass tokens of `render_framed`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Theme {
+    Dark,
+    Light,
+}
+
+/// Like `layout`, but every folder is a frame: its children lie inside `chrome.inner` of its
+/// rect. The view root gets the inset on all sides and never a band.
+pub fn layout_framed(tree: &Tree, root: NodeId, w: u32, h: u32, chrome: Chrome) -> Vec<Rect> {
+    todo!("layout_framed {:?} {w}x{h} {chrome:?} {}", root, tree.node(root).size)
+}
+
 /// Places `areas` (sorted largest first) inside `b` as rows along the short side. Rects go
 /// to `out` as `(x, y, w, h)`, in the order of `areas`. With `fills`, the last row takes
 /// exactly what is left of `b`, so float drift cannot leave a gap.
@@ -131,6 +175,12 @@ pub fn render(rects: &[Rect], w: u32, h: u32) -> Vec<u8> {
         }
     }
     px
+}
+
+/// Straight RGBA pixels, `w * h * 4` bytes, of the framed layout `rects`: folders are glass
+/// frames, files are rounded, lit tiles. Background is transparent.
+pub fn render_framed(tree: &Tree, rects: &[Rect], w: u32, h: u32, chrome: Chrome, theme: Theme) -> Vec<u8> {
+    todo!("render_framed {} rects {w}x{h} {chrome:?} {theme:?} {}", rects.len(), tree.node(tree.root()).size)
 }
 
 /// Golden-ratio hash of the node id: neighbours get visibly different, mid-bright colours.

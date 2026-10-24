@@ -151,6 +151,25 @@ loop {
 }
 }
 
+/// What opening `node` shows: `(folder to show, node to select)`. A folder with content opens
+/// itself; a file opens its folder with the file selected; an empty folder opens nothing.
+/// Does not depend on the current view, so a node from an older layout still opens its own folder.
+pub fn open_target(tree: &Tree, node: NodeId) -> Option<(NodeId, NodeId)> {
+    todo!("open_target {node:?} {}", tree.name(node))
+}
+
+/// The folder the treemap must show so that `selected` is drawn in it: the current view if
+/// `selected` is the view or under it, otherwise the folder of `selected` (the scan root shows itself).
+pub fn view_for_selection(tree: &Tree, view_root: NodeId, selected: NodeId) -> NodeId {
+    todo!("view_for_selection {view_root:?} {selected:?} {}", tree.name(selected))
+}
+
+/// The node whose rect outlines `selected`: itself if drawn, else its nearest drawn folder.
+/// `None` if nothing on its chain of folders is drawn.
+pub fn outline_node(tree: &Tree, rects: &[Rect], selected: NodeId) -> Option<NodeId> {
+    todo!("outline_node {selected:?} {} {}", rects.len(), tree.name(selected))
+}
+
 /// Order of two siblings: the chosen column, flipped if descending, then name, then id.
 fn compare(tree: &Tree, counts: &[u64], view: &ViewState, a: NodeId, b: NodeId) -> Ordering {
     let name = |n: NodeId| tree.name(n).chars().flat_map(char::to_lowercase);
