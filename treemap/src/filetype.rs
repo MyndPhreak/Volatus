@@ -4,6 +4,7 @@
 
 use crate::Theme;
 use scan::{NodeId, Tree};
+use std::collections::HashMap;
 
 /// The extension of `name`: 1 to 12 ASCII letters or digits after the last `.`, in the case
 /// of the name. `None` for no dot, a name whose only dot is its first character (".gitignore"),
@@ -134,6 +135,29 @@ pub struct TypeTotal {
 /// Totals per lower-case extension of the files under `root`, largest first (bytes desc, then
 /// ext asc). Folders are not counted; files with no size count with 0 bytes.
 pub fn type_totals(tree: &Tree, root: NodeId) -> Vec<TypeTotal> {
-    let _ = (tree, root);
-    todo!()
+    // Key: the lower-case extension packed into a u128 (at most 12 ASCII bytes, none of them 0;
+    // 0 = no extension), so the pass allocates nothing per file.
+    let mut sums: HashMap<u128, (u64, u64)> = HashMap::new();
+    let mut stack = vec![root];
+    while let Some(n) = stack.pop() {
+        let node = tree.node(n);
+        if node.is_dir {
+            stack.extend(tree.children(n));
+            continue;
+        }
+        let key = extension(tree.name(n))
+            .map_or(0, |e| e.bytes().fold(0u128, |k, b| (k << 8) | u128::from(b.to_ascii_lowercase())));
+        let sum = sums.entry(key).or_default();
+        sum.0 += node.size;
+        sum.1 += 1;
+    }
+    let mut out: Vec<TypeTotal> = sums
+        .into_iter()
+        .map(|(key, (bytes, files))| {
+            let ext = key.to_be_bytes().iter().filter(|&&b| b != 0).map(|&b| char::from(b)).collect();
+            TypeTotal { ext, bytes, files }
+        })
+        .collect();
+    out.sort_unstable_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.ext.cmp(&b.ext)));
+    out
 }
