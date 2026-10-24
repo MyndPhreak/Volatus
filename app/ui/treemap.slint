@@ -25,6 +25,100 @@ export struct FrameLabel {
     size: string,
 }
 
+/// One crumb above the treemap. Text is formatted by the host.
+export struct Crumb {
+    text: string,
+    /// The node the crumb opens, or -1 for the gap crumb, which opens nothing.
+    index: int,
+}
+
+/// One crumb: a link that opens its folder, by mouse, Enter or Space.
+component CrumbLink inherits Rectangle {
+    in property <Crumb> crumb;
+    /// The folder the treemap shows: the last crumb.
+    in property <bool> current;
+    callback open(int);
+
+    // A long name is cut with "…" when the crumbs do not fit; a short name is never cut.
+    min-width: min(label.preferred-width, 64px) + 12px;
+    max-width: 240px;
+    border-radius: 4px;
+    background: touch.has-hover ? Palette.alternate-background : transparent;
+    border-width: focus.has-focus ? 2px : 0px;
+    border-color: Palette.accent-background;
+    HorizontalLayout {
+        padding-left: 6px;
+        padding-right: 6px;
+        label := Text {
+            text: root.crumb.text;
+            vertical-alignment: center;
+            overflow: elide;
+            font-weight: root.current ? 600 : 400;
+            color: root.current ? Palette.foreground : Palette.foreground.transparentize(35%);
+            accessible-role: none;
+        }
+    }
+    focus := FocusScope {
+        accessible-role: button;
+        accessible-label: "Open \{root.crumb.text}";
+        accessible-action-default => { root.open(root.crumb.index); }
+        key-pressed(event) => {
+            if (event.text == Key.Return || event.text == " ") {
+                root.open(root.crumb.index);
+                return accept;
+            }
+            return reject;
+        }
+        touch := TouchArea {
+            mouse-cursor: pointer;
+            clicked => {
+                focus.focus();
+                root.open(root.crumb.index);
+            }
+        }
+    }
+}
+
+/// The folders from the scan root down to the folder the treemap shows. A crumb opens its folder.
+/// Its width never pushes on the window layout: crumbs that do not fit are cut with "…".
+export component CrumbBar inherits Rectangle {
+    in property <[Crumb]> crumbs;
+    callback open(int);
+
+    min-width: 0px;
+    clip: true;
+    HorizontalLayout {
+        alignment: start;
+        spacing: 2px;
+        for c[i] in root.crumbs : HorizontalLayout {
+            spacing: 2px;
+            if i > 0 : Text {
+                text: "›";
+                vertical-alignment: center;
+                color: Palette.foreground.transparentize(50%);
+                accessible-role: none;
+            }
+            // The gap stands for folders that are not shown and opens nothing.
+            if c.index < 0 : HorizontalLayout {
+                padding-left: 6px;
+                padding-right: 6px;
+                Text {
+                    text: c.text;
+                    vertical-alignment: center;
+                    color: Palette.foreground.transparentize(35%);
+                    accessible-role: text;
+                    accessible-label: "More folders";
+                }
+            }
+            if c.index >= 0 : CrumbLink {
+                crumb: c;
+                current: i == root.crumbs.length - 1;
+                open(n) => { root.open(n); }
+            }
+        }
+    }
+}
+
 /// The treemap picture (drawn by the host on a worker) with the layers above it: the frame
 /// labels, the map text, the selection outline and the focus ring.
 export component TreemapView inherits Rectangle {

@@ -195,14 +195,32 @@ pub fn frame_label(tree: &Tree, node: NodeId) -> (String, String) {
 
 /// Text of the crumb that stands for the folders `crumbs` leaves out.
 pub const CRUMB_GAP: &str = "…";
+/// Most crumbs shown with no gap.
+const CRUMB_MAX: usize = 6;
+/// Folders shown after the gap, down to the view.
+const CRUMB_TAIL: usize = 4;
 
 /// The crumbs above the treemap for `view_root`: its folders from the scan root down, each with
 /// the node it opens. The scan root shows its path without a trailing `\` (`"C:\"` -> `"C:"`).
 /// A chain of more than 6 shows the first, a `CRUMB_GAP` crumb (`None`, opens nothing) and the
 /// last 4. Names are kept unchanged; the window elides them.
 pub fn crumbs(tree: &Tree, view_root: NodeId) -> Vec<(Option<NodeId>, String)> {
-    let _ = (tree, view_root);
-    Vec::new()
+    let mut chain: Vec<NodeId> = std::iter::successors(Some(view_root), |&n| tree.node(n).parent).collect();
+    chain.reverse();
+    let text = |n: NodeId| {
+        let name = tree.name(n);
+        let root_text = name.trim_end_matches(['\\', '/']);
+        if n == chain[0] && !root_text.is_empty() { root_text.to_string() } else { name.to_string() }
+    };
+    let mut out: Vec<(Option<NodeId>, String)> = Vec::new();
+    if chain.len() > CRUMB_MAX {
+        out.push((Some(chain[0]), text(chain[0])));
+        out.push((None, CRUMB_GAP.to_string()));
+        out.extend(chain[chain.len() - CRUMB_TAIL..].iter().map(|&n| (Some(n), text(n))));
+    } else {
+        out.extend(chain.iter().map(|&n| (Some(n), text(n))));
+    }
+    out
 }
 
 /// Order of two siblings: the chosen column, flipped if descending, then name, then id.

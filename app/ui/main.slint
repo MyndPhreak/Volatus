@@ -1,7 +1,8 @@
-import { Button, VerticalBox, HorizontalBox, ProgressIndicator, Palette, ListView } from "std-widgets.slint";
-import { FrameLabel, Keys, TreemapView } from "treemap.slint";
+import { Button, ProgressIndicator, Palette, ListView } from "std-widgets.slint";
+import { Crumb, CrumbBar, FrameLabel, Keys, TreemapView } from "treemap.slint";
+import { Glass, GlassPanel } from "theme.slint";
 import { DriveButton, StartScreen } from "start.slint";
-export { FrameLabel, DriveButton }
+export { Crumb, FrameLabel, DriveButton }
 
 /// One visible line of the file tree. Text is formatted by the host.
 export struct TreeRow {
@@ -25,6 +26,8 @@ export struct TypeChip {
 /// Sort column ids shared with the host: 0 name, 1 size, 2 percent of parent, 3 files.
 component HeaderCell inherits Rectangle {
     in property <string> text;
+    /// The column name for screen readers; the shown text can be shorter.
+    in property <string> name: root.text;
     in property <bool> active;
     in property <bool> descending;
     in property <bool> right-aligned: true;
@@ -35,7 +38,7 @@ component HeaderCell inherits Rectangle {
     border-color: Palette.accent-background;
     focus := FocusScope {
         accessible-role: button;
-        accessible-label: "Sort by \{root.text}";
+        accessible-label: "Sort by \{root.name}";
         accessible-action-default => { root.clicked(); }
         key-pressed(event) => {
             if (event.text == Key.Return || event.text == " ") {
@@ -45,8 +48,8 @@ component HeaderCell inherits Rectangle {
             return reject;
         }
         Text {
-            x: 8px;
-            width: parent.width - 16px;
+            x: 6px;
+            width: parent.width - 12px;
             height: parent.height;
             vertical-alignment: center;
             horizontal-alignment: root.right-aligned ? right : left;
@@ -55,6 +58,22 @@ component HeaderCell inherits Rectangle {
             overflow: elide;
         }
         touch := TouchArea { clicked => { root.clicked(); focus.focus(); } }
+    }
+}
+
+/// A number in a tree row, right-aligned with the column header above it.
+component NumberCell inherits Rectangle {
+    in property <string> text;
+    in property <color> text-color;
+    Text {
+        x: 0px;
+        width: parent.width - 6px;
+        height: parent.height;
+        text: root.text;
+        horizontal-alignment: right;
+        vertical-alignment: center;
+        overflow: elide;
+        color: root.text-color;
     }
 }
 
@@ -70,7 +89,8 @@ export component MainWindow inherits Window {
     background: root.mica ? transparent : Palette.background;
     preferred-width: 1100px;
     preferred-height: 700px;
-    min-height: 400px;
+    min-width: 960px;
+    min-height: 600px;
 
     in property <bool> scanning;
     in property <string> banner;
@@ -89,6 +109,8 @@ export component MainWindow inherits Window {
     in property <string> admin-note;
     /// A scan is finished: "New scan" is offered.
     in property <bool> show-new-scan;
+    /// The drive or folder of the shown scan, as typed, for the top bar.
+    in property <string> scan-title;
 
     // File tree
     in property <[TreeRow]> rows;
@@ -98,8 +120,8 @@ export component MainWindow inherits Window {
 
     // Treemap
     in property <image> treemap;
-    in property <string> treemap-title;
-    in property <bool> treemap-can-go-up;
+    /// The folders from the scan root down to the folder the treemap shows.
+    in property <[Crumb]> crumbs;
     in property <bool> has-selection;
     in property <length> selection-x;
     in property <length> selection-y;
@@ -130,7 +152,8 @@ export component MainWindow inherits Window {
     callback tree-sort(int);
     callback treemap-click(float, float);
     callback treemap-open(float, float);
-    callback treemap-up();
+    /// A crumb was used. The argument is the crumb index: the node to open.
+    callback crumb-open(int);
     /// Key press in the file tree: "up", "down", "left", "right", "enter" or "space".
     callback tree-key(string);
     /// Key press in the treemap: "up", "down", "left", "right", "enter" or "backspace".
@@ -139,6 +162,13 @@ export component MainWindow inherits Window {
     callback restart-admin();
     /// The system theme changed between light and dark.
     callback theme-changed();
+
+    // Widths of the number columns of the file tree, and the room kept free for its scroll bar
+    // (the Fluent scroll bar is 14 px, drawn over the list).
+    private property <length> size-column: 76px;
+    private property <length> percent-column: 60px;
+    private property <length> files-column: 72px;
+    private property <length> scrollbar-room: 16px;
 
     /// Scrolls the file tree so row `i` is inside the view.
     public function show-row(i: int) {
@@ -163,37 +193,69 @@ export component MainWindow inherits Window {
     }
     // The results stay in the tree while the start screen shows, so the file tree keeps its scroll
     // function; hidden, they take no input.
-    VerticalBox {
+    VerticalLayout {
         visible: !root.start-screen;
         width: 100%;
         height: 100%;
-        spacing: 12px;
-        HorizontalBox {
-            padding: 0;
-            alignment: start;
-            if root.scanning : Button {
-                text: "Cancel";
-                clicked => { root.cancel(); }
+        padding: Glass.margin;
+        spacing: Glass.gap;
+        // Top bar: the buttons, then the scanned drive or folder and the scan summary. Always
+        // 52 px high, and the progress line under it is always 3 px, so the map keeps its size
+        // when a scan ends (a size change would lay the map out a second time).
+        HorizontalLayout {
+            height: 52px;
+            spacing: Glass.gap;
+            // The buttons keep their own height, centred in the bar.
+            VerticalLayout {
+                alignment: center;
+                HorizontalLayout {
+                    spacing: Glass.gap;
+                    if root.scanning : Button {
+                        text: "Cancel";
+                        clicked => { root.cancel(); }
+                    }
+                    if root.show-new-scan : Button {
+                        text: "New scan";
+                        primary: true;
+                        clicked => { root.new-scan(); }
+                    }
+                    if root.show-elevate : Button {
+                        text: "Restart as administrator";
+                        enabled: !root.scanning;
+                        clicked => { root.restart-admin(); }
+                    }
+                }
             }
-            if root.show-new-scan : Button {
-                text: "New scan";
-                primary: true;
-                clicked => { root.new-scan(); }
-            }
-            if root.show-elevate : Button {
-                text: "Restart as administrator";
-                enabled: !root.scanning;
-                clicked => { root.restart-admin(); }
+            // Takes the free width, so the buttons keep their own width.
+            VerticalLayout {
+                horizontal-stretch: 1;
+                alignment: center;
+                padding-left: 4px;
+                Text {
+                    text: root.scan-title;
+                    font-weight: 600;
+                    overflow: elide;
+                    accessible-role: text;
+                }
+                // Two lines at most, so the timing line still shows in a narrow window.
+                Text {
+                    text: root.banner;
+                    font-size: 12px;
+                    max-height: 32px;
+                    wrap: word-wrap;
+                    overflow: elide;
+                    color: root.banner-is-error ? #d13438 : Glass.dim;
+                    accessible-role: text;
+                }
             }
         }
-        if root.scanning : ProgressIndicator {
-            indeterminate: true;
-        }
-        Text {
-            text: root.banner;
-            wrap: word-wrap;
-            color: root.banner-is-error ? #d13438 : Palette.foreground;
-            accessible-role: text;
+        Rectangle {
+            height: 3px;
+            if root.scanning : ProgressIndicator {
+                width: 100%;
+                height: 100%;
+                indeterminate: true;
+            }
         }
         if root.elevate-note != "" : Text {
             text: root.elevate-note;
@@ -203,18 +265,21 @@ export component MainWindow inherits Window {
         }
 
         HorizontalLayout {
-            spacing: 12px;
-            // File tree
-            // Each pane sits in a Rectangle with `preferred-width: 0px`, so a pane starts at its
-            // minimum width and the free space is shared 1 : 5 (a layout cannot take that
-            // preferred width itself). The map gets about 51% of the window at 1100 px and more
-            // when the window is wider.
-            Rectangle {
-                horizontal-stretch: 1;
+            spacing: Glass.gap;
+            // Sidebar: the file tree. Each pane has `preferred-width: 0px`, so the free space is
+            // shared 27 : 73 (a layout cannot take a width from the window width itself); the
+            // sidebar never goes under 340 px.
+            GlassPanel {
+                horizontal-stretch: 27;
                 preferred-width: 0px;
-                min-width: 460px;
+                min-width: 340px;
                 VerticalLayout {
+                    padding: 4px;
+                    // The right padding keeps the last header over its column: the rows leave
+                    // room for the scroll bar, which is drawn over the list.
                     HorizontalLayout {
+                        padding-left: 2px;
+                        padding-right: 2px + root.scrollbar-room;
                         HeaderCell {
                             horizontal-stretch: 1;
                             text: "Name";
@@ -224,21 +289,22 @@ export component MainWindow inherits Window {
                             clicked => { root.tree-sort(0); }
                         }
                         HeaderCell {
-                            width: 80px;
+                            width: root.size-column;
                             text: "Size";
                             active: root.sort-key == 1;
                             descending: root.sort-descending;
                             clicked => { root.tree-sort(1); }
                         }
                         HeaderCell {
-                            width: 104px;
-                            text: "% of parent";
+                            width: root.percent-column;
+                            text: "%";
+                            name: "percent of parent";
                             active: root.sort-key == 2;
                             descending: root.sort-descending;
                             clicked => { root.tree-sort(2); }
                         }
                         HeaderCell {
-                            width: 76px;
+                            width: root.files-column;
                             text: "Files";
                             active: root.sort-key == 3;
                             descending: root.sort-descending;
@@ -263,13 +329,15 @@ export component MainWindow inherits Window {
                             height: parent.height - 4px;
                             for row[i] in root.rows : Rectangle {
                                 height: 24px;
+                                border-radius: 4px;
                                 background: i == root.selected-row ? Palette.selection-background : (row-touch.has-hover ? Palette.alternate-background : transparent);
                                 row-touch := TouchArea { clicked => { root.tree-select(i); tree-focus.focus(); } }
                                 HorizontalLayout {
+                                    padding-right: root.scrollbar-room;
                                     Rectangle {
                                         horizontal-stretch: 1;
                                         HorizontalLayout {
-                                            padding-left: 8px + row.depth * 16px;
+                                            padding-left: 4px + row.depth * 16px;
                                             spacing: 4px;
                                             Rectangle {
                                                 width: 16px;
@@ -290,38 +358,31 @@ export component MainWindow inherits Window {
                                             }
                                         }
                                     }
-                                    Text { width: 80px; text: row.size; horizontal-alignment: right; vertical-alignment: center; color: i == root.selected-row ? Palette.selection-foreground : Palette.foreground; }
-                                    Text { width: 104px; text: row.percent; horizontal-alignment: right; vertical-alignment: center; color: i == root.selected-row ? Palette.selection-foreground : Palette.foreground; }
-                                    Text { width: 76px; text: row.files; horizontal-alignment: right; vertical-alignment: center; color: i == root.selected-row ? Palette.selection-foreground : Palette.foreground; }
+                                    NumberCell { width: root.size-column; text: row.size; text-color: i == root.selected-row ? Palette.selection-foreground : Palette.foreground; }
+                                    NumberCell { width: root.percent-column; text: row.percent; text-color: i == root.selected-row ? Palette.selection-foreground : Palette.foreground; }
+                                    NumberCell { width: root.files-column; text: row.files; text-color: i == root.selected-row ? Palette.selection-foreground : Palette.foreground; }
                                 }
                             }
                         }
                         Rectangle {
+                            border-radius: 4px;
                             border-width: tree-focus.has-focus ? 2px : 0px;
                             border-color: Palette.accent-background;
                         }
                     }
                 }
             }
-            // Treemap
-            Rectangle {
-                horizontal-stretch: 5;
+            // Main area: the crumbs, then the treemap.
+            GlassPanel {
+                horizontal-stretch: 73;
                 preferred-width: 0px;
-                min-width: 260px;
                 VerticalLayout {
-                    spacing: 6px;
-                    HorizontalLayout {
-                        spacing: 8px;
-                        Button {
-                            text: "Up";
-                            enabled: root.treemap-can-go-up;
-                            clicked => { root.treemap-up(); }
-                        }
-                        Text {
-                            text: root.treemap-title;
-                            vertical-alignment: center;
-                            overflow: elide;
-                        }
+                    padding: 4px;
+                    spacing: 4px;
+                    CrumbBar {
+                        height: 28px;
+                        crumbs: root.crumbs;
+                        open(i) => { root.crumb-open(i); }
                     }
                     TreemapView {
                         vertical-stretch: 1;
@@ -342,54 +403,62 @@ export component MainWindow inherits Window {
             }
         }
 
-        // File-type footer: a strip with one part per type and the chips under it, in the tile
-        // colours. Always there and always 32 px high, so the map keeps its size when a scan
-        // is shown or the chips arrive (a size change would lay the map out a second time).
-        VerticalLayout {
-            spacing: 6px;
-            if root.types-counting || root.type-chips.length == 0 : Text {
-                height: 32px;
-                // The tree has rows only while a scan is shown.
-                text: root.types-counting ? "Counting file types." : (root.rows.length > 0 ? "No file sizes to show." : "");
-                vertical-alignment: center;
-                color: Palette.foreground.transparentize(30%);
-                accessible-role: text;
-            }
-            if !root.types-counting && root.type-chips.length > 0 : Rectangle {
-                height: 10px;
-                border-radius: 3px;
-                clip: true;
-                HorizontalLayout {
-                    spacing: 1px;
-                    for chip in root.type-chips : Rectangle {
-                        horizontal-stretch: chip.share;
-                        min-width: 0px;
-                        preferred-width: 0px;
-                        background: chip.color;
-                    }
+        // File-type footer, the full width: a strip with one part per type and the chips under
+        // it, in the tile colours. Always there and always the same height, so the map keeps its
+        // size when a scan is shown or the chips arrive (a size change would lay the map out a
+        // second time).
+        GlassPanel {
+            height: 48px;
+            VerticalLayout {
+                padding-left: 10px;
+                padding-right: 10px;
+                padding-top: 8px;
+                padding-bottom: 8px;
+                spacing: 6px;
+                if root.types-counting || root.type-chips.length == 0 : Text {
+                    height: 32px;
+                    // The tree has rows only while a scan is shown.
+                    text: root.types-counting ? "Counting file types." : (root.rows.length > 0 ? "No file sizes to show." : "");
+                    vertical-alignment: center;
+                    color: Glass.dim;
+                    accessible-role: text;
                 }
-            }
-            if !root.types-counting && root.type-chips.length > 0 : HorizontalLayout {
-                height: 16px;
-                spacing: 12px;
-                alignment: start;
-                for chip in root.type-chips : HorizontalLayout {
-                    spacing: 4px;
-                    VerticalLayout {
-                        alignment: center;
-                        Rectangle {
-                            width: 9px;
-                            height: 9px;
-                            border-radius: 2px;
+                if !root.types-counting && root.type-chips.length > 0 : Rectangle {
+                    height: 10px;
+                    border-radius: 3px;
+                    clip: true;
+                    HorizontalLayout {
+                        spacing: 1px;
+                        for chip in root.type-chips : Rectangle {
+                            horizontal-stretch: chip.share;
+                            min-width: 0px;
+                            preferred-width: 0px;
                             background: chip.color;
                         }
                     }
-                    Text {
-                        text: chip.label + " " + chip.percent;
-                        vertical-alignment: center;
-                        overflow: elide;
-                        color: Palette.foreground.transparentize(20%);
-                        accessible-role: text;
+                }
+                if !root.types-counting && root.type-chips.length > 0 : HorizontalLayout {
+                    height: 16px;
+                    spacing: 12px;
+                    alignment: start;
+                    for chip in root.type-chips : HorizontalLayout {
+                        spacing: 4px;
+                        VerticalLayout {
+                            alignment: center;
+                            Rectangle {
+                                width: 9px;
+                                height: 9px;
+                                border-radius: 2px;
+                                background: chip.color;
+                            }
+                        }
+                        Text {
+                            text: chip.label + " " + chip.percent;
+                            vertical-alignment: center;
+                            overflow: elide;
+                            color: Palette.foreground.transparentize(20%);
+                            accessible-role: text;
+                        }
                     }
                 }
             }

@@ -176,6 +176,7 @@ fn show_state(ui: &MainWindow) {
     let line = SESSION.with_borrow(|s| timing_for_state(&state, s.run.as_ref().and_then(TimingRun::line)));
     ui.set_banner(append_timing(banner_text(&state, offer), line.as_deref()).into());
     ui.set_show_elevate(offer);
+    ui.set_scan_title(SESSION.with_borrow(|s| s.scan_root.display().to_string()).into());
 }
 
 fn with_loaded<R>(f: impl FnOnce(&mut Loaded) -> R) -> Option<R> {
@@ -264,7 +265,7 @@ fn frame_labels(tree: &Tree, rects: &[Rect], chrome: Chrome, scale: f64) -> Vec<
         .collect()
 }
 
-/// Shows a finished layout of `root`: the image, its rects and labels, the title and the selection.
+/// Shows a finished layout of `root`: the image, its rects and labels, the crumbs and the selection.
 fn show_layout(
     ui: &MainWindow,
     root: NodeId,
@@ -272,11 +273,11 @@ fn show_layout(
     image: Option<SharedPixelBuffer<Rgba8Pixel>>,
     labels: Vec<FrameLabel>,
 ) {
-    let Some((title, can_go_up, note)) = with_loaded(|l| {
+    let Some((crumbs, note)) = with_loaded(|l| {
         let tree = &l.data.tree;
         let note = tree_view::map_note(tree, root, &rects, image.is_some());
         l.rects = rects;
-        (tree.path(root).display().to_string(), tree.node(root).parent.is_some(), note)
+        (tree_view::crumbs(tree, root).into_iter().map(crumb).collect::<Vec<_>>(), note)
     }) else {
         return;
     };
@@ -285,10 +286,14 @@ fn show_layout(
     }
     ui.set_labels(ModelRc::new(VecModel::from(labels)));
     ui.set_map_note(note.into());
-    ui.set_treemap_can_go_up(can_go_up);
-    ui.set_treemap_title(title.into());
+    ui.set_crumbs(ModelRc::new(VecModel::from(crumbs)));
     sync_selection(ui);
     note_treemap_shown(ui);
+}
+
+/// The window's form of a crumb from `tree_view::crumbs`: its index is the node it opens, -1 for none.
+fn crumb((node, text): (Option<NodeId>, String)) -> Crumb {
+    Crumb { text: text.into(), index: node.map_or(-1, |n| i32::try_from(n.0).unwrap_or(-1)) }
 }
 
 /// With `--timing`: when the first treemap of a finished scan is shown, completes the timing line,
@@ -409,8 +414,7 @@ fn clear(ui: &MainWindow) {
     SESSION.with_borrow_mut(|s| s.loaded = None);
     ui.set_rows(ModelRc::default());
     ui.set_treemap(Image::default());
-    ui.set_treemap_title(SharedString::new());
-    ui.set_treemap_can_go_up(false);
+    ui.set_crumbs(ModelRc::default());
     ui.set_labels(ModelRc::default());
     ui.set_map_note(SharedString::new());
     sync_types(ui);
@@ -712,11 +716,15 @@ fn wire_tree_and_treemap(ui: &MainWindow) {
             }
         }
     });
-    ui.on_treemap_up({
+    ui.on_crumb_open({
         let weak = ui.as_weak();
-        move || {
-            if let Some(ui) = weak.upgrade() {
-                go_up(&ui);
+        move |i| {
+            let Some(ui) = weak.upgrade() else { return };
+            // The crumbs belong to the shown scan (`clear` drops them with it), so the index is
+            // a node of the shown tree; the bound check keeps a bad index from panicking.
+            let node = u32::try_from(i).ok().map(NodeId);
+            if let Some(n) = node.filter(|n| with_loaded(|l| (n.0 as usize) < l.data.counts.len()) == Some(true)) {
+                open_node(&ui, n);
             }
         }
     });

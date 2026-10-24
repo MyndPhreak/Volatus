@@ -9,4 +9,27 @@ export global Glass {
     out property <color> highlight: root.dark ? #ffffff40 : #ffffffff;
     out property <color> track: root.dark ? #ffffff26 : #0000001f;
     out property <color> dim: Palette.foreground.transparentize(35%);
+    /// Corner radius of glass panels and buttons.
+    out property <length> radius: 8px;
+    /// Space between panels, and inside a panel.
+    out property <length> gap: 8px;
+    /// Space between the window edge and the panels.
+    out property <length> margin: 12px;
+}
+
+/// A glass panel: translucent fill over the Mica window, thin border, light top edge.
+export component GlassPanel inherits Rectangle {
+    border-radius: Glass.radius;
+    background: Glass.fill;
+    border-width: 1px;
+    border-color: Glass.border;
+    // The light edge on top of the glass, under the content.
+    Rectangle {
+        x: Glass.radius;
+        y: 1px;
+        width: parent.width - 2 * Glass.radius;
+        height: 1px;
+        background: Glass.highlight;
+    }
+    @children
 }
