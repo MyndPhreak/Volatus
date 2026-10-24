@@ -80,3 +80,6 @@ The owner wants one thing from the main screen: right after a scan, see **what t
 ## Open items for the owner
 
 None. The builder check raised seven questions; none needed the owner (answered above).
+
+## Decision 2026-10-23 (owner): label every frame, cut off if needed
+Folder names go on every frame that has room for a few characters, elided with an ellipsis when too long. This replaces the earlier "only when big enough" and the label cap of 300; the cap is set by measurement. The tooltip shows the full name.

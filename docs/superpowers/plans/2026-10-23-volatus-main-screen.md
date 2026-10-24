@@ -292,3 +292,6 @@ Manual: M-P9.1 contrast in light theme. M-P9.2 Narrator reads every new control.
 
 ## Spike results (P1, 2026-10-23; full log logs/P8-spike.md in the work folder)
 Default renderer is FemtoVG/OpenGL (no Skia): straight RGBA blends over Mica, glow draws only in an unclipped sibling layer (cut inside `clip: true`), outline slides in 120 ms, `pointer-event` move works without a press, 300x2 labels replaced 10x = 19.7 ms median at 4K/200%, no backdrop blur. Changes: P7 must check at run time for the software-renderer fallback (`set_rendering_notifier` returns Err: no glow, use the brighter-border fallback); light-theme frame colours need more contrast (P2.T2); live theme switch to be checked by hand (M-P6.1).
+
+## Decision 2026-10-23 (owner): labels on every frame that can show some text
+The owner wants folder names on the frames "even if they get cut off". P3 changes: label every frame whose band can show at least a few characters (start: width >= 24 logical px, band height from `Chrome`), text elided with an ellipsis, largest frames first; replace the cap of 300 with a cap set by measurement (target: label layer update <= 50 ms per relayout at 4K/200%, report the cap chosen; the spike measured 600 elements at 19.7 ms). Frames too small for any text stay unlabeled. Hover and tooltip show the full name.
