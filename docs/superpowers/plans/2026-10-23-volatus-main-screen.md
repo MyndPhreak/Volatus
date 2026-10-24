@@ -289,3 +289,6 @@ Manual: M-P9.1 contrast in light theme. M-P9.2 Narrator reads every new control.
 - Reuse over counterparts: framed hit/selection/neighbour are the existing functions under new tests; a new function only if one fails.
 - Slint glue and markup have no automated tests (no Slint test backend here); each phase lists numbered manual steps.
 - Not verified from code: whether `SLINT_SCALE_FACTOR` and the default-renderer choice behave as assumed; P1 Q1/Q8 capture both.
+
+## Spike results (P1, 2026-10-23; full log logs/P8-spike.md in the work folder)
+Default renderer is FemtoVG/OpenGL (no Skia): straight RGBA blends over Mica, glow draws only in an unclipped sibling layer (cut inside `clip: true`), outline slides in 120 ms, `pointer-event` move works without a press, 300x2 labels replaced 10x = 19.7 ms median at 4K/200%, no backdrop blur. Changes: P7 must check at run time for the software-renderer fallback (`set_rendering_notifier` returns Err: no glow, use the brighter-border fallback); light-theme frame colours need more contrast (P2.T2); live theme switch to be checked by hand (M-P6.1).
