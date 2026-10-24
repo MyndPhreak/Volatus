@@ -9,6 +9,9 @@
 mod browse;
 mod cli;
 mod elevate;
+// Stubs of P8.P4; the window uses them from P4.T3 on.
+#[allow(dead_code)]
+mod footer;
 mod model;
 mod nav;
 mod tree_view;

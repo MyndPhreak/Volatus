@@ -1,5 +1,7 @@
 //! Squarified treemap layout and rasterizer.
 
+pub mod filetype;
+
 use scan::{NodeId, Tree};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
