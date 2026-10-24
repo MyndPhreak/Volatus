@@ -365,12 +365,11 @@ fn count_types(ui: &MainWindow, data: Arc<Data>) {
 /// Keeps the footer `chips` counted for `data` of scan `generation`. `false`, and nothing kept, for a
 /// late result: of an older scan, or for data the window no longer shows (`ScanControl::reset`
 /// keeps the generation, so the generation alone does not tell).
-fn store_chips(generation: u64, _data: &Arc<Data>, chips: Vec<footer::Chip>) -> bool {
-    let current = SESSION.with_borrow(|s| s.scan.is_current(generation));
-    if current {
-        with_loaded(|l| l.chips = Some(chips));
-    }
-    current
+fn store_chips(generation: u64, data: &Arc<Data>, chips: Vec<footer::Chip>) -> bool {
+    SESSION.with_borrow_mut(|s| {
+        let shown = s.scan.is_current(generation).then_some(s.loaded.as_mut()).flatten();
+        shown.filter(|l| Arc::ptr_eq(&l.data, data)).map(|l| l.chips = Some(chips)).is_some()
+    })
 }
 
 /// Pushes the footer chips into the window, in the tile colours of the current theme.

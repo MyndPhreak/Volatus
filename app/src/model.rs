@@ -135,7 +135,11 @@ impl ScanControl {
     /// of the finished scan must also be checked against the data the window shows.
     /// `false`, and no change, in any other state.
     pub fn reset(&mut self) -> bool {
-        false
+        if !matches!(self.state, ScanState::Done(_)) {
+            return false;
+        }
+        self.state = ScanState::Idle;
+        true
     }
 
     /// Applies `event` from scan `generation`. `false`, and no change, if that scan is not current.
@@ -155,8 +159,8 @@ impl ScanControl {
 }
 
 /// True when the window shows the start screen: nothing is scanning and no result is shown.
-pub fn shows_start(_state: &ScanState) -> bool {
-    false
+pub fn shows_start(state: &ScanState) -> bool {
+    !matches!(state, ScanState::Scanning { .. } | ScanState::Done(_))
 }
 
 /// Binary units, one decimal above 1 KB: `1.5 MB`.
@@ -303,7 +307,7 @@ pub fn offer_elevation(method: Method, root: &Path, is_admin: bool) -> bool {
 /// [`offer_elevation`] for the finished scan: the restart hint shows only when the button does.
 pub fn banner_text(state: &ScanState, offer_elevation: bool) -> String {
     match state {
-        ScanState::Idle => "Choose a folder or drive. Then select Scan.".into(),
+        ScanState::Idle => "Select a drive or a folder to scan.".into(),
         ScanState::Scanning { files, dirs } => {
             format!("Scanning. {} files, {} folders so far.", group_digits(*files), group_digits(*dirs))
         }
