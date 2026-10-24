@@ -512,7 +512,7 @@ fn refresh_drives(ui: &MainWindow) {
     ui.set_drives_loading(true);
     let weak = ui.as_weak();
     std::thread::spawn(move || {
-        let buttons = drives::drive_buttons(&drives::list(), elevate::is_admin());
+        let buttons = drives::drive_buttons(&drives::list());
         // Err means the event loop has stopped: nothing left to update.
         let _ = slint::invoke_from_event_loop(move || {
             let Some(ui) = weak.upgrade() else { return };
@@ -531,7 +531,6 @@ fn drive_button(b: drives::DriveButton) -> DriveButton {
         root: b.root.into(),
         title: b.title.into(),
         detail: b.detail.into(),
-        note: b.note.into(),
         used: b.used,
         size_known: b.size_known,
     }

@@ -6,19 +6,18 @@ export struct DriveButton {
     root: string,
     title: string,
     detail: string,
-    note: string,
     /// Share of the drive in use, 0..1.
     used: float,
     /// False when the host could not read the size: no bar.
     size-known: bool,
 }
 
-/// A glass button for one drive: name, free space, a used/free bar and a note.
+/// A glass button for one drive: name, free space and a used/free bar.
 component DriveTile inherits Rectangle {
     in property <DriveButton> drive;
     callback clicked();
 
-    height: root.drive.note != "" ? 104px : 84px;
+    height: 84px;
     border-radius: 8px;
     background: (touch.has-hover || focus.has-focus) ? Glass.fill-hover : Glass.fill;
     border-width: focus.has-focus ? 2px : 1px;
@@ -61,12 +60,6 @@ component DriveTile inherits Rectangle {
                     border-radius: 3px;
                     background: Palette.accent-background;
                 }
-            }
-            if root.drive.note != "" : Text {
-                text: root.drive.note;
-                font-size: 11px;
-                color: Glass.dim;
-                accessible-role: none;
             }
         }
         // The light edge on top of the glass.
