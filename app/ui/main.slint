@@ -141,6 +141,14 @@ export component MainWindow inherits Window {
     in property <bool> tip-visible;
     in property <length> tip-x;
     in property <length> tip-y;
+    /// The picture that moves over the treemap, its move, and whether it shows and runs.
+    in property <image> zoom-image;
+    in property <ZoomMove> zoom;
+    in property <bool> zoom-shown;
+    in property <bool> zoom-running;
+    in property <duration> zoom-duration: 180ms;
+    /// Time of the move, 0 to 1.
+    out property <float> zoom-t: map.zoom-t;
 
     // File-type footer
     /// The biggest file types of the scan, then "Other".
@@ -177,6 +185,8 @@ export component MainWindow inherits Window {
     callback treemap-hide-tip(bool);
     /// Where the tooltip starts on one axis: (pointer, tooltip size, map size, gap after the pointer).
     pure callback tip-position(float, float, float, float) -> float;
+    /// Where the moving picture is at time t (0 to 1) of a move.
+    pure callback zoom-frame(ZoomMove, float) -> ZoomFrame;
     callback restart-admin();
     /// The system theme changed between light and dark.
     callback theme-changed();
@@ -187,6 +197,11 @@ export component MainWindow inherits Window {
     private property <length> percent-column: 60px;
     private property <length> files-column: 72px;
     private property <length> scrollbar-room: 16px;
+
+    /// The move of the picture over the treemap starts now.
+    public function start-zoom() {
+        map.start-zoom();
+    }
 
     /// Scrolls the file tree so row `i` is inside the view.
     public function show-row(i: int) {
@@ -423,10 +438,16 @@ export component MainWindow inherits Window {
                         tip-visible: root.tip-visible;
                         tip-x: root.tip-x;
                         tip-y: root.tip-y;
+                        zoom-image: root.zoom-image;
+                        zoom: root.zoom;
+                        zoom-shown: root.zoom-shown;
+                        zoom-running: root.zoom-running;
+                        zoom-duration: root.zoom-duration;
                         hovered(x, y) => { root.treemap-hover(x, y); }
                         left => { root.treemap-leave(); }
                         hide-tip(scrolled) => { root.treemap-hide-tip(scrolled); }
                         tip-position(pointer, size, extent, gap) => { return root.tip-position(pointer, size, extent, gap); }
+                        zoom-frame(m, t) => { return root.zoom-frame(m, t); }
                         clicked(x, y) => { root.treemap-click(x, y); }
                         double-clicked(x, y) => { root.treemap-open(x, y); }
                         key(k) => { root.map-key(k); }

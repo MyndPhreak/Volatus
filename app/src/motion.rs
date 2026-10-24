@@ -9,32 +9,34 @@ use treemap::Frame;
 pub enum Kind {
     /// The old picture zooms into the rect of the opened folder until that rect fills the map.
     In,
-    /// The old picture shrinks into the rect of its folder in the new picture and fades out.
+    /// The new picture starts zoomed into the rect of the folder that going up left, so that rect
+    /// fills the map as that folder did, and zooms out until it fits the map. (The pictures are
+    /// glass, so two of them over each other would mix: only one moves.)
     Out,
     /// The first picture of a scan fades in.
+    #[allow(dead_code, reason = "the fade comes in P8.T2")]
     Fade,
 }
 
 /// Motion is on: the Windows setting "Animation effects" (`SPI_GETCLIENTAREAANIMATION`) is on.
 /// A setting that cannot be read counts as off, as no motion is never harmful.
 pub fn allowed(setting: Option<bool>) -> bool {
-    let _ = setting;
-    todo!()
+    setting == Some(true)
 }
 
 /// A layout that lands while a zoom in runs waits until the zoom ends: until then a click is
 /// found through the rects of the zooming picture, which the new layout would replace.
 pub fn holds_layout(moving: Option<Kind>, running: bool) -> bool {
-    let _ = (moving, running);
-    todo!()
+    moving == Some(Kind::In) && running
 }
 
 /// What plays when a layout lands.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Landing {
     /// The new picture fades in.
+    #[allow(dead_code, reason = "the fade comes in P8.T2")]
     Fade,
-    /// The old picture shrinks into this frame of the new picture and fades out.
+    /// The new picture zooms out from this rect of it (`Kind::Out`).
     Out(Frame),
     /// The new picture shows at once.
     Still,
@@ -43,16 +45,30 @@ pub enum Landing {
 /// What plays when a layout lands in place of the picture of `old_root`: `allowed` motion is on;
 /// `first` it is the first picture of a scan; `out_from` the folder that going up left
 /// (`tree_view::ZoomWay::Out`), with `out_rect` its rect (or the rect of its nearest drawn folder)
-/// in the new picture. The old picture shrinks only when it shows `out_from`.
+/// in the new picture. It zooms out only when the old picture shows `out_from`.
 pub fn landing(allowed: bool, first: bool, out_from: Option<NodeId>, old_root: Option<NodeId>, out_rect: Option<Frame>) -> Landing {
-    let _ = (allowed, first, out_from, old_root, out_rect);
-    todo!()
+    let _ = first;
+    match out_rect {
+        Some(r) if allowed && out_from.is_some() && out_from == old_root => Landing::Out(r),
+        _ => Landing::Still,
+    }
 }
 
 /// The Windows setting "Animation effects" (Settings > Accessibility > Visual effects). `None`
 /// when it cannot be read.
+#[cfg(windows)]
 pub fn client_area_animation() -> Option<bool> {
-    todo!()
+    use windows_sys::Win32::UI::WindowsAndMessaging::{SPI_GETCLIENTAREAANIMATION, SystemParametersInfoW};
+    let mut on: windows_sys::core::BOOL = 0;
+    // SAFETY: SPI_GETCLIENTAREAANIMATION writes one BOOL to the pointer, which points to `on`.
+    let ok = unsafe { SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, (&raw mut on).cast(), 0) } != 0;
+    ok.then_some(on != 0)
+}
+
+/// Other systems have no such setting here: motion is on.
+#[cfg(not(windows))]
+pub fn client_area_animation() -> Option<bool> {
+    Some(true)
 }
 
 #[cfg(test)]

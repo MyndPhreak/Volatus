@@ -188,35 +188,49 @@ pub type Frame = (f64, f64, f64, f64);
 /// the view is cut off first. `None` when nothing of `target` is in the view, when the view has
 /// no area, or when a value is not finite.
 pub fn zoom_frame(target: &Rect, w: f64, h: f64) -> Option<Frame> {
-    let _ = (target, w, h);
-    todo!()
+    let all = [target.x, target.y, target.w, target.h, w, h];
+    if !all.iter().all(|v| v.is_finite()) || w <= 0.0 || h <= 0.0 {
+        return None;
+    }
+    let (x0, y0) = (target.x.max(0.0), target.y.max(0.0));
+    let (x1, y1) = ((target.x + target.w).min(w), (target.y + target.h).min(h));
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+    let (sx, sy) = (w / (x1 - x0), h / (y1 - y0));
+    Some((-x0 * sx, -y0 * sy, w * sx, h * sy))
 }
 
 /// The ease-out curve `1 - (1 - t)^3` of `t` cut to `0..=1`: fast at the start, slow at the end.
 /// NaN gives 1, the end.
 pub fn ease_out(t: f64) -> f64 {
-    let _ = t;
-    todo!()
+    if t.is_nan() {
+        return 1.0;
+    }
+    1.0 - (1.0 - t.clamp(0.0, 1.0)).powi(3)
 }
 
 /// The value at time `t` (`0..=1`, as for `ease_out`) of a move from `from` to `to`, eased out.
 pub fn eased(from: f64, to: f64, t: f64) -> f64 {
-    let _ = (from, to, t);
-    todo!()
+    let e = ease_out(t);
+    // Exact at the end, with no rounding left over from the lerp.
+    if e >= 1.0 { to } else { from + (to - from) * e }
 }
 
 /// The frame at time `t` (`0..=1`, as for `ease_out`) of a move from `from` to `to`, eased out.
 pub fn zoom_at(from: Frame, to: Frame, t: f64) -> Frame {
-    let _ = (from, to, t);
-    todo!()
+    (eased(from.0, to.0, t), eased(from.1, to.1, t), eased(from.2, to.2, t), eased(from.3, to.3, t))
 }
 
 /// The point of the picture of a `w` x `h` view, in the picture's own pixels, that is drawn under
 /// the view point (x, y) when the picture is drawn at `frame`. `None` when `frame` has no area or
 /// a value is not finite.
 pub fn unzoom(frame: Frame, w: f64, h: f64, x: f64, y: f64) -> Option<(f64, f64)> {
-    let _ = (frame, w, h, x, y);
-    todo!()
+    let (fx, fy, fw, fh) = frame;
+    if ![fx, fy, fw, fh, w, h, x, y].iter().all(|v| v.is_finite()) || fw <= 0.0 || fh <= 0.0 {
+        return None;
+    }
+    Some(((x - fx) * w / fw, (y - fy) * h / fh))
 }
 
 /// Places `areas` (sorted largest first) inside `b` as rows along the short side. Rects go

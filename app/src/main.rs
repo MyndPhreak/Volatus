@@ -28,13 +28,13 @@ use slint::{
     ComponentHandle, Image, Model, ModelNotify, ModelRc, ModelTracker, Rgba8Pixel, SetRenderingNotifierError,
     SharedPixelBuffer, SharedString, Timer, TimerMode, VecModel, Weak,
 };
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 use tree_view::{Row, SortKey, ViewState};
-use treemap::{Chrome, Rect, Theme};
+use treemap::{Chrome, Frame, Rect, Theme};
 
 slint::include_modules!();
 
@@ -156,6 +156,34 @@ struct Session {
     tip: tip::TipState,
     /// Longest time one pointer move took on the UI thread. With `--timing` it is printed at exit.
     hover_slowest: Duration,
+    /// The picture that moves over the treemap, until it is hidden.
+    moving: Option<Move>,
+    /// A layout that landed while a zoom in ran (`motion::holds_layout`). It shows when the zoom ends.
+    held: Option<Layout>,
+    /// The folder that the last "up" left. When the layout of the folder above lands, the old
+    /// picture shrinks into it.
+    out_from: Option<NodeId>,
+}
+
+/// A finished layout of folder `root`: its rects in physical pixels, its picture and its labels.
+struct Layout {
+    root: NodeId,
+    rects: Vec<Rect>,
+    image: Option<SharedPixelBuffer<Rgba8Pixel>>,
+    labels: (Vec<FrameLabel>, Vec<FileLabel>),
+}
+
+/// A move of a picture over the treemap, from frame `from` to frame `to` in physical pixels.
+#[derive(Debug, Clone, Copy)]
+struct Move {
+    kind: motion::Kind,
+    from: Frame,
+    to: Frame,
+    /// Its time is not up. A zoom in whose time is up stays at `to` until its layout lands.
+    running: bool,
+    started: Instant,
+    /// `FRAMES` when it started.
+    frames: u64,
 }
 
 thread_local! {
@@ -174,12 +202,22 @@ thread_local! {
         pointer: (0.0, 0.0),
         tip: tip::TipState::Idle,
         hover_slowest: Duration::ZERO,
+        moving: None,
+        held: None,
+        out_from: None,
     });
     /// Starts one relayout after the window stops changing the treemap size.
     static RESIZE_TIMER: Timer = Timer::default();
     /// Shows the tooltip of the hovered node after `TIP_DELAY`.
     static TIP_TIMER: Timer = Timer::default();
+    /// Ends the time of the move of the treemap picture.
+    static MOVE_TIMER: Timer = Timer::default();
+    /// Frames the window has drawn. With `--timing` each move prints how many it took.
+    static FRAMES: Cell<u64> = const { Cell::new(0) };
 }
+
+/// Time of a zoom in or out.
+const ZOOM_TIME: Duration = Duration::from_millis(180);
 
 /// Applies `event` from scan `generation` and shows the new state. Dropped if a newer scan
 /// started or the scan was cancelled.
@@ -261,6 +299,8 @@ fn relayout(ui: &MainWindow) {
         let (w, h) = ((lw * scale).round() as u32, (lh * scale).round() as u32);
         let (data, root) = (l.data.clone(), l.view_root);
         s.layout_seq += 1;
+        // A layout kept for a zoom in is older than this one now.
+        s.held = None;
         // With `--timing`, each layout (and new picture) shows, so a hover that starts one is seen.
         if s.timing {
             eprintln!("Layout {}.", s.layout_seq);
@@ -282,7 +322,7 @@ fn relayout(ui: &MainWindow) {
         let _ = slint::invoke_from_event_loop(move || {
             let current = SESSION.with_borrow(|s| (s.scan.generation(), s.layout_seq));
             if let Some(ui) = weak.upgrade().filter(|_| current == (generation, seq)) {
-                show_layout(&ui, root, rects, image, labels);
+                land(&ui, Layout { root, rects, image, labels });
             }
         });
     });
@@ -379,9 +419,17 @@ fn glow_drawn(notifier: Result<(), SetRenderingNotifierError>) -> bool {
     matches!(notifier, Ok(()) | Err(SetRenderingNotifierError::AlreadySet))
 }
 
-/// The node of the shown treemap under the window point (x, y) in logical pixels.
+/// The node of the shown treemap under the window point (x, y) in logical pixels. While a zoom in
+/// shows, the point is on the zooming picture, so it is found in that picture's own rects.
 fn node_at(ui: &MainWindow, x: f32, y: f32) -> Option<NodeId> {
     let (x, y) = to_physical(ui, x, y);
+    let (x, y) = match zoom_in_frame(ui) {
+        Some(frame) => {
+            let (w, h) = map_px(ui);
+            treemap::unzoom(frame, w, h, x, y)?
+        }
+        None => (x, y),
+    };
     with_loaded(|l| tree_view::hit_test(&l.rects, x, y)).flatten()
 }
 
@@ -465,17 +513,12 @@ fn hide_tip(ui: &MainWindow) {
 }
 
 /// Shows a finished layout of `root`: the image, its rects and labels, the crumbs and the selection.
-fn show_layout(
-    ui: &MainWindow,
-    root: NodeId,
-    rects: Vec<Rect>,
-    image: Option<SharedPixelBuffer<Rgba8Pixel>>,
-    (labels, file_labels): (Vec<FrameLabel>, Vec<FileLabel>),
-) {
+fn show_layout(ui: &MainWindow, Layout { root, rects, image, labels: (labels, file_labels) }: Layout) {
     let Some((crumbs, note)) = with_loaded(|l| {
         let tree = &l.data.tree;
         let note = tree_view::map_note(tree, root, &rects, image.is_some());
         l.rects = rects;
+        l.shown_root = Some(root);
         (tree_view::crumbs(tree, root).into_iter().map(crumb).collect::<Vec<_>>(), note)
     }) else {
         return;
@@ -499,8 +542,125 @@ fn show_layout(
 /// The frame of move `m` at time `t` (0 to 1) of the move, eased out: `treemap::zoom_at` for the
 /// place and `treemap::eased` for the opacity, in logical pixels.
 fn frame_at(m: &ZoomMove, t: f32) -> ZoomFrame {
-    let _ = (m, t);
-    todo!()
+    let f = |z: &ZoomFrame| (f64::from(z.x), f64::from(z.y), f64::from(z.width), f64::from(z.height));
+    let t = f64::from(t);
+    let (x, y, w, h) = treemap::zoom_at(f(&m.from), f(&m.to), t);
+    let opacity = treemap::eased(f64::from(m.from.opacity), f64::from(m.to.opacity), t);
+    ZoomFrame { x: x as f32, y: y as f32, width: w as f32, height: h as f32, opacity: opacity as f32 }
+}
+
+/// A layout of the current request landed. It waits while a zoom in runs (`motion::holds_layout`);
+/// else it shows at once, in the same frame as the moving picture hides, and it may zoom out from
+/// the folder that going up left (`motion::landing`).
+fn land(ui: &MainWindow, layout: Layout) {
+    let hold = SESSION.with_borrow(|s| motion::holds_layout(s.moving.map(|m| m.kind), s.moving.is_some_and(|m| m.running)));
+    if hold {
+        SESSION.with_borrow_mut(|s| s.held = Some(layout));
+        return;
+    }
+    let old_root = with_loaded(|l| l.shown_root).flatten();
+    let out_from = SESSION.with_borrow_mut(|s| s.out_from.take());
+    show_layout(ui, layout);
+    stop_move(ui);
+    let out_rect = out_from.and_then(|left| {
+        with_loaded(|l| {
+            let shown = tree_view::outline_node(&l.data.tree, &l.rects, left)?;
+            tree_view::selection_bounds(&l.rects, shown)
+        })
+        .flatten()
+    });
+    let landing = motion::landing(motion_on(), false, out_from, old_root, out_rect);
+    if let (motion::Landing::Out((x, y, rw, rh)), Some(left)) = (landing, out_from) {
+        let (w, h) = map_px(ui);
+        if let Some(from) = treemap::zoom_frame(&Rect { node: left, x, y, w: rw, h: rh }, w, h) {
+            start_move(ui, motion::Kind::Out, ui.get_treemap(), from, (0.0, 0.0, w, h), (1.0, 1.0));
+        }
+    }
+}
+
+/// Motion is on now (`motion::allowed`). Read for each move, so a change of the setting counts at once.
+fn motion_on() -> bool {
+    motion::allowed(motion::client_area_animation())
+}
+
+/// The treemap view in physical pixels.
+fn map_px(ui: &MainWindow) -> (f64, f64) {
+    let scale = f64::from(ui.window().scale_factor());
+    let (w, h) = SESSION.with_borrow(|s| s.map_size);
+    (f64::from(w) * scale, f64::from(h) * scale)
+}
+
+/// Starts move `kind` of `image` over the treemap, from frame `from` to frame `to` (physical
+/// pixels), with the opacity going from `opacity.0` to `opacity.1`. It replaces a move that runs.
+/// The treemap picture does not show while a picture moves: they are glass and would mix.
+/// Nothing waits for the move: the window takes input all the time.
+fn start_move(ui: &MainWindow, kind: motion::Kind, image: Image, from: Frame, to: Frame, opacity: (f32, f32)) {
+    let scale = f64::from(ui.window().scale_factor());
+    let logical = |(x, y, w, h): Frame, opacity: f32| ZoomFrame {
+        x: (x / scale) as f32,
+        y: (y / scale) as f32,
+        width: (w / scale) as f32,
+        height: (h / scale) as f32,
+        opacity,
+    };
+    ui.set_zoom_image(image);
+    ui.set_zoom(ZoomMove { from: logical(from, opacity.0), to: logical(to, opacity.1) });
+    ui.set_zoom_duration(ZOOM_TIME.as_millis() as i64);
+    ui.set_zoom_running(true);
+    ui.set_zoom_shown(true);
+    ui.invoke_start_zoom();
+    let frames = FRAMES.with(Cell::get);
+    SESSION.with_borrow_mut(|s| s.moving = Some(Move { kind, from, to, running: true, started: Instant::now(), frames }));
+    drop_hover(ui);
+    let weak = ui.as_weak();
+    MOVE_TIMER.with(|t| {
+        t.start(TimerMode::SingleShot, ZOOM_TIME, move || {
+            if let Some(ui) = weak.upgrade() {
+                move_time_up(&ui);
+            }
+        })
+    });
+}
+
+/// The time of the move is up. A zoom in stays at its end frame until its layout lands; then
+/// that layout shows and the moving picture hides, in the same frame. Other moves hide.
+fn move_time_up(ui: &MainWindow) {
+    ui.set_zoom_running(false);
+    let Some(m) = SESSION.with_borrow_mut(|s| {
+        s.moving.as_mut().map(|m| {
+            m.running = false;
+            *m
+        })
+    }) else {
+        return;
+    };
+    if SESSION.with_borrow(|s| s.timing) {
+        let now = FRAMES.with(Cell::get);
+        eprintln!("Move {:?}: {} frames in {} ms. Frames drawn: {now}.", m.kind, now - m.frames, m.started.elapsed().as_millis());
+    }
+    if m.kind != motion::Kind::In {
+        stop_move(ui);
+    } else if let Some(layout) = SESSION.with_borrow_mut(|s| s.held.take()) {
+        show_layout(ui, layout);
+        stop_move(ui);
+    }
+}
+
+/// Hides the moving picture at once.
+fn stop_move(ui: &MainWindow) {
+    MOVE_TIMER.with(Timer::stop);
+    if SESSION.with_borrow_mut(|s| s.moving.take()).is_some() {
+        ui.set_zoom_running(false);
+        ui.set_zoom_shown(false);
+        ui.set_zoom_image(Image::default());
+    }
+}
+
+/// Where the picture of a zoom in is on the treemap now (physical pixels), or `None` when no zoom
+/// in shows.
+fn zoom_in_frame(ui: &MainWindow) -> Option<Frame> {
+    let m = SESSION.with_borrow(|s| s.moving.filter(|m| m.kind == motion::Kind::In))?;
+    Some(treemap::zoom_at(m.from, m.to, f64::from(ui.get_zoom_t())))
 }
 
 /// The window's form of a crumb from `tree_view::crumbs`: its index is the node it opens, -1 for none.
@@ -624,7 +784,12 @@ fn type_chip(c: &footer::Chip, theme: Theme) -> TypeChip {
 
 /// Drops the shown scan.
 fn clear(ui: &MainWindow) {
-    SESSION.with_borrow_mut(|s| s.loaded = None);
+    stop_move(ui);
+    SESSION.with_borrow_mut(|s| {
+        s.loaded = None;
+        s.held = None;
+        s.out_from = None;
+    });
     ui.set_rows(ModelRc::default());
     ui.set_treemap(Image::default());
     ui.set_crumbs(ModelRc::default());
@@ -788,8 +953,29 @@ fn toggle_row(ui: &MainWindow, i: i32) {
 fn show_folder(ui: &MainWindow, folder: NodeId) {
     if with_loaded(|l| std::mem::replace(&mut l.view_root, folder) != folder) == Some(true) {
         drop_hover(ui);
+        move_to_folder(ui, folder);
         relayout(ui);
     }
+}
+
+/// The picture starts to move for the change of the shown folder to `folder`
+/// (`tree_view::zoom_way`): it zooms in at once, from where a zoom in is now; or the move out waits
+/// for the new layout; or the picture stays still and a move that shows hides.
+fn move_to_folder(ui: &MainWindow, folder: NodeId) {
+    let way = with_loaded(|l| tree_view::zoom_way(&l.data.tree, l.shown_root, &l.rects, folder));
+    SESSION.with_borrow_mut(|s| s.out_from = None);
+    let (w, h) = map_px(ui);
+    match way {
+        Some(tree_view::ZoomWay::In((x, y, rw, rh))) if motion_on() => {
+            if let Some(to) = treemap::zoom_frame(&Rect { node: folder, x, y, w: rw, h: rh }, w, h) {
+                let from = zoom_in_frame(ui).unwrap_or((0.0, 0.0, w, h));
+                return start_move(ui, motion::Kind::In, ui.get_treemap(), from, to, (1.0, 1.0));
+            }
+        }
+        Some(tree_view::ZoomWay::Out(left)) => SESSION.with_borrow_mut(|s| s.out_from = Some(left)),
+        _ => {}
+    }
+    stop_move(ui);
 }
 
 /// Opens `node` in the treemap (`tree_view::open_target`): a folder shows itself, a file
@@ -917,8 +1103,7 @@ fn wire_tree_and_treemap(ui: &MainWindow) {
         let weak = ui.as_weak();
         move |x, y| {
             let Some(ui) = weak.upgrade() else { return };
-            let (x, y) = to_physical(&ui, x, y);
-            if let Some(n) = with_loaded(|l| tree_view::hit_test(&l.rects, x, y)).flatten() {
+            if let Some(n) = node_at(&ui, x, y) {
                 select(&ui, n);
             }
         }
@@ -927,9 +1112,8 @@ fn wire_tree_and_treemap(ui: &MainWindow) {
         let weak = ui.as_weak();
         move |x, y| {
             let Some(ui) = weak.upgrade() else { return };
-            let (x, y) = to_physical(&ui, x, y);
             // The rects of the shown image, even while a newer layout is on its way.
-            if let Some(n) = with_loaded(|l| tree_view::hit_test(&l.rects, x, y)).flatten() {
+            if let Some(n) = node_at(&ui, x, y) {
                 open_node(&ui, n);
             }
         }
@@ -971,6 +1155,7 @@ fn wire_tree_and_treemap(ui: &MainWindow) {
         }
     });
     ui.on_tip_position(tree_view::tip_position);
+    ui.on_zoom_frame(|m, t| frame_at(&m, t));
     ui.on_theme_changed({
         let weak = ui.as_weak();
         move || {
@@ -1055,8 +1240,13 @@ fn main() {
     SESSION.with_borrow_mut(|s| s.timing = args.timing);
     let ui = MainWindow::new().expect("create window");
     // The renderer is chosen when the window is made (winit falls back to software when OpenGL
-    // cannot start), so the answer is final here. The notifier itself does nothing.
-    if !glow_drawn(ui.window().set_rendering_notifier(|_, _| {})) {
+    // cannot start), so the answer is final here. The notifier only counts the frames drawn.
+    let notifier = ui.window().set_rendering_notifier(|state, _| {
+        if matches!(state, slint::RenderingState::AfterRendering) {
+            FRAMES.with(|f| f.set(f.get() + 1));
+        }
+    });
+    if !glow_drawn(notifier) {
         eprintln!("This renderer draws no shadows. The hovered tile gets a border.");
         ui.set_glow(false);
     }
@@ -1117,6 +1307,7 @@ fn main() {
         if s.timing {
             let slowest = s.hover_slowest.as_secs_f64() * 1000.0;
             eprintln!("Hover changes: {}. Slowest hover: {slowest:.2} ms.", s.hover_changes);
+            eprintln!("Frames drawn: {}.", FRAMES.with(Cell::get));
         }
     });
 }

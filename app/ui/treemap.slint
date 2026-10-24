@@ -227,6 +227,20 @@ export component TreemapView inherits Rectangle {
     in property <bool> tip-visible;
     in property <length> tip-x;
     in property <length> tip-y;
+    /// The picture that moves in place of the map picture: the old picture that zooms in, or the new
+    /// one that zooms out.
+    in property <image> zoom-image;
+    /// Where the moving picture starts and ends, and how solid it is there.
+    in property <ZoomMove> zoom;
+    /// The moving picture shows. The labels, the outline, the hover and the tooltip do not.
+    in property <bool> zoom-shown;
+    /// The move runs: `zoom-t` goes from 0 to 1 in `zoom-duration` after `start-zoom()`.
+    in property <bool> zoom-running;
+    in property <duration> zoom-duration: 180ms;
+    /// Time of the move, 0 to 1. Reads the animation clock only while the move runs, so a move
+    /// that ended draws no more frames.
+    out property <float> zoom-t: root.zoom-running ? clamp((animation-tick() - root.zoom-start) / root.zoom-duration, 0, 1) : 1;
+    private property <duration> zoom-start;
 
     /// The pointer moved over the map, with no button down, to a point in logical pixels.
     callback hovered(float, float);
@@ -245,6 +259,13 @@ export component TreemapView inherits Rectangle {
     callback key(string);
     /// The view changed size, in logical pixels.
     callback resized(float, float);
+    /// Where the moving picture is at time t (0 to 1) of move `zoom`.
+    pure callback zoom-frame(ZoomMove, float) -> ZoomFrame;
+
+    /// The move starts now: `zoom-t` is 0.
+    public function start-zoom() {
+        root.zoom-start = animation-tick();
+    }
 
     /// Gives the map the keyboard focus.
     public function focus-map() {
@@ -264,14 +285,28 @@ export component TreemapView inherits Rectangle {
         height: 100%;
         clip: true;
         Image {
+            // A moving picture takes its place: the pictures are glass and would mix.
+            visible: !root.zoom-shown;
             width: 100%;
             height: 100%;
             source: root.source;
             image-fit: fill;
         }
+        // The moving picture, over the picture and cut at the map edge like it.
+        if root.zoom-shown : Image {
+            property <ZoomFrame> at: root.zoom-frame(root.zoom, root.zoom-t);
+            x: self.at.x;
+            y: self.at.y;
+            width: self.at.width;
+            height: self.at.height;
+            opacity: self.at.opacity;
+            source: root.zoom-image;
+            image-fit: fill;
+        }
         // Above the picture, so no frame cuts a label off. The name keeps its full width when it
         // fits and is cut with "…" when it does not; the size takes what is left.
         for l in root.labels : Rectangle {
+            visible: !root.zoom-shown;
             x: l.x;
             y: l.y;
             width: l.width;
@@ -301,6 +336,7 @@ export component TreemapView inherits Rectangle {
         }
         // File names on their tiles, in the tile's ink.
         for f in root.file-labels : FileLabelView {
+            visible: !root.zoom-shown;
             x: f.x;
             y: f.y;
             width: f.width;
@@ -317,7 +353,7 @@ export component TreemapView inherits Rectangle {
         }
     }
     // The selection outline, above the frames. It slides to the next selected node.
-    if root.has-selection : Rectangle {
+    if root.has-selection && !root.zoom-shown : Rectangle {
         x: root.selection-x;
         y: root.selection-y;
         width: root.selection-width;
@@ -327,7 +363,7 @@ export component TreemapView inherits Rectangle {
         animate x, y, width, height { duration: 120ms; easing: ease-out; }
     }
     // The hover, above everything in the map. A folder frame gets a light highlight, with no lift.
-    if root.hover.visible && !root.hover.lift : Rectangle {
+    if root.hover.visible && !root.hover.lift && !root.zoom-shown : Rectangle {
         x: root.hover.x;
         y: root.hover.y;
         width: root.hover.width;
@@ -340,7 +376,7 @@ export component TreemapView inherits Rectangle {
     // A file tile lifts 2 px and glows in its file-type colour. FemtoVG ignores drop-shadow-spread,
     // so a clear rect 3 px bigger on each side carries the shadow to give the glow more reach (P1
     // spike). Without shadows (software renderer) the tile gets a 2 px bright border instead.
-    if root.hover.visible && root.hover.lift : Rectangle {
+    if root.hover.visible && root.hover.lift && !root.zoom-shown : Rectangle {
         x: root.hover.x - 3px;
         y: root.hover.y - 2px - 3px;
         width: root.hover.width + 6px;
@@ -369,7 +405,7 @@ export component TreemapView inherits Rectangle {
     }
     // The tooltip of the hovered node, above the hover and inside the map: after the pointer when it
     // fits, else before it (the host's tip-position). A long path wraps at any character.
-    if root.tip-visible && root.hover.visible : Rectangle {
+    if root.tip-visible && root.hover.visible && !root.zoom-shown : Rectangle {
         width: min(tip-lines.preferred-width, min(root.width, 520px));
         height: tip-lines.preferred-height;
         x: root.tip-position(root.tip-x / 1px, self.width / 1px, root.width / 1px, 16) * 1px;

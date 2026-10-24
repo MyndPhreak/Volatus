@@ -188,8 +188,17 @@ pub enum ZoomWay {
 /// How the treemap moves from the picture of `shown`, drawn as `rects`, to folder `to`: in, when
 /// `to` is under `shown` and drawn; out, when `to` is above `shown`; else not at all.
 pub fn zoom_way(tree: &Tree, shown: Option<NodeId>, rects: &[Rect], to: NodeId) -> ZoomWay {
-    let _ = (tree, shown, rects, to);
-    todo!()
+    let Some(shown) = shown.filter(|&s| s != to) else {
+        return ZoomWay::Still;
+    };
+    let above = |low: NodeId, high: NodeId| std::iter::successors(tree.node(low).parent, |&p| tree.node(p).parent).any(|p| p == high);
+    if above(to, shown) {
+        selection_bounds(rects, to).map_or(ZoomWay::Still, ZoomWay::In)
+    } else if above(shown, to) {
+        ZoomWay::Out(shown)
+    } else {
+        ZoomWay::Still
+    }
 }
 
 /// Map text for a folder with no file that has a size.
