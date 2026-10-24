@@ -70,9 +70,10 @@ impl Chrome {
         Chrome { header: 16.0 * scale, pad: 2.0 * scale }
     }
 
-    /// True when `r` is big enough for a label band.
+    /// True when `r` is big enough for a label band: 28 x 24 logical px at a 16 px band. Then
+    /// the band is at least 24 px wide, so the label minimum width decides the narrowest label.
     pub fn has_header(&self, r: &Rect) -> bool {
-        self.header > 0.0 && r.w >= 3.0 * self.header && r.h >= 2.0 * self.header
+        self.header > 0.0 && r.w >= 1.75 * self.header && r.h >= 1.5 * self.header
     }
 
     /// The area `(x, y, w, h)` inside folder `r` where its children go.
