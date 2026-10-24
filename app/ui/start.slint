@@ -1,0 +1,139 @@
+import { Button, Palette, ScrollView } from "std-widgets.slint";
+import { Glass } from "theme.slint";
+
+/// One drive button of the start screen. Text is formatted by the host.
+export struct DriveButton {
+    root: string,
+    title: string,
+    detail: string,
+    note: string,
+    /// Share of the drive in use, 0..1.
+    used: float,
+    /// False when the host could not read the size: no bar.
+    size-known: bool,
+}
+
+/// A glass button for one drive: name, free space, a used/free bar and a note.
+component DriveTile inherits Rectangle {
+    in property <DriveButton> drive;
+    callback clicked();
+
+    height: root.drive.note != "" ? 104px : 84px;
+    border-radius: 8px;
+    background: (touch.has-hover || focus.has-focus) ? Glass.fill-hover : Glass.fill;
+    border-width: focus.has-focus ? 2px : 1px;
+    border-color: focus.has-focus ? Palette.accent-background : Glass.border;
+    focus := FocusScope {
+        accessible-role: button;
+        accessible-label: "Scan \{root.drive.title}. \{root.drive.detail}" + (root.drive.size-known ? "." : "");
+        accessible-action-default => { root.clicked(); }
+        key-pressed(event) => {
+            if (event.text == Key.Return || event.text == " ") {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+        VerticalLayout {
+            padding: 12px;
+            spacing: 4px;
+            Text {
+                text: root.drive.title;
+                font-size: 15px;
+                font-weight: 700;
+                overflow: elide;
+                accessible-role: none;
+            }
+            Text {
+                text: root.drive.detail;
+                font-size: 13px;
+                color: Glass.dim;
+                overflow: elide;
+                accessible-role: none;
+            }
+            if root.drive.size-known : Rectangle {
+                height: 6px;
+                border-radius: 3px;
+                background: Glass.track;
+                Rectangle {
+                    x: 0px;
+                    width: parent.width * clamp(root.drive.used, 0, 1);
+                    border-radius: 3px;
+                    background: Palette.accent-background;
+                }
+            }
+            if root.drive.note != "" : Text {
+                text: root.drive.note;
+                font-size: 11px;
+                color: Glass.dim;
+                accessible-role: none;
+            }
+        }
+        // The light edge on top of the glass.
+        Rectangle {
+            x: 8px;
+            y: 0px;
+            width: parent.width - 16px;
+            height: 1px;
+            background: Glass.highlight;
+        }
+        touch := TouchArea {
+            mouse-cursor: pointer;
+            clicked => {
+                focus.focus();
+                root.clicked();
+            }
+        }
+    }
+}
+
+/// The first screen: one glass button per drive and "Choose folder".
+export component StartScreen inherits Rectangle {
+    in property <[DriveButton]> drives;
+    /// The host is still looking for drives.
+    in property <bool> loading;
+    /// Why the screen is shown: the hint, "Scan stopped" or the error of the last scan.
+    in property <string> message;
+    in property <bool> message-is-error;
+    /// True while the folder dialog is open.
+    in property <bool> browsing;
+
+    callback scan-drive(string);
+    callback choose-folder();
+
+    ScrollView {
+        HorizontalLayout {
+            alignment: center;
+            padding: 32px;
+            VerticalLayout {
+                width: min(root.width - 64px, 460px);
+                spacing: 12px;
+                alignment: start;
+                Text {
+                    text: root.message;
+                    wrap: word-wrap;
+                    horizontal-alignment: center;
+                    color: root.message-is-error ? #d13438 : Palette.foreground;
+                    accessible-role: text;
+                }
+                if root.drives.length == 0 : Text {
+                    text: root.loading ? "Looking for drives." : "No drives found. Choose a folder.";
+                    wrap: word-wrap;
+                    horizontal-alignment: center;
+                    color: Glass.dim;
+                    accessible-role: text;
+                }
+                for d in root.drives : DriveTile {
+                    drive: d;
+                    clicked => { root.scan-drive(d.root); }
+                }
+                Button {
+                    height: 36px;
+                    text: "Choose folder";
+                    enabled: !root.browsing;
+                    clicked => { root.choose-folder(); }
+                }
+            }
+        }
+    }
+}

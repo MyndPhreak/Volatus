@@ -1,0 +1,12 @@
+import { Palette } from "std-widgets.slint";
+
+/// Glass tokens: translucent fills over the Mica window, in both themes.
+export global Glass {
+    out property <bool> dark: Palette.color-scheme == ColorScheme.dark;
+    out property <color> fill: root.dark ? #ffffff12 : #ffffffa6;
+    out property <color> fill-hover: root.dark ? #ffffff22 : #ffffffd9;
+    out property <color> border: root.dark ? #ffffff30 : #00000026;
+    out property <color> highlight: root.dark ? #ffffff40 : #ffffffff;
+    out property <color> track: root.dark ? #ffffff26 : #0000001f;
+    out property <color> dim: Palette.foreground.transparentize(35%);
+}

@@ -1,6 +1,7 @@
-import { Button, ComboBox, LineEdit, VerticalBox, HorizontalBox, ProgressIndicator, Palette, ListView } from "std-widgets.slint";
+import { Button, VerticalBox, HorizontalBox, ProgressIndicator, Palette, ListView } from "std-widgets.slint";
 import { FrameLabel, Keys, TreemapView } from "treemap.slint";
-export { FrameLabel }
+import { DriveButton, StartScreen } from "start.slint";
+export { FrameLabel, DriveButton }
 
 /// One visible line of the file tree. Text is formatted by the host.
 export struct TreeRow {
@@ -71,13 +72,21 @@ export component MainWindow inherits Window {
     preferred-height: 700px;
     min-height: 400px;
 
-    in property <[string]> drives;
     in property <bool> scanning;
     in property <string> banner;
     // True while the folder dialog is open.
     in property <bool> browsing;
     in property <bool> banner-is-error;
-    in-out property <string> path;
+
+    // Start screen
+    /// The start screen is shown: nothing is scanning and no result is shown.
+    in property <bool> start-screen: true;
+    /// One button per ready drive.
+    in property <[DriveButton]> drive-buttons;
+    /// The host is still looking for drives.
+    in property <bool> drives-loading: true;
+    /// A scan is finished: "New scan" is offered.
+    in property <bool> show-new-scan;
 
     // File tree
     in property <[TreeRow]> rows;
@@ -109,9 +118,11 @@ export component MainWindow inherits Window {
     in property <bool> show-elevate;
     in property <string> elevate-note;
 
-    callback scan(string);
+    /// A drive button was used. The argument is the drive root, such as "C:\".
+    callback scan-drive(string);
+    callback choose-folder();
+    callback new-scan();
     callback cancel();
-    callback browse();
     callback tree-select(int);
     callback tree-toggle(int);
     callback tree-sort(int);
@@ -127,11 +138,6 @@ export component MainWindow inherits Window {
     /// The system theme changed between light and dark.
     callback theme-changed();
 
-    /// Puts the drive box back to its label. The path was changed by hand or by Browse.
-    public function reset-drive() {
-        drive-box.current-index = 0;
-    }
-
     /// Scrolls the file tree so row `i` is inside the view.
     public function show-row(i: int) {
         if (i * 24px < -list.content-y) {
@@ -141,45 +147,35 @@ export component MainWindow inherits Window {
         }
     }
 
+    if root.start-screen : StartScreen {
+        width: 100%;
+        height: 100%;
+        drives: root.drive-buttons;
+        loading: root.drives-loading;
+        message: root.banner;
+        message-is-error: root.banner-is-error;
+        browsing: root.browsing;
+        scan-drive(drive) => { root.scan-drive(drive); }
+        choose-folder => { root.choose-folder(); }
+    }
+    // The results stay in the tree while the start screen shows, so the file tree keeps its scroll
+    // function; hidden, they take no input.
     VerticalBox {
+        visible: !root.start-screen;
+        width: 100%;
+        height: 100%;
         spacing: 12px;
         HorizontalBox {
             padding: 0;
-            drive-box := ComboBox {
-                model: root.drives;
-                enabled: !root.scanning;
-                accessible-label: "Drive";
-                // Row 0 is a label ("Choose drive"), not a drive. A ComboBox cannot show text that is not in its model.
-                current-index: 0;
-                selected(drive) => { if (self.current-index > 0) { root.path = drive; } }
-            }
-            LineEdit {
-                placeholder-text: "Folder or drive";
-                accessible-label: "Folder or drive path";
-                text <=> root.path;
-                enabled: !root.scanning;
-                edited => { drive-box.current-index = 0; }
-                accepted => { if (!root.scanning) { root.scan(root.path); } }
-            }
-            Button {
-                text: "Browse";
-                enabled: !root.scanning && !root.browsing;
-                clicked => { root.browse(); }
-            }
-        }
-        HorizontalBox {
-            padding: 0;
             alignment: start;
-            Button {
-                text: "Scan";
-                primary: true;
-                enabled: !root.scanning;
-                clicked => { root.scan(root.path); }
-            }
-            Button {
+            if root.scanning : Button {
                 text: "Cancel";
-                enabled: root.scanning;
                 clicked => { root.cancel(); }
+            }
+            if root.show-new-scan : Button {
+                text: "New scan";
+                primary: true;
+                clicked => { root.new-scan(); }
             }
             if root.show-elevate : Button {
                 text: "Restart as administrator";

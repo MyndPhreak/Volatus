@@ -18,7 +18,7 @@ mod tree_view;
 use browse::BrowseState;
 use model::{
     Event, ScanControl, ScanState, Summary, TimingRun, append_timing, banner_text, error_message, format_size,
-    group_digits, offer_elevation, timing_for_state,
+    group_digits, offer_elevation, shows_start, timing_for_state,
 };
 use nav::{Dir, TreeMove};
 use scan::{NodeId, Progress, ScanError, Tree};
@@ -27,7 +27,7 @@ use slint::{
     Timer, TimerMode, VecModel, Weak,
 };
 use std::cell::RefCell;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
@@ -130,6 +130,8 @@ struct Session {
     timing: bool,
     /// Timings of the latest scan. `None` unless `timing` is set and a scan started.
     run: Option<TimingRun>,
+    /// Id of the latest drive list request. Results of older requests are dropped.
+    drives_seq: u64,
 }
 
 thread_local! {
@@ -142,6 +144,7 @@ thread_local! {
         browse: BrowseState::default(),
         timing: false,
         run: None,
+        drives_seq: 0,
     });
     /// Starts one relayout after the window stops changing the treemap size.
     static RESIZE_TIMER: Timer = Timer::default();
@@ -158,6 +161,12 @@ fn apply(ui: &MainWindow, generation: u64, event: Event) {
 /// Pushes the scan state into the window.
 fn show_state(ui: &MainWindow) {
     let state = SESSION.with_borrow(|s| s.scan.state().clone());
+    let start = shows_start(&state);
+    if start && !ui.get_start_screen() {
+        refresh_drives(ui);
+    }
+    ui.set_start_screen(start);
+    ui.set_show_new_scan(matches!(state, ScanState::Done(_)));
     ui.set_scanning(matches!(state, ScanState::Scanning { .. }));
     ui.set_banner_is_error(matches!(state, ScanState::Error(_)));
     let root = SESSION.with_borrow(|s| s.scan_root.clone());
@@ -492,15 +501,48 @@ fn start_scan(ui: &MainWindow, path: &str) {
     });
 }
 
-/// Label shown in the drive box until the user picks a drive. Row 0 of the model.
-const DRIVE_LABEL: &str = "Choose drive";
+/// Looks for the drives on a worker thread (a sleeping disk can take seconds) and shows them as
+/// buttons on the start screen. The old buttons stay until the new list arrives. A result is
+/// dropped if a newer request started meanwhile.
+fn refresh_drives(ui: &MainWindow) {
+    let seq = SESSION.with_borrow_mut(|s| {
+        s.drives_seq += 1;
+        s.drives_seq
+    });
+    ui.set_drives_loading(true);
+    let weak = ui.as_weak();
+    std::thread::spawn(move || {
+        let buttons = drives::drive_buttons(&drives::list(), elevate::is_admin());
+        // Err means the event loop has stopped: nothing left to update.
+        let _ = slint::invoke_from_event_loop(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            if SESSION.with_borrow(|s| s.drives_seq) != seq {
+                return;
+            }
+            ui.set_drive_buttons(ModelRc::new(VecModel::from(buttons.into_iter().map(drive_button).collect::<Vec<_>>())));
+            ui.set_drives_loading(false);
+        });
+    });
+}
 
-/// The drive box rows: the label, then the existing drive roots `A:\` to `Z:\`.
-fn drive_roots() -> Vec<SharedString> {
-    std::iter::once(DRIVE_LABEL.to_string())
-        .chain(('A'..='Z').map(|c| format!("{c}:\\")).filter(|d| Path::new(d).exists()))
-        .map(Into::into)
-        .collect()
+/// The window's form of drive button `b`.
+fn drive_button(b: drives::DriveButton) -> DriveButton {
+    DriveButton {
+        root: b.root.into(),
+        title: b.title.into(),
+        detail: b.detail.into(),
+        note: b.note.into(),
+        used: b.used,
+        size_known: b.size_known,
+    }
+}
+
+/// "New scan": leaves the finished scan, drops its data and shows the start screen.
+fn new_scan(ui: &MainWindow) {
+    if SESSION.with_borrow_mut(|s| s.scan.reset()) {
+        clear(ui);
+        show_state(ui);
+    }
 }
 
 /// Window position in logical pixels to the treemap's physical pixels.
@@ -704,7 +746,8 @@ fn wire_tree_and_treemap(ui: &MainWindow) {
         let weak = ui.as_weak();
         move || {
             let Some(ui) = weak.upgrade() else { return };
-            match restart_admin(ui.get_path().trim(), elevate::restart_as_admin) {
+            let root = SESSION.with_borrow(|s| s.scan_root.to_string_lossy().into_owned());
+            match restart_admin(&root, elevate::restart_as_admin) {
                 Ok(()) => {
                     let _ = slint::quit_event_loop();
                 }
@@ -740,16 +783,16 @@ fn start_browse(ui: &MainWindow) {
     }
 }
 
-/// The dialog closed. A chosen folder goes into the path box; a cancelled dialog changes nothing.
+/// The dialog closed. A chosen folder is scanned; a cancelled dialog changes nothing.
 fn finish_browse(ui: &MainWindow, picked: Option<PathBuf>) {
-    if let Some(dir) = SESSION.with_borrow_mut(|s| s.browse.finish(picked)) {
-        ui.set_path(dir.to_string_lossy().as_ref().into());
-        ui.invoke_reset_drive();
-    }
+    let dir = SESSION.with_borrow_mut(|s| s.browse.finish(picked));
     sync_browsing(ui);
+    if let Some(dir) = dir {
+        start_scan(ui, &dir.to_string_lossy());
+    }
 }
 
-/// Disables the Browse button while a dialog is open.
+/// Disables the "Choose folder" button while a dialog is open.
 fn sync_browsing(ui: &MainWindow) {
     ui.set_browsing(SESSION.with_borrow(|s| s.browse.is_open()));
 }
@@ -758,13 +801,20 @@ fn main() {
     let args = cli::parse_args(std::env::args().skip(1));
     SESSION.with_borrow_mut(|s| s.timing = args.timing);
     let ui = MainWindow::new().expect("create window");
-    ui.set_drives(ModelRc::new(VecModel::from(drive_roots())));
     ui.set_banner(banner_text(&ScanState::Idle, false).into());
-    ui.on_scan({
+    ui.on_scan_drive({
         let weak = ui.as_weak();
-        move |path| {
+        move |root| {
             if let Some(ui) = weak.upgrade() {
-                start_scan(&ui, &path);
+                start_scan(&ui, &root);
+            }
+        }
+    });
+    ui.on_new_scan({
+        let weak = ui.as_weak();
+        move || {
+            if let Some(ui) = weak.upgrade() {
+                new_scan(&ui);
             }
         }
     });
@@ -776,7 +826,7 @@ fn main() {
             }
         }
     });
-    ui.on_browse({
+    ui.on_choose_folder({
         let weak = ui.as_weak();
         move || {
             if let Some(ui) = weak.upgrade() {
@@ -799,8 +849,9 @@ fn main() {
     .expect("queue Mica setup");
     // Started by "Restart as administrator": scan the folder that was open.
     if let Some(path) = args.path {
-        ui.set_path(path.as_str().into());
         start_scan(&ui, &path);
+    } else {
+        refresh_drives(&ui);
     }
     slint::run_event_loop().expect("run event loop");
 }
@@ -940,6 +991,14 @@ mod tests {
         let late = data();
         let generation = show_finished_scan(&shown);
         assert!(!store_chips(generation, &late, chips()));
+        assert_eq!(kept_chips(), None);
+    }
+
+    #[test]
+    fn store_chips_result_of_an_older_scan_for_the_shown_data_is_dropped() {
+        let d = data();
+        let generation = show_finished_scan(&d);
+        assert!(!store_chips(generation - 1, &d, chips()));
         assert_eq!(kept_chips(), None);
     }
 
