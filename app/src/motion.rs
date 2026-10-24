@@ -126,6 +126,16 @@ mod tests {
         assert_eq!(landing(false, false, LEFT, LEFT, RECT), Landing::Still);
     }
 
+    #[test]
+    fn landing_first_picture_of_a_scan_fades_in() {
+        assert_eq!(landing(true, true, None, None, None), Landing::Fade);
+    }
+
+    #[test]
+    fn landing_first_picture_of_a_scan_fades_in_also_after_an_up() {
+        assert_eq!(landing(true, true, LEFT, LEFT, RECT), Landing::Fade);
+    }
+
     #[cfg(windows)]
     #[test]
     fn client_area_animation_reads_the_setting() {
