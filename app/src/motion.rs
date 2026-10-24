@@ -14,7 +14,6 @@ pub enum Kind {
     /// glass, so two of them over each other would mix: only one moves.)
     Out,
     /// The first picture of a scan fades in.
-    #[allow(dead_code, reason = "the fade comes in P8.T2")]
     Fade,
 }
 
@@ -34,7 +33,6 @@ pub fn holds_layout(moving: Option<Kind>, running: bool) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Landing {
     /// The new picture fades in.
-    #[allow(dead_code, reason = "the fade comes in P8.T2")]
     Fade,
     /// The new picture zooms out from this rect of it (`Kind::Out`).
     Out(Frame),
@@ -47,9 +45,10 @@ pub enum Landing {
 /// (`tree_view::ZoomWay::Out`), with `out_rect` its rect (or the rect of its nearest drawn folder)
 /// in the new picture. It zooms out only when the old picture shows `out_from`.
 pub fn landing(allowed: bool, first: bool, out_from: Option<NodeId>, old_root: Option<NodeId>, out_rect: Option<Frame>) -> Landing {
-    let _ = first;
     match out_rect {
-        Some(r) if allowed && out_from.is_some() && out_from == old_root => Landing::Out(r),
+        _ if !allowed => Landing::Still,
+        _ if first => Landing::Fade,
+        Some(r) if out_from.is_some() && out_from == old_root => Landing::Out(r),
         _ => Landing::Still,
     }
 }
@@ -134,6 +133,11 @@ mod tests {
     #[test]
     fn landing_first_picture_of_a_scan_fades_in_also_after_an_up() {
         assert_eq!(landing(true, true, LEFT, LEFT, RECT), Landing::Fade);
+    }
+
+    #[test]
+    fn landing_first_picture_of_a_scan_with_motion_off_shows_at_once() {
+        assert_eq!(landing(false, true, None, None, None), Landing::Still);
     }
 
     #[cfg(windows)]

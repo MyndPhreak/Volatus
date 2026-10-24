@@ -163,6 +163,8 @@ struct Session {
     /// The folder that the last "up" left. When the layout of the folder above lands, the old
     /// picture shrinks into it.
     out_from: Option<NodeId>,
+    /// The next layout to land is the first picture of a scan: it fades in.
+    fade_next: bool,
 }
 
 /// A finished layout of folder `root`: its rects in physical pixels, its picture and its labels.
@@ -205,6 +207,7 @@ thread_local! {
         moving: None,
         held: None,
         out_from: None,
+        fade_next: false,
     });
     /// Starts one relayout after the window stops changing the treemap size.
     static RESIZE_TIMER: Timer = Timer::default();
@@ -218,6 +221,8 @@ thread_local! {
 
 /// Time of a zoom in or out.
 const ZOOM_TIME: Duration = Duration::from_millis(180);
+/// Time of the fade in of the first picture of a scan.
+const FADE_TIME: Duration = Duration::from_millis(250);
 
 /// Applies `event` from scan `generation` and shows the new state. Dropped if a newer scan
 /// started or the scan was cancelled.
@@ -550,8 +555,8 @@ fn frame_at(m: &ZoomMove, t: f32) -> ZoomFrame {
 }
 
 /// A layout of the current request landed. It waits while a zoom in runs (`motion::holds_layout`);
-/// else it shows at once, in the same frame as the moving picture hides, and it may zoom out from
-/// the folder that going up left (`motion::landing`).
+/// else it shows at once, in the same frame as the moving picture hides. Then it fades in (the
+/// first picture of a scan) or zooms out from the folder that going up left (`motion::landing`).
 fn land(ui: &MainWindow, layout: Layout) {
     let hold = SESSION.with_borrow(|s| motion::holds_layout(s.moving.map(|m| m.kind), s.moving.is_some_and(|m| m.running)));
     if hold {
@@ -559,7 +564,7 @@ fn land(ui: &MainWindow, layout: Layout) {
         return;
     }
     let old_root = with_loaded(|l| l.shown_root).flatten();
-    let out_from = SESSION.with_borrow_mut(|s| s.out_from.take());
+    let (out_from, first) = SESSION.with_borrow_mut(|s| (s.out_from.take(), std::mem::take(&mut s.fade_next)));
     show_layout(ui, layout);
     stop_move(ui);
     let out_rect = out_from.and_then(|left| {
@@ -569,12 +574,16 @@ fn land(ui: &MainWindow, layout: Layout) {
         })
         .flatten()
     });
-    let landing = motion::landing(motion_on(), false, out_from, old_root, out_rect);
-    if let (motion::Landing::Out((x, y, rw, rh)), Some(left)) = (landing, out_from) {
-        let (w, h) = map_px(ui);
-        if let Some(from) = treemap::zoom_frame(&Rect { node: left, x, y, w: rw, h: rh }, w, h) {
-            start_move(ui, motion::Kind::Out, ui.get_treemap(), from, (0.0, 0.0, w, h), (1.0, 1.0));
+    let (w, h) = map_px(ui);
+    let full = (0.0, 0.0, w, h);
+    match (motion::landing(motion_on(), first, out_from, old_root, out_rect), out_from) {
+        (motion::Landing::Fade, _) => start_move(ui, motion::Kind::Fade, ui.get_treemap(), full, full, (0.0, 1.0)),
+        (motion::Landing::Out((x, y, rw, rh)), Some(left)) => {
+            if let Some(from) = treemap::zoom_frame(&Rect { node: left, x, y, w: rw, h: rh }, w, h) {
+                start_move(ui, motion::Kind::Out, ui.get_treemap(), from, full, (1.0, 1.0));
+            }
         }
+        _ => {}
     }
 }
 
@@ -605,7 +614,8 @@ fn start_move(ui: &MainWindow, kind: motion::Kind, image: Image, from: Frame, to
     };
     ui.set_zoom_image(image);
     ui.set_zoom(ZoomMove { from: logical(from, opacity.0), to: logical(to, opacity.1) });
-    ui.set_zoom_duration(ZOOM_TIME.as_millis() as i64);
+    let time = if kind == motion::Kind::Fade { FADE_TIME } else { ZOOM_TIME };
+    ui.set_zoom_duration(time.as_millis() as i64);
     ui.set_zoom_running(true);
     ui.set_zoom_shown(true);
     ui.invoke_start_zoom();
@@ -614,7 +624,7 @@ fn start_move(ui: &MainWindow, kind: motion::Kind, image: Image, from: Frame, to
     drop_hover(ui);
     let weak = ui.as_weak();
     MOVE_TIMER.with(|t| {
-        t.start(TimerMode::SingleShot, ZOOM_TIME, move || {
+        t.start(TimerMode::SingleShot, time, move || {
             if let Some(ui) = weak.upgrade() {
                 move_time_up(&ui);
             }
@@ -721,6 +731,7 @@ fn install(ui: &MainWindow, data: Arc<Data>) {
             shown_root: None,
             chips: None,
         });
+        s.fade_next = true;
     });
     sync_rows(ui);
     relayout(ui);
@@ -789,6 +800,7 @@ fn clear(ui: &MainWindow) {
         s.loaded = None;
         s.held = None;
         s.out_from = None;
+        s.fade_next = false;
     });
     ui.set_rows(ModelRc::default());
     ui.set_treemap(Image::default());
