@@ -353,3 +353,12 @@ fn type_totals_six_million_files_take_under_two_seconds() {
     assert_eq!((totals.len(), files), (2_000, 6_000_000));
     assert!(took.as_secs_f64() < 2.0, "took {took:?}");
 }
+
+#[test]
+fn category_of_build_files_is_code_not_program() {
+    let names = ["a.pdb", "a.rlib", "a.rmeta", "a.pch", "a.o", "a.obj", "a.lib", "a.a", "a.ilk"];
+
+    let cats: Vec<Category> = names.iter().map(|n| category_of(n)).collect();
+
+    assert_eq!(cats, vec![Category::Code; names.len()]);
+}
