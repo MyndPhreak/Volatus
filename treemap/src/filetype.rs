@@ -68,13 +68,14 @@ pub fn category_of_ext(ext: &str) -> Category {
         "zip" | "7z" | "rar" | "tar" | "gz" | "tgz" | "bz2" | "xz" | "zst" | "lz4" | "lzma" | "cab" | "jar"
         | "nupkg" | "whl" | "crate" | "apk" | "zipx" => Archive,
         "exe" | "dll" | "sys" | "msi" | "msp" | "msix" | "appx" | "efi" | "drv" | "ocx" | "cpl" | "mui"
-        | "com" | "scr" | "so" | "dylib" | "node" | "winmd" | "pyd" | "lib" | "a" | "o" | "obj" | "rlib"
-        | "rmeta" | "pdb" | "pch" | "ilk" => Program,
+        | "com" | "scr" | "so" | "dylib" | "node" | "winmd" | "pyd" => Program,
         "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "odt" | "ods" | "odp" | "rtf" | "txt"
         | "md" | "epub" | "one" | "chm" => Document,
         "rs" | "c" | "h" | "cpp" | "hpp" | "cc" | "cs" | "java" | "kt" | "py" | "js" | "mjs" | "cjs" | "ts"
         | "tsx" | "jsx" | "go" | "rb" | "php" | "swift" | "lua" | "sh" | "ps1" | "bat" | "cmd" | "html" | "htm"
-        | "css" | "scss" | "vue" | "sql" | "slint" | "map" => Code,
+        | "css" | "scss" | "vue" | "sql" | "slint" | "map"
+        // Build files: with the source, not with the programs, so a build folder shows both.
+        | "lib" | "a" | "o" | "obj" | "rlib" | "rmeta" | "pdb" | "pch" | "ilk" => Code,
         "iso" | "img" | "vhd" | "vhdx" | "vmdk" | "qcow2" | "vdi" | "wim" | "esd" | "swm" | "dmg" => DiskImage,
         "pak" | "ucas" | "utoc" | "uasset" | "uexp" | "ubulk" | "umap" | "ba2" | "bsa" | "esm" | "esp" | "vpk"
         | "forge" | "bundle" | "assets" | "resource" | "unity3d" | "rpf" | "pck" | "wad" | "minizip" => GameData,
