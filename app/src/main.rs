@@ -149,6 +149,8 @@ struct Session {
     hover_changes: u64,
     /// Latest pointer position over the treemap, in logical pixels.
     pointer: (f32, f32),
+    /// Where the tooltip is in its life (see the tip module).
+    tip: tip::TipState,
     /// Longest time one pointer move took on the UI thread. With `--timing` it is printed at exit.
     hover_slowest: Duration,
 }
@@ -167,6 +169,7 @@ thread_local! {
         hovered: None,
         hover_changes: 0,
         pointer: (0.0, 0.0),
+        tip: tip::TipState::Idle,
         hover_slowest: Duration::ZERO,
     });
     /// Starts one relayout after the window stops changing the treemap size.
@@ -201,7 +204,7 @@ fn show_state(ui: &MainWindow) {
     let line = SESSION.with_borrow(|s| timing_for_state(&state, s.run.as_ref().and_then(TimingRun::line)));
     ui.set_banner(append_timing(banner_text(&state, offer), line.as_deref()).into());
     ui.set_show_elevate(offer);
-    ui.set_scan_title(SESSION.with_borrow(|s| s.scan_root.display().to_string()).into());
+    ui.set_scan_title(SESSION.with_borrow(|s| model::scan_title(&s.scan_root)).into());
 }
 
 fn with_loaded<R>(f: impl FnOnce(&mut Loaded) -> R) -> Option<R> {
@@ -380,14 +383,15 @@ fn node_at(ui: &MainWindow, x: f32, y: f32) -> Option<NodeId> {
 }
 
 /// The pointer moved over the treemap to (x, y) in logical pixels. The window gets new hover
-/// properties only when the node under the pointer changes: no layout, no new picture.
+/// properties only when the node under the pointer changes: no layout, no new picture. Only a
+/// real pointer move arms the tooltip again after a key, a click, a scroll or a new layout.
 fn hover(ui: &MainWindow, x: f32, y: f32) {
     let started = Instant::now();
     SESSION.with_borrow_mut(|s| s.pointer = (x, y));
     let node = node_at(ui, x, y);
-    if note_hover(node) {
-        show_hover(ui, node);
-    }
+    let changed = note_hover(node);
+    let over = if changed { show_hover(ui, node) } else { node.is_some() };
+    tip_event(ui, tip::TipEvent::Moved { over, changed });
     let took = started.elapsed();
     SESSION.with_borrow_mut(|s| s.hover_slowest = s.hover_slowest.max(took));
 }
@@ -397,42 +401,61 @@ fn leave(ui: &MainWindow) {
     if note_hover(None) {
         show_hover(ui, None);
     }
+    tip_event(ui, tip::TipEvent::Leave);
 }
 
-/// The shown rects changed: the hover moves to the node under the pointer in the new layout. Only
-/// while the pointer is on the map.
-fn refresh_hover(ui: &MainWindow) {
-    if let Some((x, y)) = SESSION.with_borrow(|s| s.hovered.map(|_| s.pointer)) {
-        let node = node_at(ui, x, y);
-        note_hover(node);
-        show_hover(ui, node);
+/// The shown rects changed or the shown folder changes: the old hover and tooltip go. The node
+/// under a pointer that has not moved is not looked up; the next pointer move finds it.
+fn drop_hover(ui: &MainWindow) {
+    if note_hover(None) {
+        show_hover(ui, None);
     }
+    tip_event(ui, tip::TipEvent::Layout);
 }
 
-/// Pushes the hover properties of `node` (`None`: nothing hovered) into the window. The tooltip
-/// of the old node hides; the one of the new node shows after `TIP_DELAY`, at the pointer.
-fn show_hover(ui: &MainWindow, node: Option<NodeId>) {
+/// Pushes the hover properties of `node` (`None`: nothing hovered) into the window. True when
+/// the hover is visible.
+fn show_hover(ui: &MainWindow, node: Option<NodeId>) -> bool {
     let scale = f64::from(ui.window().scale_factor());
     let theme = if ui.get_dark() { Theme::Dark } else { Theme::Light };
     let hover = node.and_then(|n| with_loaded(|l| hover_of(&l.data, &l.rects, n, scale, theme))).unwrap_or_default();
     let shown = hover.visible;
     ui.set_hover(hover);
-    hide_tip(ui);
-    if shown {
-        let weak = ui.as_weak();
-        TIP_TIMER.with(|t| {
-            t.start(TimerMode::SingleShot, TIP_DELAY, move || {
-                let Some(ui) = weak.upgrade() else { return };
-                let (x, y) = SESSION.with_borrow(|s| s.pointer);
-                ui.set_tip_x(x);
-                ui.set_tip_y(y);
-                ui.set_tip_visible(true);
-            })
-        });
+    shown
+}
+
+/// Feeds `event` to the tooltip state machine and does what it says: the tooltip of the old node
+/// hides; the one of the new node shows after `TIP_DELAY`, at the pointer.
+fn tip_event(ui: &MainWindow, event: tip::TipEvent) {
+    let action = SESSION.with_borrow_mut(|s| {
+        let (next, action) = tip::step(s.tip, event);
+        s.tip = next;
+        action
+    });
+    match action {
+        tip::TipAction::None => {}
+        tip::TipAction::Hide => hide_tip(ui),
+        tip::TipAction::Show => {
+            let (x, y) = SESSION.with_borrow(|s| s.pointer);
+            ui.set_tip_x(x);
+            ui.set_tip_y(y);
+            ui.set_tip_visible(true);
+        }
+        tip::TipAction::Start => {
+            hide_tip(ui);
+            let weak = ui.as_weak();
+            TIP_TIMER.with(|t| {
+                t.start(TimerMode::SingleShot, TIP_DELAY, move || {
+                    if let Some(ui) = weak.upgrade() {
+                        tip_event(&ui, tip::TipEvent::Timer);
+                    }
+                })
+            });
+        }
     }
 }
 
-/// Hides the tooltip, also one still waiting for `TIP_DELAY`. It shows again for the next node.
+/// Hides the tooltip, also one still waiting for `TIP_DELAY`.
 fn hide_tip(ui: &MainWindow) {
     TIP_TIMER.with(Timer::stop);
     ui.set_tip_visible(false);
@@ -466,7 +489,7 @@ fn show_layout(
         ui.set_crumbs(ModelRc::new(VecModel::from(crumbs)));
     }
     sync_selection(ui);
-    refresh_hover(ui);
+    drop_hover(ui);
     note_treemap_shown(ui);
 }
 
@@ -753,6 +776,7 @@ fn toggle_row(ui: &MainWindow, i: i32) {
 /// Shows `folder` in the treemap. Lays it out again only if it is not the shown folder.
 fn show_folder(ui: &MainWindow, folder: NodeId) {
     if with_loaded(|l| std::mem::replace(&mut l.view_root, folder) != folder) == Some(true) {
+        drop_hover(ui);
         relayout(ui);
     }
 }
@@ -834,6 +858,7 @@ fn wire_tree_and_treemap(ui: &MainWindow) {
         let weak = ui.as_weak();
         move |key| {
             if let Some(ui) = weak.upgrade() {
+                tip_event(&ui, tip::TipEvent::Key);
                 tree_key(&ui, &key);
             }
         }
@@ -842,6 +867,7 @@ fn wire_tree_and_treemap(ui: &MainWindow) {
         let weak = ui.as_weak();
         move |key| {
             if let Some(ui) = weak.upgrade() {
+                tip_event(&ui, tip::TipEvent::Key);
                 map_key(&ui, &key);
             }
         }
@@ -927,9 +953,9 @@ fn wire_tree_and_treemap(ui: &MainWindow) {
     });
     ui.on_treemap_hide_tip({
         let weak = ui.as_weak();
-        move || {
+        move |scrolled| {
             if let Some(ui) = weak.upgrade() {
-                hide_tip(&ui);
+                tip_event(&ui, if scrolled { tip::TipEvent::Scroll } else { tip::TipEvent::Click });
             }
         }
     });

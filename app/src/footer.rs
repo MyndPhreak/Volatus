@@ -1,5 +1,6 @@
 //! File-type footer: the chips for the biggest file types. Plain functions, no Slint types.
 
+use crate::model::display_name;
 use crate::tree_view::format_percent;
 use treemap::filetype::{Category, TypeTotal, category_of_ext};
 
@@ -41,7 +42,7 @@ pub fn chips(totals: &[TypeTotal], total: u64, max: usize) -> Vec<Chip> {
     let mut out: Vec<Chip> = top
         .iter()
         .map(|t| {
-            let label = if t.ext.is_empty() { NO_EXTENSION.to_string() } else { format!(".{}", t.ext) };
+            let label = if t.ext.is_empty() { NO_EXTENSION.to_string() } else { format!(".{}", display_name(&t.ext)) };
             chip(label, t.bytes, category_of_ext(&t.ext))
         })
         .collect();

@@ -218,7 +218,8 @@ export component TreemapView inherits Rectangle {
     /// The pointer left the map.
     callback left();
     /// A button press or a scroll on the map: the tooltip hides.
-    callback hide-tip();
+    /// A button went down (false) or the wheel turned (true): the tooltip hides until the pointer moves.
+    callback hide-tip(bool);
     /// Where the tooltip starts on one axis: (pointer, tooltip size, map size, gap after the pointer).
     pure callback tip-position(float, float, float, float) -> float;
     /// A click at a point in logical pixels.
@@ -372,12 +373,14 @@ export component TreemapView inherits Rectangle {
             spacing: 2px;
             Text {
                 text: root.hover.title;
+                accessible-role: none;
                 font-size: 12px;
                 wrap: char-wrap;
                 color: Palette.foreground;
             }
             Text {
                 text: root.hover.detail;
+                accessible-role: none;
                 font-size: 12px;
                 wrap: word-wrap;
                 color: Palette.foreground.transparentize(30%);
@@ -400,11 +403,11 @@ export component TreemapView inherits Rectangle {
                 if (event.kind == PointerEventKind.move) {
                     root.hovered(self.mouse-x / 1px, self.mouse-y / 1px);
                 } else if (event.kind == PointerEventKind.down) {
-                    root.hide-tip();
+                    root.hide-tip(false);
                 }
             }
             scroll-event(event) => {
-                root.hide-tip();
+                root.hide-tip(true);
                 return reject;
             }
             changed has-hover => {

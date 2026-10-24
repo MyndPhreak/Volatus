@@ -181,28 +181,43 @@ pub fn format_size(bytes: u64) -> String {
 
 /// The name of a file or folder as the window shows it: each character that is invisible or
 /// reorders text (bidi and other format controls, control characters, line and paragraph
-/// separators) becomes U+FFFD, so a name cannot show other text than it holds. A name with none
-/// is returned borrowed. The stored name is not changed.
+/// separators, blank fillers) becomes U+FFFD, so a name cannot show other text than it holds. The
+/// zero width non-joiner and joiner stay when both neighbours are visible characters that are not
+/// ASCII (Persian, Indic and emoji sequences). A name with none is returned borrowed. The stored
+/// name is not changed.
 pub fn display_name(name: &str) -> Cow<'_, str> {
-    // Format controls (Cf) that show nothing or reorder text, the C0 and C1 controls, and the line
-    // and paragraph separators. U+200D joins emoji sequences; it is replaced too, so such an
-    // emoji shows as its parts.
-    let hidden = |c: char| {
+    // The C0 and C1 controls, the format controls (Cf) that show nothing or reorder text, the line
+    // and paragraph separators, and the default-ignorable fillers and selectors that draw blank.
+    // U+FE0F stays: it makes a symbol an emoji.
+    fn hidden(c: char) -> bool {
         c.is_control()
-            || matches!(c, '\u{AD}' | '\u{61C}' | '\u{180E}' | '\u{200B}'..='\u{200F}' | '\u{2028}'..='\u{202E}'
-                | '\u{2060}'..='\u{206F}' | '\u{FEFF}' | '\u{FFF9}'..='\u{FFFB}' | '\u{E0001}' | '\u{E0020}'..='\u{E007F}')
-    };
-    if name.chars().any(hidden) {
-        Cow::Owned(name.chars().map(|c| if hidden(c) { '\u{FFFD}' } else { c }).collect())
-    } else {
-        Cow::Borrowed(name)
+            || matches!(c, '\u{AD}' | '\u{34F}' | '\u{61C}' | '\u{115F}'..='\u{1160}' | '\u{17B4}'..='\u{17B5}'
+                | '\u{180B}'..='\u{180F}' | '\u{200B}'..='\u{200F}' | '\u{2028}'..='\u{202E}'
+                | '\u{2060}'..='\u{206F}' | '\u{3164}' | '\u{FE00}'..='\u{FE0E}' | '\u{FEFF}' | '\u{FFA0}'
+                | '\u{FFF0}'..='\u{FFFB}' | '\u{1BCA0}'..='\u{1BCA3}' | '\u{1D173}'..='\u{1D17A}'
+                | '\u{E0000}'..='\u{E0FFF}')
     }
+    // A visible character a joiner may touch. A joiner and every other hidden character is not one.
+    fn joinable(c: Option<&char>) -> bool {
+        c.is_some_and(|&c| !c.is_ascii() && !c.is_whitespace() && !hidden(c))
+    }
+    if !name.chars().any(hidden) {
+        return Cow::Borrowed(name);
+    }
+    let chars: Vec<char> = name.chars().collect();
+    let shown = |i: usize| {
+        let joiner = matches!(chars[i], '\u{200C}' | '\u{200D}');
+        !hidden(chars[i]) || (joiner && joinable(i.checked_sub(1).and_then(|p| chars.get(p))) && joinable(chars.get(i + 1)))
+    };
+    if (0..chars.len()).all(shown) {
+        return Cow::Borrowed(name);
+    }
+    Cow::Owned((0..chars.len()).map(|i| if shown(i) { chars[i] } else { '\u{FFFD}' }).collect())
 }
 
 /// The scan root as the title above the crumbs shows it: through `display_name`.
 pub fn scan_title(root: &Path) -> String {
-    let _ = root;
-    todo!("scan_title")
+    display_name(&root.to_string_lossy()).into_owned()
 }
 
 /// `1234567` -> `1,234,567`.
@@ -353,7 +368,7 @@ pub fn banner_text(state: &ScanState, offer_elevation: bool) -> String {
                 format_elapsed(s.elapsed),
             )
         }
-        ScanState::Error(m) => format!("Scan failed. {m}").trim_end().to_string(),
+        ScanState::Error(m) => format!("Scan failed. {}", display_name(m)).trim_end().to_string(),
         ScanState::Cancelled => "Scan stopped. There is no result.".into(),
     }
 }

@@ -49,8 +49,18 @@ pub enum TipAction {
 
 /// The next state and the action for `event` in `state`.
 pub fn step(state: TipState, event: TipEvent) -> (TipState, TipAction) {
-    let _ = (state, event);
-    todo!("tip::step")
+    use TipAction::{Hide, None as Nothing, Show, Start};
+    use TipEvent::{Click, Key, Layout, Leave, Moved, Scroll, Timer};
+    use TipState::{Idle, Pending, Shown, Suppressed};
+    match (event, state) {
+        (Moved { over: false, .. } | Leave, _) => (Idle, Hide),
+        (Moved { over: true, changed: true }, _) | (Moved { over: true, .. }, Idle | Suppressed) => (Pending, Start),
+        (Moved { .. }, _) => (state, Nothing),
+        (Timer, Pending) => (Shown, Show),
+        (Timer, _) => (state, Nothing),
+        (Key | Click | Scroll | Layout, Idle) => (Idle, Nothing),
+        (Key | Click | Scroll | Layout, _) => (Suppressed, Hide),
+    }
 }
 
 #[cfg(test)]

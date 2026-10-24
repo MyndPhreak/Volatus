@@ -174,7 +174,7 @@ export component MainWindow inherits Window {
     /// The pointer left the treemap.
     callback treemap-leave();
     /// A button press or a scroll on the treemap: the tooltip hides.
-    callback treemap-hide-tip();
+    callback treemap-hide-tip(bool);
     /// Where the tooltip starts on one axis: (pointer, tooltip size, map size, gap after the pointer).
     pure callback tip-position(float, float, float, float) -> float;
     callback restart-admin();
@@ -425,7 +425,7 @@ export component MainWindow inherits Window {
                         tip-y: root.tip-y;
                         hovered(x, y) => { root.treemap-hover(x, y); }
                         left => { root.treemap-leave(); }
-                        hide-tip => { root.treemap-hide-tip(); }
+                        hide-tip(scrolled) => { root.treemap-hide-tip(scrolled); }
                         tip-position(pointer, size, extent, gap) => { return root.tip-position(pointer, size, extent, gap); }
                         clicked(x, y) => { root.treemap-click(x, y); }
                         double-clicked(x, y) => { root.treemap-open(x, y); }

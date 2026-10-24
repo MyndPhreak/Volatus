@@ -214,7 +214,7 @@ pub fn drive_buttons(drives: &[DriveInfo]) -> Vec<DriveButton> {
             };
             DriveButton {
                 root: format!("{}:\\", d.letter),
-                title: format!("{}: {name}", d.letter),
+                title: format!("{}: {}", d.letter, crate::model::display_name(name)),
                 detail,
                 used,
                 size_known: d.space.is_some(),
