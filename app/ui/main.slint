@@ -13,6 +13,14 @@ export struct TreeRow {
     has-children: bool,
 }
 
+/// One file type in the footer: its share of the scan and its tile colour. Text is formatted by the host.
+export struct TypeChip {
+    label: string,
+    percent: string,
+    share: float,
+    color: color,
+}
+
 /// Sort column ids shared with the host: 0 name, 1 size, 2 percent of parent, 3 files.
 component HeaderCell inherits Rectangle {
     in property <string> text;
@@ -90,6 +98,12 @@ export component MainWindow inherits Window {
     in property <string> map-note;
     /// Labels of the treemap frames.
     in property <[FrameLabel]> labels;
+
+    // File-type footer
+    /// The biggest file types of the scan, then "Other".
+    in property <[TypeChip]> type-chips;
+    /// The host is still counting the file types of the shown scan.
+    in property <bool> types-counting;
 
     // Elevation
     in property <bool> show-elevate;
@@ -324,6 +338,57 @@ export component MainWindow inherits Window {
                         double-clicked(x, y) => { root.treemap-open(x, y); }
                         key(k) => { root.map-key(k); }
                         resized(w, h) => { root.treemap-resized(w, h); }
+                    }
+                }
+            }
+        }
+
+        // File-type footer, when a scan is shown: a strip with one part per type and the chips
+        // under it, in the tile colours.
+        if root.rows.length > 0 : VerticalLayout {
+            spacing: 6px;
+            if root.types-counting || root.type-chips.length == 0 : Text {
+                height: 16px;
+                text: root.types-counting ? "Counting file types." : "No file sizes to show.";
+                vertical-alignment: center;
+                color: Palette.foreground.transparentize(30%);
+                accessible-role: text;
+            }
+            if !root.types-counting && root.type-chips.length > 0 : Rectangle {
+                height: 10px;
+                border-radius: 3px;
+                clip: true;
+                HorizontalLayout {
+                    spacing: 1px;
+                    for chip in root.type-chips : Rectangle {
+                        horizontal-stretch: chip.share;
+                        min-width: 0px;
+                        preferred-width: 0px;
+                        background: chip.color;
+                    }
+                }
+            }
+            if !root.types-counting && root.type-chips.length > 0 : HorizontalLayout {
+                height: 16px;
+                spacing: 12px;
+                alignment: start;
+                for chip in root.type-chips : HorizontalLayout {
+                    spacing: 4px;
+                    VerticalLayout {
+                        alignment: center;
+                        Rectangle {
+                            width: 9px;
+                            height: 9px;
+                            border-radius: 2px;
+                            background: chip.color;
+                        }
+                    }
+                    Text {
+                        text: chip.label + " " + chip.percent;
+                        vertical-alignment: center;
+                        overflow: elide;
+                        color: Palette.foreground.transparentize(20%);
+                        accessible-role: text;
                     }
                 }
             }

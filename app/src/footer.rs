@@ -1,6 +1,7 @@
 //! File-type footer: the chips for the biggest file types. Plain functions, no Slint types.
 
-use treemap::filetype::{Category, TypeTotal};
+use crate::tree_view::format_percent;
+use treemap::filetype::{Category, TypeTotal, category_of_ext};
 
 /// One chip of the footer: a file type, its share of the scan and its tile category.
 #[derive(Debug, Clone, PartialEq)]
@@ -20,18 +21,39 @@ pub const NO_EXTENSION: &str = "No extension";
 /// Label of the chip that holds every type after the first `max`.
 pub const OTHER: &str = "Other";
 
-/// The chips of `totals` (as `type_totals` sorts them) out of `total` bytes, the size of the
-/// scanned folder: the first `max` types with bytes, then one "Other" chip for what is left of
-/// `total`, if anything. So the shares add up to 1. Empty when `total` is 0.
+/// The chips of `totals` out of `total` bytes, the size of the scanned folder: the `max` types
+/// with the most bytes (ties: ext ascending, as `type_totals` sorts), then one "Other" chip for
+/// what is left of `total`, if anything. So the shares add up to 1. Empty when `total` is 0.
 pub fn chips(totals: &[TypeTotal], total: u64, max: usize) -> Vec<Chip> {
-    let _ = (totals, total, max);
-    todo!()
+    if total == 0 {
+        return Vec::new();
+    }
+    let chip = |label: String, bytes: u64, category| Chip {
+        label,
+        percent: format_percent(bytes, total),
+        share: (bytes as f64 / total as f64) as f32,
+        category,
+    };
+    let mut top: Vec<&TypeTotal> = totals.iter().filter(|t| t.bytes > 0).collect();
+    top.sort_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.ext.cmp(&b.ext)));
+    top.truncate(max);
+    let rest = total.saturating_sub(top.iter().map(|t| t.bytes).sum());
+    let mut out: Vec<Chip> = top
+        .iter()
+        .map(|t| {
+            let label = if t.ext.is_empty() { NO_EXTENSION.to_string() } else { format!(".{}", t.ext) };
+            chip(label, t.bytes, category_of_ext(&t.ext))
+        })
+        .collect();
+    if rest > 0 {
+        out.push(chip(OTHER.to_string(), rest, Category::Other));
+    }
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tree_view::format_percent;
     use scan::rollup::{RawEntry, rollup};
     use treemap::filetype::type_totals;
 

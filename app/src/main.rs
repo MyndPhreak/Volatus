@@ -9,8 +9,6 @@
 mod browse;
 mod cli;
 mod elevate;
-// Stubs of P8.P4; the window uses them from P4.T3 on.
-#[allow(dead_code)]
 mod footer;
 mod model;
 mod nav;
@@ -47,6 +45,8 @@ const LABEL_MIN_WIDTH: f64 = 24.0;
 /// 750 labels and a new image show in at most 43.6 ms, 1000 in up to 55.5 ms (target 50 ms).
 /// The C: drive has 557 frames with a label band at that size, so the cap rarely applies.
 const LABEL_CAP: usize = 750;
+/// Most file-type chips in the footer before "Other".
+const FOOTER_CHIPS: usize = 8;
 
 /// A finished scan plus its derived per-node data. Shared with treemap layout threads.
 struct Data {
@@ -108,6 +108,8 @@ struct Loaded {
     view_root: NodeId,
     /// Treemap rects in physical pixels, from the last layout that arrived.
     rects: Vec<Rect>,
+    /// Footer chips of the whole scan; `None` while the file types are counted.
+    chips: Option<Vec<footer::Chip>>,
 }
 
 /// UI-thread state. Events from worker threads are applied here via `invoke_from_event_loop`.
@@ -323,16 +325,64 @@ fn install(ui: &MainWindow, data: Arc<Data>) {
     ui.set_rows(ModelRc::from(model.clone()));
     SESSION.with_borrow_mut(|s| {
         s.loaded = Some(Loaded {
-            data,
+            data: data.clone(),
             model,
             view: ViewState::new(root),
             selected: Some(root),
             view_root: root,
             rects: Vec::new(),
+            chips: None,
         });
     });
     sync_rows(ui);
     relayout(ui);
+    count_types(ui, data);
+}
+
+/// Counts the file types of the scan for the footer on its own worker thread, started after the
+/// layout worker of the first treemap, which does not wait for it. Until it ends the footer
+/// says "Counting file types.".
+/// The result is dropped if a newer scan started or the scan was cancelled meanwhile.
+fn count_types(ui: &MainWindow, data: Arc<Data>) {
+    let generation = SESSION.with_borrow(|s| s.scan.generation());
+    sync_types(ui);
+    let weak = ui.as_weak();
+    std::thread::spawn(move || {
+        let root = data.tree.root();
+        let totals = treemap::filetype::type_totals(&data.tree, root);
+        let chips = footer::chips(&totals, data.tree.node(root).size, FOOTER_CHIPS);
+        // Err means the event loop has stopped: nothing left to update.
+        let _ = slint::invoke_from_event_loop(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            if SESSION.with_borrow(|s| s.scan.is_current(generation)) {
+                with_loaded(|l| l.chips = Some(chips));
+                sync_types(&ui);
+            }
+        });
+    });
+}
+
+/// Pushes the footer chips into the window, in the tile colours of the current theme.
+fn sync_types(ui: &MainWindow) {
+    let theme = if ui.get_dark() { Theme::Dark } else { Theme::Light };
+    let (counting, chips) = with_loaded(|l| match &l.chips {
+        None => (true, Vec::new()),
+        Some(chips) => (false, chips.iter().map(|c| type_chip(c, theme)).collect()),
+    })
+    .unwrap_or_default();
+    ui.set_types_counting(counting);
+    ui.set_type_chips(ModelRc::new(VecModel::from(chips)));
+}
+
+/// The window's form of chip `c`, in its tile colour in `theme`.
+fn type_chip(c: &footer::Chip, theme: Theme) -> TypeChip {
+    let [r, g, b] = treemap::filetype::colour(c.category, theme);
+    TypeChip {
+        label: c.label.as_str().into(),
+        percent: c.percent.as_str().into(),
+        share: c.share,
+        color: slint::Color::from_rgb_u8(r, g, b),
+    }
 }
 
 /// Drops the shown scan.
@@ -344,6 +394,7 @@ fn clear(ui: &MainWindow) {
     ui.set_treemap_can_go_up(false);
     ui.set_labels(ModelRc::default());
     ui.set_map_note(SharedString::new());
+    sync_types(ui);
     ui.set_has_selection(false);
     ui.set_selected_row(-1);
 }
@@ -620,6 +671,7 @@ fn wire_tree_and_treemap(ui: &MainWindow) {
         move || {
             if let Some(ui) = weak.upgrade() {
                 relayout(&ui);
+                sync_types(&ui);
             }
         }
     });
