@@ -149,13 +149,27 @@ pub fn open_target(tree: &Tree, node: NodeId) -> Option<(NodeId, NodeId)> {
 /// The folder the treemap must show so that `selected` is drawn in it: the current view if
 /// `selected` is the view or under it, otherwise the folder of `selected` (the scan root shows itself).
 pub fn view_for_selection(tree: &Tree, view_root: NodeId, selected: NodeId) -> NodeId {
-    todo!("view_for_selection {view_root:?} {selected:?} {}", tree.name(selected))
+    let mut n = Some(selected);
+    while let Some(c) = n {
+        if c == view_root {
+            return view_root;
+        }
+        n = tree.node(c).parent;
+    }
+    tree.node(selected).parent.unwrap_or(selected)
 }
 
 /// The node whose rect outlines `selected`: itself if drawn, else its nearest drawn folder.
 /// `None` if nothing on its chain of folders is drawn.
 pub fn outline_node(tree: &Tree, rects: &[Rect], selected: NodeId) -> Option<NodeId> {
-    todo!("outline_node {selected:?} {} {}", rects.len(), tree.name(selected))
+    let mut n = Some(selected);
+    while let Some(c) = n {
+        if rects.iter().any(|r| r.node == c) {
+            return Some(c);
+        }
+        n = tree.node(c).parent;
+    }
+    None
 }
 
 /// Order of two siblings: the chosen column, flipped if descending, then name, then id.

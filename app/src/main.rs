@@ -176,11 +176,15 @@ fn sync_rows(ui: &MainWindow) {
     ui.set_sort_descending(descending);
 }
 
-/// Moves the selection outline to the selected node's area in the treemap.
+/// Moves the selection outline to the selected node's area in the shown treemap, or to its
+/// nearest drawn folder when the node itself is too small to draw (`tree_view::outline_node`).
 fn sync_selection(ui: &MainWindow) {
     let scale = ui.window().scale_factor() as f64;
-    let bounds =
-        with_loaded(|l| l.selected.and_then(|n| tree_view::selection_bounds(&l.rects, n))).flatten();
+    let bounds = with_loaded(|l| {
+        let shown = tree_view::outline_node(&l.data.tree, &l.rects, l.selected?)?;
+        tree_view::selection_bounds(&l.rects, shown)
+    })
+    .flatten();
     ui.set_has_selection(bounds.is_some());
     if let Some((x, y, w, h)) = bounds {
         ui.set_selection_x((x / scale) as f32);
@@ -259,12 +263,18 @@ fn note_treemap_shown(ui: &MainWindow) {
     }
 }
 
-/// Selects `node` in the tree and the treemap and scrolls the tree to it.
+/// Selects `node` in the tree and the treemap and scrolls the tree to it. If the treemap
+/// folder does not hold `node`, the treemap shows the folder of `node` (`view_for_selection`).
+/// Every select path comes here.
 fn select(ui: &MainWindow, node: NodeId) {
-    with_loaded(|l| {
+    let view = with_loaded(|l| {
         l.selected = Some(node);
         l.view.reveal(&l.data.tree, node);
+        tree_view::view_for_selection(&l.data.tree, l.view_root, node)
     });
+    if let Some(folder) = view {
+        show_folder(ui, folder);
+    }
     sync_rows(ui);
     sync_selection(ui);
     let row = ui.get_selected_row();
