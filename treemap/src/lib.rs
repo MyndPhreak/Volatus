@@ -67,17 +67,24 @@ impl Chrome {
 
     /// The chrome at a display scale factor (1.0 = 96 DPI).
     pub fn scaled(scale: f64) -> Chrome {
-        todo!("Chrome::scaled {scale}")
+        Chrome { header: 16.0 * scale, pad: 2.0 * scale }
     }
 
     /// True when `r` is big enough for a label band.
     pub fn has_header(&self, r: &Rect) -> bool {
-        todo!("Chrome::has_header {r:?}")
+        self.header > 0.0 && r.w >= 3.0 * self.header && r.h >= 2.0 * self.header
     }
 
     /// The area `(x, y, w, h)` inside folder `r` where its children go.
     pub fn inner(&self, r: &Rect) -> (f64, f64, f64, f64) {
-        todo!("Chrome::inner {r:?}")
+        let p = self.pad;
+        if self.has_header(r) { (r.x + p, r.y + self.header, r.w - 2.0 * p, r.h - self.header - p) } else { self.inset(r) }
+    }
+
+    /// `r` less the inset on all sides; `r` itself when it is under four insets wide or high.
+    fn inset(&self, r: &Rect) -> (f64, f64, f64, f64) {
+        let p = self.pad;
+        if r.w >= 4.0 * p && r.h >= 4.0 * p { (r.x + p, r.y + p, r.w - 2.0 * p, r.h - 2.0 * p) } else { (r.x, r.y, r.w, r.h) }
     }
 }
 
@@ -90,8 +97,43 @@ pub enum Theme {
 
 /// Like `layout`, but every folder is a frame: its children lie inside `chrome.inner` of its
 /// rect. The view root gets the inset on all sides and never a band.
+///
+/// Frames remove area, so each folder has its own scale (inner area / folder size): sizes are
+/// proportional among siblings, not across the whole map. Pruning and order are as in `layout`.
 pub fn layout_framed(tree: &Tree, root: NodeId, w: u32, h: u32, chrome: Chrome) -> Vec<Rect> {
-    todo!("layout_framed {:?} {w}x{h} {chrome:?} {}", root, tree.node(root).size)
+    let mut out = Vec::new();
+    if tree.node(root).size == 0 || w == 0 || h == 0 {
+        return out;
+    }
+    let mut stack = vec![Rect { node: root, x: 0.0, y: 0.0, w: f64::from(w), h: f64::from(h) }];
+    let (mut kids, mut placed) = (Vec::new(), Vec::new());
+    while let Some(parent) = stack.pop() {
+        let (x, y, iw, ih) = if parent.node == root {
+            chrome.inset(&parent)
+        } else {
+            out.push(parent);
+            chrome.inner(&parent)
+        };
+        let size = tree.node(parent.node).size;
+        if size == 0 || iw <= 0.0 || ih <= 0.0 {
+            continue;
+        }
+        let scale = iw * ih / size as f64;
+        // Under 1 px² a rect cannot be 1 px on both sides: drop it before sorting.
+        kids.clear();
+        kids.extend(tree.children(parent.node).map(|c| (c, tree.node(c).size)).filter(|&(_, s)| s as f64 * scale >= 1.0));
+        kids.sort_unstable_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        let areas: Vec<f64> = kids.iter().map(|&(_, s)| s as f64 * scale).collect();
+        let fills = kids.iter().map(|&(_, s)| s).sum::<u64>() == size;
+        squarify(&areas, &Rect { node: parent.node, x, y, w: iw, h: ih }, fills, &mut placed);
+        // Reversed, so the largest child pops first.
+        for (&(node, _), &(x, y, w, h)) in kids.iter().zip(&placed).rev() {
+            if w >= 1.0 && h >= 1.0 {
+                stack.push(Rect { node, x, y, w, h });
+            }
+        }
+    }
+    out
 }
 
 /// Places `areas` (sorted largest first) inside `b` as rows along the short side. Rects go
