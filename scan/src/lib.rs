@@ -181,6 +181,18 @@ pub fn route(whole_volume: bool, method: Option<Method>) -> Route {
     }
 }
 
+/// Walker threads when `ScanOptions::threads` is `None`: one per logical CPU but one, at least
+/// one, so the window that shows the scan keeps a CPU.
+pub fn walker_threads(logical: usize) -> usize {
+    todo!("walker_threads({logical})")
+}
+
+/// A pool of `n` threads at below-normal priority, so the window drawn while the scan runs gets
+/// the CPU first.
+pub fn background_pool(n: usize) -> Result<rayon::ThreadPool, rayon::ThreadPoolBuildError> {
+    todo!("background_pool({n})")
+}
+
 /// Scans `root`: reads the NTFS `$MFT` when elevated and `root` is a whole drive, else walks
 /// directories. Any MFT failure other than cancel (no admin, not NTFS, bad volume header or
 /// `$MFT` run list) falls back to the walker; `ScanStats::method` says which one ran.

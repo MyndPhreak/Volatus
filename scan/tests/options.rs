@@ -3,7 +3,7 @@
 mod common;
 
 use common::TempDir;
-use scan::{DEFAULT_CHUNK, Method, ScanOptions, ScanStats, Tree, scan_with};
+use scan::{DEFAULT_CHUNK, Method, ScanOptions, ScanStats, Tree, background_pool, scan_with, walker_threads};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::channel;
@@ -64,13 +64,43 @@ fn scan_with_threads_runs_on_a_pool_of_that_size() {
 }
 
 #[test]
-fn scan_with_no_thread_count_uses_the_global_pool() {
+fn scan_with_no_thread_count_walks_on_all_logical_cpus_but_one() {
     let t = TempDir::new();
     sample(&t);
+    let logical = std::thread::available_parallelism().map_or(1, |n| n.get());
 
     let (_, stats) = walk_with(&t, None);
 
-    assert_eq!(stats.threads, rayon::current_num_threads());
+    assert_eq!(stats.threads, logical.saturating_sub(1).max(1));
+}
+
+#[test]
+fn walker_threads_leaves_one_logical_cpu_free_and_keeps_at_least_one() {
+    let cases = [(0, 1), (1, 1), (2, 1), (3, 2), (4, 3), (32, 31), (64, 63)];
+
+    let got: Vec<_> = cases.iter().map(|&(logical, _)| (logical, walker_threads(logical))).collect();
+
+    assert_eq!(got, cases);
+}
+
+#[test]
+fn background_pool_has_the_requested_thread_count() {
+    for n in [1, 3] {
+        let pool = background_pool(n).unwrap();
+
+        assert_eq!(pool.current_num_threads(), n);
+    }
+}
+
+#[test]
+fn background_pool_runs_jobs_at_below_normal_priority() {
+    use windows_sys::Win32::System::Threading::{GetCurrentThread, GetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL};
+    let pool = background_pool(2).unwrap();
+
+    // SAFETY: GetCurrentThread returns a pseudo handle that is always valid on its own thread.
+    let got = pool.install(|| unsafe { GetThreadPriority(GetCurrentThread()) });
+
+    assert_eq!(got, THREAD_PRIORITY_BELOW_NORMAL);
 }
 
 #[test]
