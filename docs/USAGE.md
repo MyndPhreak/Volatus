@@ -75,9 +75,6 @@ volatus.exe [folder] [--timing] [--method auto|mft|walk] [--threads N]
 - A folder that ends in a stray `"`, such as `C:"` from `"C:\"`, is read as `C:\`.
 - `--`: what follows is a folder, also when it starts with `--`.
 - All options apply to every scan in the run, and to "Restart as administrator".
-
-Examples:
-```
-volatus.exe C:\Projects --timing
-volatus.exe D:\ --method walk --threads 8
-```
+- Examples: `volatus.exe C:\Projects --timing`, `volatus.exe D:\ --method walk --threads 8`.
+- To install with no window and without the Explorer menu, run
+  `msiexec /i volatus-0.1.0-x86_64.msi /qn EXPLORERMENU=0`.
