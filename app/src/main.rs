@@ -1355,7 +1355,10 @@ fn sync_browsing(ui: &MainWindow) {
 
 fn main() {
     let args = cli::parse_args(std::env::args().skip(1));
-    SESSION.with_borrow_mut(|s| s.flags.timing = args.flags.timing);
+    SESSION.with_borrow_mut(|s| {
+        s.flags = args.flags;
+        s.notices = args.notices.clone();
+    });
     let ui = MainWindow::new().expect("create window");
     // The renderer is chosen when the window is made (winit falls back to software when OpenGL
     // cannot start), so the answer is final here. The notifier counts the frames drawn and starts
