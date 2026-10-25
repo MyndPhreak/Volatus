@@ -145,8 +145,10 @@ struct Session {
     resolved_root: Option<PathBuf>,
     /// Browse dialog state: at most one dialog at a time.
     browse: BrowseState,
-    /// `--timing` was given. Also passed on by "Restart as administrator".
-    timing: bool,
+    /// Command line options (`--timing`, `--method`, `--threads`). Also passed on by "Restart as administrator".
+    flags: cli::Flags,
+    /// Notices about command line options that were ignored. Shown on the banner.
+    notices: Vec<String>,
     /// Timings of the latest scan. `None` unless `timing` is set and a scan started.
     run: Option<TimingRun>,
     /// Id of the latest drive list request. Results of older requests are dropped.
@@ -207,7 +209,8 @@ thread_local! {
         scan_root: PathBuf::new(),
         resolved_root: None,
         browse: BrowseState::default(),
-        timing: false,
+        flags: cli::Flags::default(),
+        notices: Vec::new(),
         run: None,
         drives_seq: 0,
         hovered: None,
@@ -319,7 +322,7 @@ fn relayout(ui: &MainWindow) {
         // A layout kept for a zoom in is older than this one now.
         s.held = None;
         // With `--timing`, each layout (and new picture) shows, so a hover that starts one is seen.
-        if s.timing {
+        if s.flags.timing {
             eprintln!("Layout {}.", s.layout_seq);
         }
         Some((data, root, s.scan.generation(), s.layout_seq, w, h))
@@ -731,7 +734,7 @@ fn move_time_up(ui: &MainWindow) {
     }) else {
         return;
     };
-    if SESSION.with_borrow(|s| s.timing) {
+    if SESSION.with_borrow(|s| s.flags.timing) {
         let now = FRAMES.with(Cell::get);
         eprintln!("Move {:?}: {} frames in {} ms. Frames drawn: {now}.", m.kind, now - m.frames, m.started.elapsed().as_millis());
     }
@@ -954,7 +957,7 @@ fn start_scan(ui: &MainWindow, path: &str) {
     SESSION.with_borrow_mut(|s| {
         s.scan_root = PathBuf::from(path);
         s.resolved_root = None;
-        s.run = s.timing.then(|| TimingRun::new(Instant::now()));
+        s.run = s.flags.timing.then(|| TimingRun::new(Instant::now()));
     });
     show_state(ui);
     clear(ui);
@@ -1348,7 +1351,7 @@ fn sync_browsing(ui: &MainWindow) {
 
 fn main() {
     let args = cli::parse_args(std::env::args().skip(1));
-    SESSION.with_borrow_mut(|s| s.timing = args.timing);
+    SESSION.with_borrow_mut(|s| s.flags.timing = args.flags.timing);
     let ui = MainWindow::new().expect("create window");
     // The renderer is chosen when the window is made (winit falls back to software when OpenGL
     // cannot start), so the answer is final here. The notifier counts the frames drawn and starts
@@ -1438,7 +1441,7 @@ fn main() {
     }
     slint::run_event_loop().expect("run event loop");
     SESSION.with_borrow(|s| {
-        if s.timing {
+        if s.flags.timing {
             let slowest = s.hover_slowest.as_secs_f64() * 1000.0;
             eprintln!("Hover changes: {}. Slowest hover: {slowest:.2} ms.", s.hover_changes);
             eprintln!("Frames drawn: {}.", FRAMES.with(Cell::get));
@@ -1458,9 +1461,9 @@ fn relaunch_path(start_screen: bool, scan_root: &std::path::Path) -> String {
     if start_screen { String::new() } else { scan_root.to_string_lossy().into_owned() }
 }
 
-/// Starts the elevated copy through `launch(path, timing)`. `--timing` is carried over from the session.
-fn restart_admin(path: &str, launch: impl FnOnce(&str, bool) -> Result<(), String>) -> Result<(), String> {
-    launch(path, SESSION.with_borrow(|s| s.timing))
+/// Starts the elevated copy through `launch(path, flags)`. The options are carried over from the session.
+fn restart_admin(path: &str, launch: impl FnOnce(&str, cli::Flags) -> Result<(), String>) -> Result<(), String> {
+    launch(path, SESSION.with_borrow(|s| s.flags))
 }
 
 #[cfg(test)]
@@ -2100,10 +2103,10 @@ mod tests {
     }
 
     fn run(timing: bool) -> (Result<(), String>, Option<(String, bool)>) {
-        SESSION.with_borrow_mut(|s| s.timing = timing);
+        SESSION.with_borrow_mut(|s| s.flags.timing = timing);
         let seen = RefCell::new(None);
-        let result = restart_admin("some folder", |p, t| {
-            *seen.borrow_mut() = Some((p.to_string(), t));
+        let result = restart_admin("some folder", |p, f| {
+            *seen.borrow_mut() = Some((p.to_string(), f.timing));
             Ok(())
         });
         (result, seen.into_inner())

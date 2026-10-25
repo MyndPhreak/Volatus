@@ -42,8 +42,8 @@ pub fn quote_arg(path: &str) -> String {
 /// Command line for the elevated copy. `--` comes before the folder, so a folder named like a
 /// flag is still read as a folder. An empty `scan_path` gives no folder: the copy opens on the start
 /// screen. `--timing` is carried over when set.
-pub fn relaunch_args(scan_path: &str, timing: bool) -> String {
-    let flag = timing.then(|| "--timing".to_string());
+pub fn relaunch_args(scan_path: &str, flags: crate::cli::Flags) -> String {
+    let flag = flags.timing.then(|| "--timing".to_string());
     let folder = (!scan_path.is_empty()).then(|| format!("-- {}", quote_arg(scan_path)));
     flag.into_iter().chain(folder).collect::<Vec<_>>().join(" ")
 }
@@ -54,11 +54,11 @@ fn wide(s: &std::ffi::OsStr) -> Vec<u16> {
 
 /// Starts an elevated copy of this exe that scans `scan_path` (none when empty) and times, if `timing`.
 /// `Err` if the user declines the UAC prompt or the launch fails: the caller keeps running.
-pub fn restart_as_admin(scan_path: &str, timing: bool) -> Result<(), String> {
+pub fn restart_as_admin(scan_path: &str, flags: crate::cli::Flags) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let verb = wide("runas".as_ref());
     let file = wide(exe.as_os_str());
-    let args = wide(relaunch_args(scan_path, timing).as_ref());
+    let args = wide(relaunch_args(scan_path, flags).as_ref());
     // SAFETY: all strings are NUL terminated and outlive the call.
     let result = unsafe {
         ShellExecuteW(std::ptr::null_mut(), verb.as_ptr(), file.as_ptr(), args.as_ptr(), null(), SW_SHOWNORMAL)
@@ -69,10 +69,16 @@ pub fn restart_as_admin(scan_path: &str, timing: bool) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{quote_arg, relaunch_args, wide};
+    use crate::cli::Flags;
+    use scan::Method;
     use std::ffi::OsString;
     use std::os::windows::ffi::OsStringExt;
     use windows_sys::Win32::Foundation::LocalFree;
     use windows_sys::Win32::UI::Shell::CommandLineToArgvW;
+
+    fn flags(timing: bool) -> Flags {
+        Flags { timing, ..Flags::default() }
+    }
 
     /// Parses `command_line` with the real Windows rules, as the elevated copy's runtime does.
     fn argv(command_line: &str) -> Vec<String> {
@@ -136,37 +142,75 @@ mod tests {
 
     #[test]
     fn relaunch_args_without_timing_has_separator_and_quoted_path() {
-        assert_eq!(relaunch_args("C:\\My Files", false), "-- \"C:\\My Files\"");
+        assert_eq!(relaunch_args("C:\\My Files", flags(false)), "-- \"C:\\My Files\"");
     }
 
     #[test]
     fn relaunch_args_with_timing_carries_the_flag() {
-        assert_eq!(relaunch_args("C:\\", true), "--timing -- \"C:\\\\\"");
+        assert_eq!(relaunch_args("C:\\", flags(true)), "--timing -- \"C:\\\\\"");
     }
 
     #[test]
     fn relaunch_args_with_no_folder_is_empty() {
-        assert_eq!(relaunch_args("", false), "");
+        assert_eq!(relaunch_args("", flags(false)), "");
     }
 
     #[test]
     fn relaunch_args_with_no_folder_and_timing_is_only_the_flag() {
-        assert_eq!(relaunch_args("", true), "--timing");
+        assert_eq!(relaunch_args("", flags(true)), "--timing");
     }
 
     #[test]
     fn relaunch_args_with_no_folder_parse_to_the_start_screen_with_timing_kept() {
         for timing in [false, true] {
-            let line = format!("volatus.exe {}", relaunch_args("", timing));
+            let line = format!("volatus.exe {}", relaunch_args("", flags(timing)));
 
             let parsed = crate::cli::parse_args(argv(&line).into_iter().skip(1));
 
-            assert_eq!(parsed, crate::cli::Args { timing, path: None }, "command line {line:?}");
+            assert_eq!(parsed, crate::cli::Args { flags: flags(timing), ..Default::default() }, "command line {line:?}");
         }
     }
 
     #[test]
     fn relaunch_args_dash_path_stays_after_the_separator() {
-        assert_eq!(relaunch_args("--timing", false), "-- \"--timing\"");
+        assert_eq!(relaunch_args("--timing", flags(false)), "-- \"--timing\"");
+    }
+
+    fn full(method: Option<Method>, threads: Option<usize>) -> Flags {
+        Flags { timing: true, method, threads }
+    }
+
+    #[test]
+    fn relaunch_args_carry_method_and_threads_before_the_folder() {
+        let f = full(Some(Method::Walk), Some(8));
+        assert_eq!(relaunch_args("D:\\", f), "--timing --method walk --threads 8 -- \"D:\\\\\"");
+        let f = Flags { timing: false, method: Some(Method::Mft), threads: None };
+        assert_eq!(relaunch_args("", f), "--method mft");
+        let f = Flags { timing: false, method: None, threads: Some(2) };
+        assert_eq!(relaunch_args("", f), "--threads 2");
+    }
+
+    #[test]
+    fn relaunch_args_auto_method_is_left_out() {
+        assert_eq!(relaunch_args("", full(None, None)), "--timing");
+    }
+
+    #[test]
+    fn relaunch_args_parse_back_to_the_same_options_and_folder() {
+        let folders = ["", "C:\\", "C:\\My Files\\", "--method", "--threads=3", "-- x", "caf\u{e9} \"q\"", "\\\\server\\share\\"];
+        for timing in [false, true] {
+            for method in [None, Some(Method::Mft), Some(Method::Walk)] {
+                for threads in [None, Some(1), Some(32)] {
+                    for folder in folders {
+                        let f = Flags { timing, method, threads };
+                        let line = format!("volatus.exe {}", relaunch_args(folder, f));
+                        let parsed = crate::cli::parse_args_with(argv(&line).into_iter().skip(1), 8);
+                        let path = (!folder.is_empty()).then(|| folder.to_string());
+                        let want = crate::cli::Args { flags: f, path, notices: vec![] };
+                        assert_eq!(parsed, want, "command line {line:?}");
+                    }
+                }
+            }
+        }
     }
 }

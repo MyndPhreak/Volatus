@@ -338,6 +338,20 @@ pub fn error_message(e: &ScanError) -> String {
     }
 }
 
+/// [`error_message`] for a scan that ran with `method`. With `--method mft` there is no fallback,
+/// so a read error most likely means the MFT cannot be used: it says so.
+pub fn scan_error_message(e: &ScanError, method: Option<Method>) -> String {
+    let _ = method;
+    error_message(e)
+}
+
+/// The banner with the options of this run: the thread count of a finished scan when `--threads`
+/// was given, then the notices about ignored options (in every state).
+pub fn with_options(banner: String, state: &ScanState, threads: Option<usize>, notices: &[String]) -> String {
+    let _ = (state, threads, notices);
+    banner
+}
+
 /// True when the "Restart as administrator" button helps: the scan fell back to the walker, the
 /// user is not an administrator, and `root` (canonical) is a whole drive. Only a whole drive
 /// takes the MFT path, so for a sub-folder the button would change nothing.
@@ -576,6 +590,89 @@ mod tests {
         for (ms, want) in cases {
             assert_eq!(format_elapsed(Duration::from_millis(ms)), want, "input {ms} ms");
         }
+    }
+
+    // ---- scan_error_message ----
+    const MFT_MESSAGE: &str = "The MFT method needs administrator rights and a whole NTFS drive.";
+
+    #[test]
+    fn scan_error_message_explicit_mft_io_errors_explain_the_mft_needs() {
+        for kind in [io::ErrorKind::PermissionDenied, io::ErrorKind::InvalidData, io::ErrorKind::Other] {
+            let e = ScanError::Io(io::Error::new(kind, "x"));
+            assert_eq!(scan_error_message(&e, Some(Method::Mft)), MFT_MESSAGE, "kind {kind:?}");
+        }
+    }
+
+    #[test]
+    fn scan_error_message_explicit_mft_missing_folder_still_says_not_found() {
+        let e = ScanError::Io(io::Error::new(io::ErrorKind::NotFound, "x"));
+        assert_eq!(scan_error_message(&e, Some(Method::Mft)), "Folder not found.");
+    }
+
+    #[test]
+    fn scan_error_message_other_methods_match_error_message() {
+        let errors = [
+            ScanError::Io(io::Error::new(io::ErrorKind::PermissionDenied, "x")),
+            ScanError::Io(io::Error::other("disk exploded")),
+            ScanError::NoRoot,
+            ScanError::Cancelled,
+        ];
+        for method in [None, Some(Method::Walk)] {
+            for e in &errors {
+                assert_eq!(scan_error_message(e, method), error_message(e), "method {method:?}, error {e:?}");
+            }
+        }
+        for e in &errors[2..] {
+            assert_eq!(scan_error_message(e, Some(Method::Mft)), error_message(e), "error {e:?}");
+        }
+    }
+
+    // ---- with_options ----
+    fn notices(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn with_options_done_scan_shows_the_thread_count_when_given() {
+        let state = ScanState::Done(summary(Method::Walk, 0));
+        assert_eq!(with_options("Done.".into(), &state, Some(8), &[]), "Done. Threads: 8.");
+    }
+
+    #[test]
+    fn with_options_done_scan_without_threads_is_unchanged() {
+        let state = ScanState::Done(summary(Method::Walk, 0));
+        assert_eq!(with_options("Done.".into(), &state, None, &[]), "Done.");
+    }
+
+    #[test]
+    fn with_options_other_states_do_not_show_the_thread_count() {
+        let states = [ScanState::Idle, ScanState::Scanning { files: 1, dirs: 1 }, ScanState::Error("x".into()), ScanState::Cancelled];
+        for state in states {
+            assert_eq!(with_options("B.".into(), &state, Some(8), &[]), "B.", "state {state:?}");
+        }
+    }
+
+    #[test]
+    fn with_options_notices_follow_the_banner_in_every_state() {
+        let list = notices(&["Unknown option ignored: --foo.", "Invalid value for --method. Use auto, mft or walk."]);
+        let states = [
+            ScanState::Idle,
+            ScanState::Scanning { files: 1, dirs: 1 },
+            ScanState::Done(summary(Method::Walk, 0)),
+            ScanState::Error("x".into()),
+            ScanState::Cancelled,
+        ];
+        for state in states {
+            let want = "B. Unknown option ignored: --foo. Invalid value for --method. Use auto, mft or walk.";
+            assert_eq!(with_options("B.".into(), &state, None, &list), want, "state {state:?}");
+        }
+    }
+
+    #[test]
+    fn with_options_threads_come_before_the_notices() {
+        let state = ScanState::Done(summary(Method::Walk, 0));
+        let got = with_options("Done.".into(), &state, Some(2), &notices(&["N."]));
+        assert_eq!(got, "Done. Threads: 2. N.");
     }
 
     // ---- error_message ----
