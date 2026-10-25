@@ -31,8 +31,11 @@ roxmltree = "0.21.1"
 # target/wix/volatus-<version>-x86_64.msi (.github/scripts/build-msi.ps1 does every step).
 # ICE43 and ICE57 assume a per-user install (a Start menu shortcut in a component keyed by a file
 # in Program Files); this one is per-machine (ALLUSERS=1), where the Start menu folder is the
-# machine's. Re-check both suppressions whenever main.wxs's components change: they hide every
-# ICE43/ICE57 finding, not only this one.
+# machine's. ICE69 refuses the Explorer menu's [#VolatusExe] because the menu components are in
+# the ExplorerMenu feature and the exe in Main; ExplorerMenu is a child of Main, which can't be left
+# out, so the exe is always installed with the menu (tests/wix.rs
+# the_menu_feature_is_always_installed_with_the_exe). Re-check all three suppressions whenever
+# main.wxs's components change: they hide every ICE43/ICE57/ICE69 finding, not only these ones.
 [package.metadata.wix]
 name = "volatus"
-linker-args = ["-sice:ICE43", "-sice:ICE57"]
+linker-args = ["-sice:ICE43", "-sice:ICE57", "-sice:ICE69"]

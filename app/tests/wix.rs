@@ -445,3 +445,27 @@ fn the_menu_is_a_feature_on_by_default_offered_on_first_install_only() {
     assert_eq!(new_dialog.len(), 1, "Next goes on to one page");
     assert!(add[0].2 < new_dialog[0].2 && remove[0].2 < new_dialog[0].2, "the choice is applied before the page changes");
 }
+
+/// The menu's command names the exe through `[#VolatusExe]`, which is empty when the exe's
+/// component is not installed. ICE69 is suppressed for this (app/Cargo.toml), so the structure
+/// that makes it safe is checked here: the menu feature is a child of the exe's feature, and that
+/// feature can't be left out.
+#[test]
+fn the_menu_feature_is_always_installed_with_the_exe() {
+    let source = source();
+    let doc = Document::parse(&source).unwrap();
+    let exe_feature = component_feature(&doc, "VolatusExe");
+    assert_eq!(attr(&exe_feature, "Absent"), Some("disallow"), "the exe is always installed");
+    assert_eq!(attr(&exe_feature, "Level"), Some("1"));
+    for (id, _, _, _) in MENU {
+        let feature = component_feature(&doc, id);
+        assert!(feature.ancestors().any(|a| a == exe_feature), "{id}: inside the exe's feature");
+    }
+}
+
+/// The feature that holds the component `id`.
+fn component_feature<'a>(doc: &'a Document, id: &str) -> Node<'a, 'a> {
+    let refs: Vec<Node> = all(doc, "ComponentRef").into_iter().filter(|r| attr(r, "Id") == Some(id)).collect();
+    assert_eq!(refs.len(), 1, "{id} is in one feature");
+    refs[0].parent().filter(|p| is(p, "Feature")).expect("a Feature")
+}

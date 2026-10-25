@@ -76,6 +76,43 @@
                   Advertise="no"/>
             </File>
           </Component>
+
+          <!-- The Explorer menu, "Scan with Volatus" on a folder, a folder's background and a
+               drive, for every user (HKLM). %1 is the folder or drive; %V is the folder whose
+               background was right-clicked. A drive's %1 is C:\, which reaches volatus.exe as
+               C:" (the backslash escapes the quote); the argument parser repairs it (cli.rs).
+               ForceDeleteOnUninstall removes each Volatus key with its command key, and only
+               those keys. Fixed GUIDs: a component's GUID stays with its key path. -->
+          <Component Id="MenuDirectory" Guid="41C7BA3F-1D39-478A-9629-C08E1CBCD053" Win64="yes">
+            <RegistryKey Root="HKLM" Key="Software\Classes\Directory\shell\Volatus"
+                ForceCreateOnInstall="yes" ForceDeleteOnUninstall="yes">
+              <RegistryValue Type="string" Value="Scan with Volatus" KeyPath="yes"/>
+              <RegistryValue Type="string" Name="Icon" Value="[#VolatusExe],0"/>
+              <RegistryKey Key="command">
+                <RegistryValue Type="string" Value="&quot;[#VolatusExe]&quot; &quot;%1&quot;"/>
+              </RegistryKey>
+            </RegistryKey>
+          </Component>
+          <Component Id="MenuBackground" Guid="D1D6A47D-523E-4BCD-9A37-4B6E4BF365D8" Win64="yes">
+            <RegistryKey Root="HKLM" Key="Software\Classes\Directory\Background\shell\Volatus"
+                ForceCreateOnInstall="yes" ForceDeleteOnUninstall="yes">
+              <RegistryValue Type="string" Value="Scan with Volatus" KeyPath="yes"/>
+              <RegistryValue Type="string" Name="Icon" Value="[#VolatusExe],0"/>
+              <RegistryKey Key="command">
+                <RegistryValue Type="string" Value="&quot;[#VolatusExe]&quot; &quot;%V&quot;"/>
+              </RegistryKey>
+            </RegistryKey>
+          </Component>
+          <Component Id="MenuDrive" Guid="C057D819-1438-463A-BCFC-19B8B087E8D4" Win64="yes">
+            <RegistryKey Root="HKLM" Key="Software\Classes\Drive\shell\Volatus"
+                ForceCreateOnInstall="yes" ForceDeleteOnUninstall="yes">
+              <RegistryValue Type="string" Value="Scan with Volatus" KeyPath="yes"/>
+              <RegistryValue Type="string" Name="Icon" Value="[#VolatusExe],0"/>
+              <RegistryKey Key="command">
+                <RegistryValue Type="string" Value="&quot;[#VolatusExe]&quot; &quot;%1&quot;"/>
+              </RegistryKey>
+            </RegistryKey>
+          </Component>
         </Directory>
       </Directory>
       <Directory Id="ProgramMenuFolder"/>
@@ -83,7 +120,18 @@
 
     <Feature Id="Main" Title="Volatus" Level="1" Absent="disallow" AllowAdvertise="no">
       <ComponentRef Id="VolatusExe"/>
+      <!-- On by default; the options page can leave it out. Its state (in or out) is kept across
+           major upgrades (MajorUpgrade migrates feature states). A child of Main: its command
+           names Main's exe ([#VolatusExe]), which ICE69 refuses from an unrelated feature. -->
+      <Feature Id="ExplorerMenu" Title="Explorer menu" Level="1" AllowAdvertise="no">
+        <ComponentRef Id="MenuDirectory"/>
+        <ComponentRef Id="MenuBackground"/>
+        <ComponentRef Id="MenuDrive"/>
+      </Feature>
     </Feature>
+    <!-- The options page's checkbox: ticked unless the user clears it. Secure, so what the dialog
+         sets reaches the elevated part of the install. -->
+    <Property Id="EXPLORERMENU" Value="1" Secure="yes"/>
 
     <!-- Installed apps: the exe's icon, links, and nothing to change after install. -->
     <Icon Id="volatus.ico" SourceFile="$(sys.SOURCEFILEDIR)..\assets\volatus.ico"/>
@@ -116,13 +164,41 @@
       <DialogRef Id="VerifyReadyDlg"/>
       <DialogRef Id="ExitDialog"/>
 
-      <!-- First install: Welcome, License, Ready. An upgrade or maintenance skips the license. -->
+      <!-- The Explorer menu choice, first install only (an upgrade keeps the feature as it is). -->
+      <Dialog Id="OptionsDlg" Width="370" Height="270" Title="[ProductName] Setup">
+        <Control Id="BannerBitmap" Type="Bitmap" X="0" Y="0" Width="370" Height="44" TabSkip="no" Text="!(loc.InstallDirDlgBannerBitmap)"/>
+        <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="370" Height="0"/>
+        <Control Id="Title" Type="Text" X="15" Y="6" Width="200" Height="15" Transparent="yes" NoPrefix="yes"
+            Text="{\WixUI_Font_Title}Options"/>
+        <Control Id="Description" Type="Text" X="25" Y="23" Width="280" Height="15" Transparent="yes" NoPrefix="yes"
+            Text="To change this option later, remove Volatus and install it again."/>
+
+        <Control Id="ExplorerMenu" Type="CheckBox" X="20" Y="54" Width="330" Height="17" Property="EXPLORERMENU" CheckBoxValue="1"
+            Text="Add Scan with Volatus to the Explorer menu"/>
+        <Control Id="ExplorerMenuNote" Type="Text" X="36" Y="71" Width="320" Height="30" NoPrefix="yes"
+            Text="Right-click a folder, the background of a folder or a drive in File Explorer to scan it. On Windows 11, the entry is in Show more options."/>
+
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0"/>
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="!(loc.WixUIBack)"/>
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="!(loc.WixUINext)"/>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="!(loc.WixUICancel)">
+          <Publish Event="SpawnDialog" Value="CancelDlg">1</Publish>
+        </Control>
+      </Dialog>
+
+      <!-- First install: Welcome, License, Options, Ready. An upgrade or maintenance skips License
+           and Options. -->
       <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="LicenseAgreementDlg">NOT Installed AND NOT WIX_UPGRADE_DETECTED</Publish>
       <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="VerifyReadyDlg">Installed OR WIX_UPGRADE_DETECTED</Publish>
       <Publish Dialog="LicenseAgreementDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg">1</Publish>
-      <Publish Dialog="LicenseAgreementDlg" Control="Next" Event="NewDialog" Value="VerifyReadyDlg">LicenseAccepted = "1"</Publish>
+      <Publish Dialog="LicenseAgreementDlg" Control="Next" Event="NewDialog" Value="OptionsDlg">LicenseAccepted = "1" AND NOT Installed AND NOT WIX_UPGRADE_DETECTED</Publish>
+      <Publish Dialog="OptionsDlg" Control="Back" Event="NewDialog" Value="LicenseAgreementDlg">1</Publish>
+      <!-- The checkbox sets the feature's request state before the page changes. -->
+      <Publish Dialog="OptionsDlg" Control="Next" Event="AddLocal" Value="ExplorerMenu" Order="1">EXPLORERMENU</Publish>
+      <Publish Dialog="OptionsDlg" Control="Next" Event="Remove" Value="ExplorerMenu" Order="2">NOT EXPLORERMENU</Publish>
+      <Publish Dialog="OptionsDlg" Control="Next" Event="NewDialog" Value="VerifyReadyDlg" Order="3">1</Publish>
 
-      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="LicenseAgreementDlg" Order="1">NOT Installed AND NOT WIX_UPGRADE_DETECTED</Publish>
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="OptionsDlg" Order="1">NOT Installed AND NOT WIX_UPGRADE_DETECTED</Publish>
       <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg" Order="2">(NOT Installed AND WIX_UPGRADE_DETECTED) OR (Installed AND PATCH)</Publish>
       <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="MaintenanceTypeDlg" Order="3">Installed AND NOT PATCH</Publish>
 
