@@ -100,9 +100,13 @@ export component StartScreen inherits Rectangle {
     in property <bool> message-is-error;
     /// True while the folder dialog is open.
     in property <bool> browsing;
+    /// Why the last "Restart as administrator" did not restart, or "".
+    in property <string> restart-note;
 
     callback scan-drive(string);
     callback choose-folder();
+    /// "Restart as administrator": the app starts again elevated, on the start screen.
+    callback restart-admin();
 
     ScrollView {
         HorizontalLayout {
@@ -131,12 +135,30 @@ export component StartScreen inherits Rectangle {
                     take-focus: i == 0;
                     clicked => { root.scan-drive(d.root); }
                 }
-                if root.admin-note != "" : Text {
-                    text: root.admin-note;
+                // One note for all the drives, and the button it is about.
+                if root.admin-note != "" : VerticalLayout {
+                    spacing: 6px;
+                    Text {
+                        text: root.admin-note;
+                        wrap: word-wrap;
+                        horizontal-alignment: center;
+                        font-size: 12px;
+                        color: Glass.dim;
+                        accessible-role: text;
+                    }
+                    HorizontalLayout {
+                        alignment: center;
+                        Button {
+                            text: "Restart as administrator";
+                            clicked => { root.restart-admin(); }
+                        }
+                    }
+                }
+                if root.restart-note != "" : Text {
+                    text: root.restart-note;
                     wrap: word-wrap;
                     horizontal-alignment: center;
-                    font-size: 12px;
-                    color: Glass.dim;
+                    color: #d13438;
                     accessible-role: text;
                 }
                 Button {

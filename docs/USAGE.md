@@ -52,6 +52,8 @@ Press Tab to move to the next control, and Shift+Tab to move back.
   faster. A folder scan always reads the folders one by one.
 - After a whole-drive scan without administrator rights, the top bar shows "Restart as
   administrator". Windows then asks for permission. The new window scans the same drive again.
+- When a listed drive is NTFS, the start screen also shows "Restart as administrator". The new
+  window opens on the start screen.
 
 ## Command line
 

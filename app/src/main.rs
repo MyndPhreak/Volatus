@@ -1262,7 +1262,7 @@ fn wire_tree_and_treemap(ui: &MainWindow) {
         let weak = ui.as_weak();
         move || {
             let Some(ui) = weak.upgrade() else { return };
-            let root = SESSION.with_borrow(|s| s.scan_root.to_string_lossy().into_owned());
+            let root = SESSION.with_borrow(|s| relaunch_path(ui.get_start_screen(), &s.scan_root));
             match restart_admin(&root, elevate::restart_as_admin) {
                 Ok(()) => {
                     let _ = slint::quit_event_loop();
@@ -1422,8 +1422,7 @@ fn take_launch_path() -> Option<String> {
 /// The folder the elevated copy scans: none from the start screen, so the copy opens on the start
 /// screen; else the root of the shown scan, as typed.
 fn relaunch_path(start_screen: bool, scan_root: &std::path::Path) -> String {
-    let _ = (start_screen, scan_root);
-    todo!("relaunch_path")
+    if start_screen { String::new() } else { scan_root.to_string_lossy().into_owned() }
 }
 
 /// Starts the elevated copy through `launch(path, timing)`. `--timing` is carried over from the session.

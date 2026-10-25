@@ -231,8 +231,10 @@ export component MainWindow inherits Window {
         message: root.banner;
         message-is-error: root.banner-is-error;
         browsing: root.browsing;
+        restart-note: root.elevate-note;
         scan-drive(drive) => { root.scan-drive(drive); }
         choose-folder => { root.choose-folder(); }
+        restart-admin => { root.restart-admin(); }
     }
     // The results stay in the tree while the start screen shows, so the file tree keeps its scroll
     // function; hidden, they take no input.
