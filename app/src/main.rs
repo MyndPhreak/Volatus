@@ -1357,16 +1357,16 @@ fn sync_browsing(ui: &MainWindow) {
 }
 
 /// Keeps the options and notices of the command line for the whole run.
-fn apply_args(_args: &cli::Args) {
-    todo!("apply_args")
-}
-
-fn main() {
-    let args = cli::parse_args(std::env::args().skip(1));
+fn apply_args(args: &cli::Args) {
     SESSION.with_borrow_mut(|s| {
         s.flags = args.flags;
         s.notices = args.notices.clone();
     });
+}
+
+fn main() {
+    let args = cli::parse_args(std::env::args().skip(1));
+    apply_args(&args);
     let ui = MainWindow::new().expect("create window");
     // The renderer is chosen when the window is made (winit falls back to software when OpenGL
     // cannot start), so the answer is final here. The notifier counts the frames drawn and starts
