@@ -75,6 +75,6 @@ volatus.exe [folder] [--timing] [--method auto|mft|walk] [--threads N]
 
 Examples:
 ```
-volatus.exe C:UsersmyndDEV --timing
-volatus.exe D: --method walk --threads 8
+volatus.exe C:\Users\mynd\DEV --timing
+volatus.exe D:\ --method walk --threads 8
 ```
