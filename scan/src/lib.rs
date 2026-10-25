@@ -226,14 +226,12 @@ pub fn scan_routed(
 ) -> Result<(Tree, ScanStats), ScanError> {
     let Route { method, fallback_to_walk } = route;
     let pool_error = |e: rayon::ThreadPoolBuildError| ScanError::Io(std::io::Error::other(e));
-    // With no thread count the walker runs on all CPUs but one at below-normal priority, so the
-    // window keeps drawing (P8 start-up stall). The MFT path stays on the global pool.
-    let walk = || match opts.threads {
-        Some(_) => walk::walk(root, &progress, cancel),
-        None => {
-            let logical = std::thread::available_parallelism().map_or(1, |n| n.get());
-            background_pool(walker_threads(logical)).map_err(pool_error)?.install(|| walk::walk(root, &progress, cancel))
-        }
+    // The walker runs at below-normal priority, so the window keeps drawing (P8 start-up stall):
+    // on `threads` threads, or with no count on all CPUs but one. The MFT path stays on the global pool.
+    let walk = || {
+        let logical = std::thread::available_parallelism().map_or(1, |n| n.get());
+        let n = opts.threads.unwrap_or_else(|| walker_threads(logical));
+        background_pool(n).map_err(pool_error)?.install(|| walk::walk(root, &progress, cancel))
     };
     let run = || match method {
         Method::Walk => walk(),
@@ -244,12 +242,13 @@ pub fn scan_routed(
         },
     };
     match opts.threads {
-        None => run(),
-        Some(n) => rayon::ThreadPoolBuilder::new()
+        // The walker makes its own pool (above): an outer one would only sit idle.
+        Some(n) if method == Method::Mft => rayon::ThreadPoolBuilder::new()
             .num_threads(n)
             .build()
             .map_err(pool_error)?
             .install(run),
+        _ => run(),
     }
 }
 

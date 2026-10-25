@@ -19,7 +19,7 @@ mod tree_view;
 
 use browse::BrowseState;
 use model::{
-    Event, ScanControl, ScanState, Summary, TimingRun, append_timing, banner_text, error_message, format_size,
+    Event, ScanControl, ScanState, Summary, TimingRun, append_timing, banner_text, scan_error_message, with_options, format_size,
     group_digits, offer_for, shows_start, timing_for_state,
 };
 use nav::{Dir, TreeMove};
@@ -260,7 +260,9 @@ fn show_state(ui: &MainWindow) {
     ui.set_banner_is_error(matches!(state, ScanState::Error(_)));
     let offer = SESSION.with_borrow(|s| offer_for(&state, s.resolved_root.as_deref(), elevate::is_admin()));
     let line = SESSION.with_borrow(|s| timing_for_state(&state, s.run.as_ref().and_then(TimingRun::line)));
-    ui.set_banner(append_timing(banner_text(&state, offer), line.as_deref()).into());
+    let (threads, notices) = SESSION.with_borrow(|s| (s.flags.threads, s.notices.clone()));
+    let banner = with_options(banner_text(&state, offer), &state, threads, &notices);
+    ui.set_banner(append_timing(banner, line.as_deref()).into());
     ui.set_show_elevate(offer);
     ui.set_scan_title(SESSION.with_borrow(|s| model::scan_title(&s.scan_root)).into());
 }
@@ -967,6 +969,8 @@ fn start_scan(ui: &MainWindow, path: &str) {
         return;
     }
     let root = PathBuf::from(path);
+    let opts = SESSION.with_borrow(|s| s.flags.scan_options());
+    let method = opts.method;
     let weak = ui.as_weak();
     let (tx, rx) = mpsc::channel::<Progress>();
 
@@ -982,7 +986,7 @@ fn start_scan(ui: &MainWindow, path: &str) {
         }
     });
 
-    std::thread::spawn(move || match scan::scan(&root, tx, &cancel) {
+    std::thread::spawn(move || match scan::scan_with(&root, tx, &cancel, &opts) {
         Ok((tree, stats)) => {
             let finished = Instant::now();
             let summary = Summary::new(&stats, tree.node(tree.root()).size);
@@ -993,7 +997,7 @@ fn start_scan(ui: &MainWindow, path: &str) {
             post_done(&weak, generation, Data { tree, counts }, summary, resolved, finished);
         }
         Err(ScanError::Cancelled) => post(&weak, generation, Event::Cancelled),
-        Err(e) => post(&weak, generation, Event::Failed(error_message(&e))),
+        Err(e) => post(&weak, generation, Event::Failed(scan_error_message(&e, method))),
     });
 }
 
@@ -1376,7 +1380,7 @@ fn main() {
     }
     // A folder to scan opens on the results screen: the start screen would show for one frame.
     if shows_start_at_launch(args.path.as_deref()) {
-        ui.set_banner(banner_text(&ScanState::Idle, false).into());
+        ui.set_banner(with_options(banner_text(&ScanState::Idle, false), &ScanState::Idle, None, &args.notices).into());
     } else {
         ui.set_start_screen(false);
     }

@@ -16,7 +16,7 @@ pub struct Flags {
 impl Flags {
     /// The scan options for every scan of this run.
     pub fn scan_options(&self) -> ScanOptions {
-        ScanOptions::default()
+        ScanOptions { method: self.method, threads: self.threads, ..ScanOptions::default() }
     }
 }
 
@@ -35,22 +35,72 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Args {
     parse_args_with(args, std::thread::available_parallelism().map_or(1, |n| n.get()))
 }
 
+/// Threads allowed for each logical CPU. A larger `--threads` is lowered to this.
+const THREADS_PER_CPU: usize = 4;
+
 /// Parses the arguments after the program name. `logical` is the number of logical CPUs.
+///
+/// - `--method auto|mft|walk` and `--threads N`, also as `--method=mft`. The value is not case
+///   sensitive. When an option repeats, the last good value wins. A bad or missing value gives a
+///   notice and leaves the option as it was. `--threads` above `logical` x 4 is lowered, with a notice.
+/// - A value is the next word, unless that word starts with `--`.
+/// - `--` ends the options: what follows is a folder, even if it starts with `--`.
+/// - Another `--word` is ignored, with a notice.
 pub fn parse_args_with<I: IntoIterator<Item = String>>(args: I, logical: usize) -> Args {
-    let _ = logical;
+    let cap = logical.max(1) * THREADS_PER_CPU;
     let mut out = Args::default();
     let mut flags_ended = false;
-    for arg in args {
-        match arg.as_str() {
-            "--" if !flags_ended => flags_ended = true,
-            "--timing" if !flags_ended => out.flags.timing = true,
-            _ if !flags_ended && arg.starts_with("--") => {}
-            _ => {
-                out.path.get_or_insert(arg);
+    let mut args = args.into_iter().peekable();
+    while let Some(arg) = args.next() {
+        let Some(option) = arg.strip_prefix("--").filter(|_| !flags_ended) else {
+            out.path.get_or_insert(arg);
+            continue;
+        };
+        if option.is_empty() {
+            flags_ended = true;
+            continue;
+        }
+        let (name, inline) = option.split_once('=').map_or((option, None), |(n, v)| (n, Some(v.to_owned())));
+        match name {
+            "timing" if inline.is_none() => out.flags.timing = true,
+            "method" | "threads" => {
+                let value = inline.or_else(|| args.next_if(|next| !next.starts_with("--")));
+                if name == "method" {
+                    match value.as_deref().and_then(parse_method) {
+                        Some(method) => out.flags.method = method,
+                        None => out.notices.push("Invalid value for --method. Use auto, mft or walk.".into()),
+                    }
+                } else {
+                    match value.as_deref().and_then(parse_threads) {
+                        Some(n) if n > cap => {
+                            out.flags.threads = Some(cap);
+                            out.notices.push(format!("The value for --threads is too high. Using {cap}."));
+                        }
+                        Some(n) => out.flags.threads = Some(n),
+                        None => out.notices.push(format!("Invalid value for --threads. Use a number from 1 to {cap}.")),
+                    }
+                }
             }
+            _ => out.notices.push(format!("Unknown option ignored: {arg}.")),
         }
     }
     out
+}
+
+/// `Some(None)` for `auto`: the default choice of scanner.
+fn parse_method(value: &str) -> Option<Option<Method>> {
+    [("auto", None), ("mft", Some(Method::Mft)), ("walk", Some(Method::Walk))]
+        .into_iter()
+        .find(|(name, _)| value.eq_ignore_ascii_case(name))
+        .map(|(_, method)| method)
+}
+
+/// A count of one or more: ASCII digits only. A number too big for `usize` is `usize::MAX`.
+fn parse_threads(value: &str) -> Option<usize> {
+    if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some(value.parse().unwrap_or(usize::MAX)).filter(|&n| n > 0)
 }
 
 #[cfg(test)]
@@ -108,7 +158,8 @@ mod tests {
 
     #[test]
     fn parse_args_unknown_flag_is_ignored() {
-        assert_eq!(parse(&["--nope", "C:\\Data"]), args(false, Some("C:\\Data")));
+        let a = parse(&["--nope", "C:\\Data"]);
+        assert_eq!((a.flags, a.path.as_deref()), (Flags::default(), Some("C:\\Data")));
     }
 
     #[test]

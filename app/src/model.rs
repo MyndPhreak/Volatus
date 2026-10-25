@@ -341,15 +341,20 @@ pub fn error_message(e: &ScanError) -> String {
 /// [`error_message`] for a scan that ran with `method`. With `--method mft` there is no fallback,
 /// so a read error most likely means the MFT cannot be used: it says so.
 pub fn scan_error_message(e: &ScanError, method: Option<Method>) -> String {
-    let _ = method;
-    error_message(e)
+    match e {
+        ScanError::Io(io) if method == Some(Method::Mft) && io.kind() != ErrorKind::NotFound => {
+            "The MFT method needs administrator rights and a whole NTFS drive.".into()
+        }
+        _ => error_message(e),
+    }
 }
 
 /// The banner with the options of this run: the thread count of a finished scan when `--threads`
 /// was given, then the notices about ignored options (in every state).
 pub fn with_options(banner: String, state: &ScanState, threads: Option<usize>, notices: &[String]) -> String {
-    let _ = (state, threads, notices);
-    banner
+    let threads = threads.filter(|_| matches!(state, ScanState::Done(_)));
+    let parts = threads.map(|n| format!("Threads: {n}.")).into_iter().chain(notices.iter().cloned());
+    parts.fold(banner, |text, part| format!("{text} {part}"))
 }
 
 /// True when the "Restart as administrator" button helps: the scan fell back to the walker, the

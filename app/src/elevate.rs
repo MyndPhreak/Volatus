@@ -1,5 +1,6 @@
 //! "Restart as administrator": relaunch this exe with the `runas` verb.
 
+use scan::Method;
 use std::os::windows::ffi::OsStrExt;
 use std::ptr::null;
 use windows_sys::Win32::UI::Shell::{IsUserAnAdmin, ShellExecuteW};
@@ -41,18 +42,21 @@ pub fn quote_arg(path: &str) -> String {
 
 /// Command line for the elevated copy. `--` comes before the folder, so a folder named like a
 /// flag is still read as a folder. An empty `scan_path` gives no folder: the copy opens on the start
-/// screen. `--timing` is carried over when set.
+/// screen. `--timing`, `--method` and `--threads` are carried over when set (`auto` is the default,
+/// so it is left out).
 pub fn relaunch_args(scan_path: &str, flags: crate::cli::Flags) -> String {
-    let flag = flags.timing.then(|| "--timing".to_string());
+    let timing = flags.timing.then(|| "--timing".to_string());
+    let method = flags.method.map(|m| format!("--method {}", if m == Method::Mft { "mft" } else { "walk" }));
+    let threads = flags.threads.map(|n| format!("--threads {n}"));
     let folder = (!scan_path.is_empty()).then(|| format!("-- {}", quote_arg(scan_path)));
-    flag.into_iter().chain(folder).collect::<Vec<_>>().join(" ")
+    [timing, method, threads, folder].into_iter().flatten().collect::<Vec<_>>().join(" ")
 }
 
 fn wide(s: &std::ffi::OsStr) -> Vec<u16> {
     s.encode_wide().chain(std::iter::once(0)).collect()
 }
 
-/// Starts an elevated copy of this exe that scans `scan_path` (none when empty) and times, if `timing`.
+/// Starts an elevated copy of this exe that scans `scan_path` (none when empty) with the same `flags`.
 /// `Err` if the user declines the UAC prompt or the launch fails: the caller keeps running.
 pub fn restart_as_admin(scan_path: &str, flags: crate::cli::Flags) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;

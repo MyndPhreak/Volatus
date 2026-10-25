@@ -58,11 +58,23 @@ Press Tab to move to the next control, and Shift+Tab to move back.
 ## Command line
 
 ```
-volatus.exe [--timing] [--] [folder]
+volatus.exe [folder] [--timing] [--method auto|mft|walk] [--threads N]
 ```
 
-- `folder`: scan this drive or folder at start, after the window shows. Example:
-  `volatus.exe C:\`
+- `folder`: scan this drive or folder at start. The options and the folder can be in any order.
 - `--timing`: add the scan times to the top bar and write them to stderr. See
   `docs/BENCHMARK.md` for what each time means.
+- `--method auto|mft|walk`: `auto` is the default. `mft` reads the NTFS file table and `walk` reads
+  the folders one by one. A scan with `mft` does not fall back to `walk`. If it cannot run, the
+  top bar says that it needs administrator rights and an NTFS drive.
+- `--threads N`: use N threads. The most is 4 for each logical CPU. The top bar shows the number.
+- `--method=mft` and `--threads=4` also work. Values are not case sensitive. If an option is given
+  again, the last good value is used. A bad value or an unknown option is ignored, with a notice.
 - `--`: what follows is a folder, also when it starts with `--`.
+- All options apply to every scan in the run, and to "Restart as administrator".
+
+Examples:
+```
+volatus.exe C:UsersmyndDEV --timing
+volatus.exe D: --method walk --threads 8
+```
