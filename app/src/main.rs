@@ -168,6 +168,9 @@ struct Session {
     out_from: Option<NodeId>,
     /// The next layout to land is the first picture of a scan: it fades in.
     fade_next: bool,
+    /// Folder given on the command line. Its scan starts once, after the first frame or after
+    /// `LAUNCH_FALLBACK`, whichever comes first (`take_launch_path`).
+    launch_path: Option<String>,
 }
 
 /// A finished layout of folder `root`: its rects in physical pixels, its picture and its labels.
@@ -212,6 +215,7 @@ thread_local! {
         held: None,
         out_from: None,
         fade_next: false,
+        launch_path: None,
     });
     /// Starts one relayout after the window stops changing the treemap size.
     static RESIZE_TIMER: Timer = Timer::default();
@@ -1343,6 +1347,12 @@ fn main() {
     });
 }
 
+/// The command-line folder to scan, the first time it is asked for: on the first frame or when
+/// `LAUNCH_FALLBACK` is up. Every later call gets `None`.
+fn take_launch_path() -> Option<String> {
+    todo!("take_launch_path")
+}
+
 /// Starts the elevated copy through `launch(path, timing)`. `--timing` is carried over from the session.
 fn restart_admin(path: &str, launch: impl FnOnce(&str, bool) -> Result<(), String>) -> Result<(), String> {
     launch(path, SESSION.with_borrow(|s| s.timing))
@@ -1353,7 +1363,7 @@ mod tests {
     use super::{
         Data, FILE_LABEL_MIN_HEIGHT, FILE_LABEL_MIN_WIDTH, FILE_LABEL_TWO_LINES, FileLabel, FrameLabel, Hover, LABEL_CAP, ZoomFrame, ZoomMove, frame_at,
         Loaded, RowModel, SESSION, file_labels, frame_labels, glow_drawn, hover_of, map_labels, note_hover, restart_admin,
-        store_chips, Move, picture_point, zoom_frame_at,
+        store_chips, Move, picture_point, zoom_frame_at, take_launch_path,
     };
     use crate::motion::Kind;
     use std::time::Instant;
@@ -1904,5 +1914,46 @@ mod tests {
     fn restart_admin_launch_error_is_returned() {
         let result = restart_admin("some folder", |_, _| Err("code 5".into()));
         assert_eq!(result, Err("code 5".to_string()));
+    }
+
+    fn launch_with(path: Option<&str>) {
+        SESSION.with_borrow_mut(|s| s.launch_path = path.map(str::to_string));
+    }
+
+    #[test]
+    fn take_launch_path_first_frame_first_gets_the_path_and_the_fallback_nothing() {
+        launch_with(Some("D:\\Data"));
+
+        let (frame, fallback) = (take_launch_path(), take_launch_path());
+
+        assert_eq!((frame, fallback), (Some("D:\\Data".to_string()), None));
+    }
+
+    #[test]
+    fn take_launch_path_fallback_first_gets_the_path_and_the_first_frame_nothing() {
+        launch_with(Some("C:\\"));
+
+        let (fallback, frame) = (take_launch_path(), take_launch_path());
+
+        assert_eq!((fallback, frame), (Some("C:\\".to_string()), None));
+    }
+
+    #[test]
+    fn take_launch_path_every_later_frame_gets_nothing() {
+        launch_with(Some("D:\\Data"));
+        take_launch_path();
+
+        let later: Vec<_> = (0..3).map(|_| take_launch_path()).collect();
+
+        assert_eq!(later, [None, None, None]);
+    }
+
+    #[test]
+    fn take_launch_path_with_no_folder_argument_gets_nothing() {
+        launch_with(None);
+
+        let (frame, fallback) = (take_launch_path(), take_launch_path());
+
+        assert_eq!((frame, fallback), (None, None));
     }
 }
