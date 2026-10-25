@@ -72,6 +72,7 @@ volatus.exe [folder] [--timing] [--method auto|mft|walk] [--threads N]
   A folder after `--method` or `--threads` becomes its value, and the option gets a notice.
 - `--method=mft` and `--threads=4` also work. Values are not case sensitive. If an option is given
   again, the last good value is used. A bad value or an unknown option is ignored, with a notice.
+- A folder that ends in a stray `"`, such as `C:"` from `"C:\"`, is read as `C:\`.
 - `--`: what follows is a folder, also when it starts with `--`.
 - All options apply to every scan in the run, and to "Restart as administrator".
 

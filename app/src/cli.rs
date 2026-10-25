@@ -53,7 +53,9 @@ pub fn parse_args_with<I: IntoIterator<Item = String>>(args: I, logical: usize) 
     let mut args = args.into_iter().peekable();
     while let Some(arg) = args.next() {
         let Some(option) = arg.strip_prefix("--").filter(|_| !flags_ended) else {
-            out.path.get_or_insert(arg);
+            if out.path.is_none() {
+                out.path = Some(repair_folder(arg));
+            }
             continue;
         };
         if option.is_empty() {
@@ -90,8 +92,10 @@ pub fn parse_args_with<I: IntoIterator<Item = String>>(args: I, logical: usize) 
 /// Explorer passes `"C:\"` as `%1`; the rules of `CommandLineToArgvW` turn that into `C:"`. A quote is
 /// not allowed in a Windows path, so one `"` as the last character is that mistake: it becomes `\`.
 fn repair_folder(arg: String) -> String {
-    // stub
-    arg
+    match arg.strip_suffix('"') {
+        Some(rest) if !rest.is_empty() && !rest.contains('"') => format!("{rest}\\"),
+        _ => arg,
+    }
 }
 
 /// `Some(None)` for `auto`: the default choice of scanner.
