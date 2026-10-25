@@ -52,6 +52,16 @@ Other people, and the owner, should be able to download Volatus from GitHub, ins
 - How to test the WiX file and the generated registry values without writing to the real machine (parse the `.wxs`, build the MSI in CI, optionally install to a throwaway path in a VM or with `msiexec /a` administrative image).
 - The README install section and `docs/USAGE.md` update.
 
+## More calls, after a cold read (all mine; mark them as such)
+
+- **Running copy.** No app flag. The MSI uses WiX `util:CloseApplication` (a graceful close of the main window; it also reaches an elevated copy because the MSI runs elevated) and, if that fails, Windows' own "files in use" dialog asks the user to close Volatus. No forced kill, and no reboot unless a file stays locked in another user's session.
+- **Instances.** Each right-click on a folder opens a new window. No single-instance rule and no IPC. That is a later feature if wanted.
+- **Versions and commits.** Same flow as Negotium: work happens on branches with the project's normal commit messages ("Add failing tests for X", "Implement X"). Changes reach `main` through pull requests that are squash-merged with a conventional title (`feat: ...`, `fix: ...`), which `release-please` reads. The first release is forced to `0.1.0` (`release-as` plus a bootstrap commit set to the current `main`), so the 151 earlier commits do not produce a surprise version. The version source is `app/Cargo.toml`; the tag check and WiX read the `volatus` package from `cargo metadata`.
+- **First release.** The plan stops at "workflows merged and the release pull request open". Merging that pull request is the owner's go-ahead for the first real release. CI also builds the MSI on every pull request, so it is tested before any tag. Like Negotium, release-please uses the default `GITHUB_TOKEN`, so a release pull request does not start other workflows by itself (close and reopen it to run CI). No secret is needed.
+- **Quote fix, two layers.** (1) The menu command avoids the problem: it passes `"%1."` for folders and drives, so no backslash sits before the closing quote (Windows drops a trailing dot, and `C:\.` names the drive root). (2) The argument parser also repairs the common case, a folder argument that ends in a stray quote (`C:"` becomes `C:\`, `C:\Some Dir"` becomes `C:\Some Dir\`), only for the folder argument and only when the repaired path exists. Other malformed arguments stay as they are. Test matrix: drive root, folder with spaces, unicode, trailing backslash, quote in the middle (unchanged), lone quote (unchanged), a flag after the folder.
+- **Installer UI.** Copy Negotium's flow: minimal WiX UI, a license page showing the MIT text, the Explorer-menu checkbox, a "Launch Volatus" checkbox on the last page. English (en-US) only.
+- **Target.** x64 only (the build is `x86_64-pc-windows-msvc`). A launch condition requires 64-bit Windows 10 or newer. The app is tested only on Windows 11, but Windows 10 is not known to break (Mica falls back to an opaque background). ARM64 is refused.
+
 ## Open items for the owner
 
-None yet. Questions raised by a cold reader of this document are settled in the hand-over message.
+One: the per-machine install to Program Files (one UAC prompt at install) is the writer's call, not yet confirmed by the owner.
