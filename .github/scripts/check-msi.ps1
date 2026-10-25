@@ -13,6 +13,8 @@ $UpgradeCode = '{FB5B570F-DD29-49B8-A6AE-35855278CAE6}'
 # platform suffix (captured from the built MSI's CustomAction table).
 $CloseAction = 'WixCloseApplications'
 $Exe = '[#VolatusExe]'
+# The menu's Icon and command name the exe by folder: [#VolatusExe] there fails ICE69 (another feature).
+$MenuExe = '[INSTALLFOLDER]volatus.exe'
 $MenuKeys = [ordered]@{
   'Software\Classes\Directory\shell\Volatus'            = '%1'
   'Software\Classes\Directory\Background\shell\Volatus' = '%V'
@@ -133,8 +135,8 @@ foreach ($row in $registry) {
 }
 $want = foreach ($key in $MenuKeys.Keys) {
   "$key||Scan with Volatus"
-  "$key|Icon|$Exe,0"
-  "$key\command||`"$Exe`" `"$($MenuKeys[$key])`""
+  "$key|Icon|$MenuExe,0"
+  "$key\command||`"$MenuExe`" `"$($MenuKeys[$key])`""
   "$key|*|"
 }
 $found = $registry | ForEach-Object { "$($_[1])|$($_[2])|$($_[3])" }

@@ -89,9 +89,9 @@
             <RegistryKey Root="HKLM" Key="Software\Classes\Directory\shell\Volatus"
                 ForceCreateOnInstall="yes" ForceDeleteOnUninstall="yes">
               <RegistryValue Type="string" Value="Scan with Volatus" KeyPath="yes"/>
-              <RegistryValue Type="string" Name="Icon" Value="[#VolatusExe],0"/>
+              <RegistryValue Type="string" Name="Icon" Value="[INSTALLFOLDER]volatus.exe,0"/>
               <RegistryKey Key="command">
-                <RegistryValue Type="string" Value="&quot;[#VolatusExe]&quot; &quot;%1&quot;"/>
+                <RegistryValue Type="string" Value="&quot;[INSTALLFOLDER]volatus.exe&quot; &quot;%1&quot;"/>
               </RegistryKey>
             </RegistryKey>
           </Component>
@@ -99,9 +99,9 @@
             <RegistryKey Root="HKLM" Key="Software\Classes\Directory\Background\shell\Volatus"
                 ForceCreateOnInstall="yes" ForceDeleteOnUninstall="yes">
               <RegistryValue Type="string" Value="Scan with Volatus" KeyPath="yes"/>
-              <RegistryValue Type="string" Name="Icon" Value="[#VolatusExe],0"/>
+              <RegistryValue Type="string" Name="Icon" Value="[INSTALLFOLDER]volatus.exe,0"/>
               <RegistryKey Key="command">
-                <RegistryValue Type="string" Value="&quot;[#VolatusExe]&quot; &quot;%V&quot;"/>
+                <RegistryValue Type="string" Value="&quot;[INSTALLFOLDER]volatus.exe&quot; &quot;%V&quot;"/>
               </RegistryKey>
             </RegistryKey>
           </Component>
@@ -109,9 +109,9 @@
             <RegistryKey Root="HKLM" Key="Software\Classes\Drive\shell\Volatus"
                 ForceCreateOnInstall="yes" ForceDeleteOnUninstall="yes">
               <RegistryValue Type="string" Value="Scan with Volatus" KeyPath="yes"/>
-              <RegistryValue Type="string" Name="Icon" Value="[#VolatusExe],0"/>
+              <RegistryValue Type="string" Name="Icon" Value="[INSTALLFOLDER]volatus.exe,0"/>
               <RegistryKey Key="command">
-                <RegistryValue Type="string" Value="&quot;[#VolatusExe]&quot; &quot;%1&quot;"/>
+                <RegistryValue Type="string" Value="&quot;[INSTALLFOLDER]volatus.exe&quot; &quot;%1&quot;"/>
               </RegistryKey>
             </RegistryKey>
           </Component>
@@ -124,7 +124,7 @@
       <ComponentRef Id="VolatusExe"/>
       <!-- On by default; the options page can leave it out. Its state (in or out) is kept across
            major upgrades (MajorUpgrade migrates feature states). A child of Main: its command
-           names Main's exe ([#VolatusExe]), which ICE69 refuses from an unrelated feature. -->
+           names Main's exe ([INSTALLFOLDER]volatus.exe), so the exe is always there with it. -->
       <Feature Id="ExplorerMenu" Title="Explorer menu" Level="1" AllowAdvertise="no">
         <ComponentRef Id="MenuDirectory"/>
         <ComponentRef Id="MenuBackground"/>
