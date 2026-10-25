@@ -114,7 +114,8 @@ pub const DEFAULT_CHUNK: usize = 32 << 20;
 pub struct ScanOptions {
     /// Bytes per `$MFT` read. Rounded down to whole records and clusters, at least one of each.
     pub chunk: usize,
-    /// Worker threads. `None` = rayon's global pool (one per logical CPU).
+    /// Worker threads. `None` = the MFT on rayon's global pool (one per logical CPU), the walker
+    /// on `walker_threads` at below-normal priority (`background_pool`).
     pub threads: Option<usize>,
     /// Scanner to run. `None` = the MFT, falling back to the walker.
     pub method: Option<Method>,
@@ -184,13 +185,21 @@ pub fn route(whole_volume: bool, method: Option<Method>) -> Route {
 /// Walker threads when `ScanOptions::threads` is `None`: one per logical CPU but one, at least
 /// one, so the window that shows the scan keeps a CPU.
 pub fn walker_threads(logical: usize) -> usize {
-    todo!("walker_threads({logical})")
+    logical.saturating_sub(1).max(1)
 }
 
 /// A pool of `n` threads at below-normal priority, so the window drawn while the scan runs gets
 /// the CPU first.
 pub fn background_pool(n: usize) -> Result<rayon::ThreadPool, rayon::ThreadPoolBuildError> {
-    todo!("background_pool({n})")
+    use windows_sys::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL};
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(n)
+        // SAFETY: GetCurrentThread returns a pseudo handle that is always valid on its own thread.
+        // A failed priority change leaves the thread at normal priority: the scan still runs.
+        .start_handler(|_| unsafe {
+            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+        })
+        .build()
 }
 
 /// Scans `root`: reads the NTFS `$MFT` when elevated and `root` is a whole drive, else walks
@@ -215,11 +224,21 @@ pub fn scan_with(
     // A root that cannot be resolved is not a drive root: the walker reports the error.
     let whole_volume = std::fs::canonicalize(root).is_ok_and(|p| is_volume_root(&p));
     let Route { method, fallback_to_walk } = route(whole_volume, opts.method);
+    let pool_error = |e: rayon::ThreadPoolBuildError| ScanError::Io(std::io::Error::other(e));
+    // With no thread count the walker runs on all CPUs but one at below-normal priority, so the
+    // window keeps drawing (P8 start-up stall). The MFT path stays on the global pool.
+    let walk = || match opts.threads {
+        Some(_) => walk::walk(root, &progress, cancel),
+        None => {
+            let logical = std::thread::available_parallelism().map_or(1, |n| n.get());
+            background_pool(walker_threads(logical)).map_err(pool_error)?.install(|| walk::walk(root, &progress, cancel))
+        }
+    };
     let run = || match method {
-        Method::Walk => walk::walk(root, &progress, cancel),
+        Method::Walk => walk(),
         Method::Mft => match mft::scan(root, &progress, cancel, opts.chunk) {
             Err(ScanError::Cancelled) => Err(ScanError::Cancelled),
-            Err(_) if fallback_to_walk => walk::walk(root, &progress, cancel),
+            Err(_) if fallback_to_walk => walk(),
             done => done,
         },
     };
@@ -228,7 +247,7 @@ pub fn scan_with(
         Some(n) => rayon::ThreadPoolBuilder::new()
             .num_threads(n)
             .build()
-            .map_err(|e| ScanError::Io(std::io::Error::other(e)))?
+            .map_err(pool_error)?
             .install(run),
     }
 }

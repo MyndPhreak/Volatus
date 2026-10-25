@@ -29,7 +29,7 @@ cargo run -p scan --release --example bench -- <root> [--runs N] [--method mft|w
 - `--method mft`: MFT only. Without elevation it stops with "Access is denied" instead of timing
   the walker.
 - `--chunk-mib N`: bytes per `$MFT` read (default 32). `--threads N`: rayon pool size (default:
-  one per logical CPU).
+  one per logical CPU for the MFT; one fewer, at least one, at below-normal priority for the walker).
 - `--csv out.csv` appends one row per run. `--json` prints one JSON object instead of the table.
 
 ## Steps for the user (elevated)
