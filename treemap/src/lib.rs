@@ -332,6 +332,8 @@ pub fn render_framed(tree: &Tree, rects: &[Rect], w: u32, h: u32, chrome: Chrome
     // 1 px at 100%, 2 px at 200%: border, highlight row and tile gap.
     let unit = (chrome.pad / 2.0).round().max(1.0) as usize;
     let edge = |v: f64, max: usize| (v.round().max(0.0) as usize).min(max);
+    // The column terms of one cushion tile, kept from tile to tile.
+    let mut columns = Vec::new();
     for r in rects {
         let b = Bounds { x0: edge(r.x, wu), x1: edge(r.x + r.w, wu), y0: edge(r.y, hu), y1: edge(r.y + r.h, hu) };
         if b.x0 >= b.x1 || b.y0 >= b.y1 {
@@ -343,7 +345,12 @@ pub fn render_framed(tree: &Tree, rects: &[Rect], w: u32, h: u32, chrome: Chrome
             draw_frame(&mut px, wu, &b, radius, unit, &glass);
         } else {
             let c = filetype::colour(filetype::category_of(tree.name(r.node)), theme);
-            draw_tile(&mut px, wu, &b, radius, unit, c);
+            // Under 24 logical px (the pad is 2 logical px) on the short side: a cushion.
+            if side < 12.0 * chrome.pad {
+                draw_cushion(&mut px, wu, &b, radius, unit, c, &mut columns);
+            } else {
+                draw_tile(&mut px, wu, &b, radius, unit, c);
+            }
         }
     }
     // Back to straight alpha: c * 255 / a, through a 16.16 reciprocal per alpha.
@@ -469,11 +476,23 @@ fn draw_frame(px: &mut [u32], wu: usize, b: &Bounds, radius: f64, unit: usize, g
 /// White over a tile's colour at its top edge: the top highlight (`filetype::ink` reads it too).
 pub(crate) const TILE_HIGHLIGHT: f64 = 0.28;
 
+/// White over a small tile at the bright spot of its cushion (30% across, 25% down), gone at 0.6
+/// of the spot's reach (0.8 of the tile). Mockup `style.html` option A.
+const CUSHION_LIGHT: f32 = 0.55;
+/// Black over a small tile at the dark spot of its cushion (70% across, 80% down), gone at 0.65 of
+/// the tile.
+const CUSHION_DARK: f32 = 0.45;
+
+/// The painted part of tile `b`: a `unit` gap on its right and bottom when it has room.
+fn tile_bounds(b: &Bounds, unit: usize) -> Bounds {
+    let gap = |lo: usize, hi: usize| if hi - lo >= 3 * unit { hi - unit } else { hi };
+    Bounds { x1: gap(b.x0, b.x1), y1: gap(b.y0, b.y1), ..*b }
+}
+
 /// An opaque tile in colour `c`, lit from the top, with a `unit` gap on its right and bottom
 /// when it has room. Rounded tiles also get a light ring.
 fn draw_tile(px: &mut [u32], wu: usize, b: &Bounds, radius: f64, unit: usize, c: [u8; 3]) {
-    let gap = |lo: usize, hi: usize| if hi - lo >= 3 * unit { hi - unit } else { hi };
-    let t = Bounds { x1: gap(b.x0, b.x1), y1: gap(b.y0, b.y1), ..*b };
+    let t = tile_bounds(b, unit);
     let ring = radius > 0.0;
     let lighten = |c: [u8; 3], a: f64| c.map(|v| (f64::from(v) + (255.0 - f64::from(v)) * a).round() as u8);
     let height = (t.y1 - t.y0) as f64;
@@ -505,6 +524,69 @@ fn draw_tile(px: &mut [u32], wu: usize, b: &Bounds, radius: f64, unit: usize, c:
             }
         }
     }
+}
+
+/// Tile `b` in colour `c` as a cushion, with the gap of `draw_tile`: a white `CUSHION_LIGHT` spot
+/// and a black `CUSHION_DARK` spot over the colour. Each fades with the square of the distance
+/// from its centre, so its strength is a term across plus a term down: a pixel costs two additions
+/// and no square root. Rounded tiles keep their light ring and cut corners. `columns` is scratch
+/// space for the terms across.
+fn draw_cushion(px: &mut [u32], wu: usize, b: &Bounds, radius: f64, unit: usize, c: [u8; 3], columns: &mut Vec<(i32, i32)>) {
+    // In 1/256 steps. The light spot reaches 0.6 x 0.8 of the tile, the dark spot 0.65 of it.
+    const LIGHT: f32 = CUSHION_LIGHT * 256.0;
+    const DARK: f32 = CUSHION_DARK * 256.0;
+    let t = tile_bounds(b, unit);
+    let ring = radius > 0.0;
+    let (w, h) = ((t.x1 - t.x0) as f32, (t.y1 - t.y0) as f32);
+    columns.clear();
+    columns.extend((0..t.x1 - t.x0).map(|k| {
+        let u = (k as f32 + 0.5) / w;
+        ((-LIGHT * ((u - 0.3) / 0.48).powi(2)) as i32, (-DARK * ((u - 0.7) / 0.65).powi(2)) as i32)
+    }));
+    let (rb, g) = (u32::from(c[0]) | u32::from(c[2]) << 16, u32::from(c[1]));
+    for y in t.y0..t.y1 {
+        let v = ((y - t.y0) as f32 + 0.5) / h;
+        let (light_v, dark_v) = ((LIGHT * (1.0 - ((v - 0.25) / 0.48).powi(2))) as i32, (DARK * (1.0 - ((v - 0.8) / 0.65).powi(2))) as i32);
+        let at = |&(light_u, dark_u): &(i32, i32), rim: bool| {
+            let add = (light_u + light_v).max(0) as u32;
+            // The ring is a further 14% white.
+            let add = if rim { 256 - (256 - add) * 86 / 100 } else { add };
+            shade(rb, g, add, (dark_u + dark_v).max(0) as u32)
+        };
+        let row = &mut px[y * wu + t.x0..y * wu + t.x1];
+        let corner_row = (y as f64) < t.y0 as f64 + radius || (y + 1) as f64 > t.y1 as f64 - radius;
+        if !corner_row {
+            for (p, col) in row.iter_mut().zip(columns.iter()) {
+                *p = at(col, false);
+            }
+            if ring {
+                let n = row.len();
+                (row[0], row[n - 1]) = (at(&columns[0], true), at(&columns[n - 1], true));
+            }
+            continue;
+        }
+        let edge_row = ring && (y == t.y0 || y + 1 == t.y1);
+        let n = row.len();
+        for (k, (p, col)) in row.iter_mut().zip(columns.iter()).enumerate() {
+            let col = at(col, edge_row || (ring && (k == 0 || k + 1 == n)));
+            let cov = t.coverage(t.x0 + k, y, radius);
+            if cov >= 1.0 {
+                *p = col;
+            } else if cov > 0.0 {
+                *p = over(*p, scale(col, cov));
+            }
+        }
+    }
+}
+
+/// Opaque packed colour (`rb` red and blue, `g` green) with black of strength `dark` over it,
+/// then white of strength `add`, both in 1/256 steps (at most 256). Two channels at a time.
+fn shade(rb: u32, g: u32, add: u32, dark: u32) -> u32 {
+    let keep = 256 - dark.min(256);
+    let (rb, g) = (((rb * keep) >> 8) & 0x00FF_00FF, (g * keep) >> 8);
+    let rb = rb + ((((0x00FF_00FF - rb) * add) >> 8) & 0x00FF_00FF);
+    let g = g + (((255 - g) * add) >> 8);
+    rb | g << 8 | 0xFF00_0000
 }
 
 /// Golden-ratio hash of the node id: neighbours get visibly different, mid-bright colours.
