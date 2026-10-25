@@ -142,6 +142,13 @@ $want = foreach ($key in $MenuKeys.Keys) {
 $found = $registry | ForEach-Object { "$($_[1])|$($_[2])|$($_[3])" }
 $missing = @($want | Where-Object { $found -notcontains $_ })
 Check ($registry.Count -eq 12 -and $missing.Count -eq 0) "Registry: the 12 menu rows (3 keys x label, Icon, command, create/delete)$(if ($missing) { "; missing $($missing -join ', ')" })"
+# Attributes 256 (64-bit): the keys go to the 64-bit registry view, not WOW6432Node.
+$menuComponents = @($registry | ForEach-Object { $_[4] } | Sort-Object -Unique)
+Check (($menuComponents -join ', ') -eq 'MenuBackground, MenuDirectory, MenuDrive') "Registry rows belong to MenuBackground, MenuDirectory, MenuDrive (found $($menuComponents -join ', '))"
+foreach ($component in $menuComponents) {
+  $attributes = Rows "SELECT ``Attributes`` FROM ``Component`` WHERE ``Component`` = '$component'"
+  Check ($attributes.Count -eq 1 -and ([int]$attributes[0][0] -band 256) -eq 256) "Component $component is 64-bit (Attributes $($attributes[0][0]) has 256)"
+}
 $features = Rows "SELECT ``Feature_Parent``, ``Level`` FROM ``Feature`` WHERE ``Feature`` = 'ExplorerMenu'"
 Check ($features.Count -eq 1 -and $features[0][0] -eq 'Main' -and $features[0][1] -eq '1') 'Feature ExplorerMenu: child of Main, Level 1'
 $menuOff = Rows "SELECT ``Level``, ``Condition`` FROM ``Condition`` WHERE ``Feature_`` = 'ExplorerMenu'"
