@@ -345,6 +345,13 @@ pub fn offer_elevation(method: Method, root: &Path, is_admin: bool) -> bool {
     method == Method::Walk && !is_admin && scan::is_volume_root(root)
 }
 
+/// [`offer_elevation`] for the window in `state`: only a finished scan can offer it. `root` is the
+/// scan root as the worker resolved it once per scan; `None` while it is not known gives no offer.
+pub fn offer_for(state: &ScanState, root: Option<&Path>, is_admin: bool) -> bool {
+    let _ = (state, root, is_admin);
+    todo!("offer_for")
+}
+
 /// Text for the status banner in each state. Never empty. `offer_elevation` is the result of
 /// [`offer_elevation`] for the finished scan: the restart hint shows only when the button does.
 pub fn banner_text(state: &ScanState, offer_elevation: bool) -> String {
@@ -1041,6 +1048,32 @@ mod tests {
         for (method, root, admin, want) in cases {
             assert_eq!(offer_elevation(method, Path::new(root), admin), want, "{method:?} {root} admin={admin}");
         }
+    }
+
+    // ---- offer_for ----
+    /// Every state with every resolved root (none yet, a drive, a folder), walker, not admin: only a
+    /// finished scan of a whole drive offers the restart.
+    #[test]
+    fn offer_for_covers_every_state_and_resolved_root() {
+        let states = [
+            ScanState::Idle,
+            ScanState::Scanning { files: 1, dirs: 1 },
+            ScanState::Done(summary(Method::Walk, 0)),
+            ScanState::Error("bad".into()),
+            ScanState::Cancelled,
+        ];
+        let roots = [None, Some(Path::new(r"C:\")), Some(Path::new(r"C:\Users"))];
+        for state in &states {
+            for root in roots {
+                let want = matches!(state, ScanState::Done(_)) && root == Some(Path::new(r"C:\"));
+                assert_eq!(offer_for(state, root, false), want, "{state:?} {root:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn offer_for_finished_drive_scan_as_admin_gives_no_offer() {
+        assert!(!offer_for(&ScanState::Done(summary(Method::Walk, 0)), Some(Path::new(r"C:\")), true));
     }
 
     // ---- display_name ----
