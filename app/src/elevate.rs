@@ -71,7 +71,7 @@ pub fn restart_as_admin(scan_path: &str, flags: crate::cli::Flags) -> Result<(),
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::{quote_arg, relaunch_args, wide};
     use crate::cli::Flags;
     use scan::Method;
@@ -85,7 +85,7 @@ mod tests {
     }
 
     /// Parses `command_line` with the real Windows rules, as the elevated copy's runtime does.
-    fn argv(command_line: &str) -> Vec<String> {
+    pub(crate) fn argv(command_line: &str) -> Vec<String> {
         let line = wide(command_line.as_ref());
         let mut count = 0;
         // SAFETY: `line` is NUL terminated; the returned block is read within `count` and freed once.
