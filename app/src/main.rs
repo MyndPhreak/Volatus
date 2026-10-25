@@ -1419,6 +1419,13 @@ fn take_launch_path() -> Option<String> {
     SESSION.with_borrow_mut(|s| s.launch_path.take())
 }
 
+/// The folder the elevated copy scans: none from the start screen, so the copy opens on the start
+/// screen; else the root of the shown scan, as typed.
+fn relaunch_path(start_screen: bool, scan_root: &std::path::Path) -> String {
+    let _ = (start_screen, scan_root);
+    todo!("relaunch_path")
+}
+
 /// Starts the elevated copy through `launch(path, timing)`. `--timing` is carried over from the session.
 fn restart_admin(path: &str, launch: impl FnOnce(&str, bool) -> Result<(), String>) -> Result<(), String> {
     launch(path, SESSION.with_borrow(|s| s.timing))
@@ -1430,7 +1437,7 @@ mod tests {
         Data, FILE_LABEL_TWO_LINES, FileLabel, FrameLabel, Hover, LABEL_CAP, ZoomFrame, ZoomMove, frame_at,
         Loaded, RowModel, SESSION, file_labels, frame_labels, glow_drawn, hover_of, map_labels, note_hover, restart_admin,
         store_chips, Move, picture_point, zoom_frame_at, take_launch_path, forget_scan, gate_hover, left_map,
-        shows_start_at_launch,
+        shows_start_at_launch, relaunch_path,
     };
     use crate::tip;
     use crate::motion::Kind;
@@ -1982,6 +1989,16 @@ mod tests {
     fn restart_admin_launch_error_is_returned() {
         let result = restart_admin("some folder", |_, _| Err("code 5".into()));
         assert_eq!(result, Err("code 5".to_string()));
+    }
+
+    #[test]
+    fn relaunch_path_on_the_start_screen_is_no_folder() {
+        assert_eq!(relaunch_path(true, std::path::Path::new("D:\\Old scan")), "");
+    }
+
+    #[test]
+    fn relaunch_path_on_the_results_screen_is_the_scan_root() {
+        assert_eq!(relaunch_path(false, std::path::Path::new("D:\\Data")), "D:\\Data");
     }
 
     fn launch_with(path: Option<&str>) {

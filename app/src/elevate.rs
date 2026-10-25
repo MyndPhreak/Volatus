@@ -143,6 +143,27 @@ mod tests {
     }
 
     #[test]
+    fn relaunch_args_with_no_folder_is_empty() {
+        assert_eq!(relaunch_args("", false), "");
+    }
+
+    #[test]
+    fn relaunch_args_with_no_folder_and_timing_is_only_the_flag() {
+        assert_eq!(relaunch_args("", true), "--timing");
+    }
+
+    #[test]
+    fn relaunch_args_with_no_folder_parse_to_the_start_screen_with_timing_kept() {
+        for timing in [false, true] {
+            let line = format!("volatus.exe {}", relaunch_args("", timing));
+
+            let parsed = crate::cli::parse_args(argv(&line).into_iter().skip(1));
+
+            assert_eq!(parsed, crate::cli::Args { timing, path: None }, "command line {line:?}");
+        }
+    }
+
+    #[test]
     fn relaunch_args_dash_path_stays_after_the_separator() {
         assert_eq!(relaunch_args("--timing", false), "-- \"--timing\"");
     }

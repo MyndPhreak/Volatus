@@ -426,11 +426,13 @@ mod tests {
     fn admin_note_is_shown_only_when_not_admin_and_a_listed_drive_is_ntfs() {
         let ntfs = DriveInfo { is_ntfs: true, ..info('C', "", DriveKind::Fixed, None) };
         let fat = info('E', "", DriveKind::Removable, None);
-        let note = "Scans of a whole NTFS drive are faster as administrator.";
-        let cases: [(&[DriveInfo], bool, &str); 7] = [
+        let note = "Whole NTFS drives scan much faster as administrator. Volatus then reads the file index (the MFT) directly.";
+        // No drives is also the state while the first drive list loads: the window starts with no note.
+        let cases: [(&[DriveInfo], bool, &str); 8] = [
             (&[], false, ""),
             (&[], true, ""),
             (std::slice::from_ref(&fat), false, ""),
+            (std::slice::from_ref(&fat), true, ""),
             (std::slice::from_ref(&ntfs), true, ""),
             (std::slice::from_ref(&ntfs), false, note),
             (&[fat.clone(), ntfs.clone()], false, note),
