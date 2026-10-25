@@ -126,6 +126,10 @@
            major upgrades (MajorUpgrade migrates feature states). A child of Main: its command
            names Main's exe ([INSTALLFOLDER]volatus.exe), so the exe is always there with it. -->
       <Feature Id="ExplorerMenu" Title="Explorer menu" Level="1" AllowAdvertise="no">
+        <!-- EXPLORERMENU=0 on the command line (also with /qn) leaves the menu out. First install
+             or upgrade only: a level of 0 on an installed feature would keep its keys at
+             uninstall. -->
+        <Condition Level="0">NOT Installed AND EXPLORERMENU = "0"</Condition>
         <ComponentRef Id="MenuDirectory"/>
         <ComponentRef Id="MenuBackground"/>
         <ComponentRef Id="MenuDrive"/>

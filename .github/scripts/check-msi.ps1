@@ -144,6 +144,8 @@ $missing = @($want | Where-Object { $found -notcontains $_ })
 Check ($registry.Count -eq 12 -and $missing.Count -eq 0) "Registry: the 12 menu rows (3 keys x label, Icon, command, create/delete)$(if ($missing) { "; missing $($missing -join ', ')" })"
 $features = Rows "SELECT ``Feature_Parent``, ``Level`` FROM ``Feature`` WHERE ``Feature`` = 'ExplorerMenu'"
 Check ($features.Count -eq 1 -and $features[0][0] -eq 'Main' -and $features[0][1] -eq '1') 'Feature ExplorerMenu: child of Main, Level 1'
+$menuOff = Rows "SELECT ``Level``, ``Condition`` FROM ``Condition`` WHERE ``Feature_`` = 'ExplorerMenu'"
+Check ($menuOff.Count -eq 1 -and $menuOff[0][0] -eq '0' -and $menuOff[0][1] -eq 'NOT Installed AND EXPLORERMENU = "0"') 'Condition: ExplorerMenu Level 0 when NOT Installed AND EXPLORERMENU = "0"'
 Check ((Property 'EXPLORERMENU') -eq '1') 'EXPLORERMENU = 1 (menu checkbox ticked by default)'
 Check ((Property 'SecureCustomProperties') -split ';' -contains 'EXPLORERMENU') 'EXPLORERMENU is a secure property'
 
