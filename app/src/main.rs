@@ -181,6 +181,8 @@ struct Layout {
     rects: Vec<Rect>,
     image: Option<SharedPixelBuffer<Rgba8Pixel>>,
     labels: (Vec<FrameLabel>, Vec<FileLabel>),
+    /// The treemap size it was made for, in logical pixels.
+    size: (f32, f32),
 }
 
 /// A move of a picture over the treemap, from frame `from` to frame `to` in physical pixels.
@@ -337,7 +339,7 @@ fn relayout(ui: &MainWindow) {
         let _ = slint::invoke_from_event_loop(move || {
             let current = SESSION.with_borrow(|s| (s.scan.generation(), s.layout_seq));
             if let Some(ui) = weak.upgrade().filter(|_| current == (generation, seq)) {
-                land(&ui, Layout { root, rects, image, labels });
+                land(&ui, Layout { root, rects, image, labels, size: (w as f32 / scale, h as f32 / scale) });
             }
         });
     });
@@ -573,7 +575,7 @@ fn hide_tip(ui: &MainWindow) {
 }
 
 /// Shows a finished layout of `root`: the image, its rects and labels, the crumbs and the selection.
-fn show_layout(ui: &MainWindow, Layout { root, rects, image, labels: (labels, file_labels) }: Layout) {
+fn show_layout(ui: &MainWindow, Layout { root, rects, image, labels: (labels, file_labels), size }: Layout) {
     let Some((crumbs, note)) = with_loaded(|l| {
         let tree = &l.data.tree;
         let note = tree_view::map_note(tree, root, &rects, image.is_some());
@@ -586,6 +588,8 @@ fn show_layout(ui: &MainWindow, Layout { root, rects, image, labels: (labels, fi
     if let Some(px) = image {
         ui.set_treemap(Image::from_rgba8(px));
     }
+    ui.set_layout_width(size.0);
+    ui.set_layout_height(size.1);
     ui.set_labels(ModelRc::new(VecModel::from(labels)));
     ui.set_file_labels(ModelRc::new(VecModel::from(file_labels)));
     ui.set_map_note(note.into());
@@ -606,16 +610,25 @@ type LogicalBox = (f32, f32, f32, f32);
 /// that layout stretched over it: each axis scales by its own factor, so the box stays on its frame.
 /// An axis with no `from` size (no layout yet) does not scale.
 fn stretch(b: LogicalBox, from: (f32, f32), to: (f32, f32)) -> LogicalBox {
-    let _ = (b, from, to);
-    todo!("stretch")
+    // `from > 0` is false for NaN too.
+    let factor = |from: f32, to: f32| if from > 0.0 { to / from } else { 1.0 };
+    let (fx, fy) = (factor(from.0, to.0), factor(from.1, to.1));
+    (b.0 * fx, b.1 * fy, b.2 * fx, b.3 * fy)
 }
 
 /// Label or outline `p` of the layout made for a `from` map, on the `to` map (`stretch`). A label
 /// shows only while its box is still as big as a label of `kind` needs; the text keeps its size. A
 /// file label keeps the size on a second line only while the box is high enough for two lines.
 fn place_label(p: Placed, kind: LabelKind, from: (f32, f32), to: (f32, f32)) -> Placed {
-    let _ = (p, kind, from, to);
-    todo!("place_label")
+    let (x, y, width, height) = stretch((p.x, p.y, p.width, p.height), from, to);
+    // A frame label needs its least width and, like a file label, the height of one line of text.
+    let (min_w, min_h) = match kind {
+        LabelKind::Frame => (LABEL_MIN_WIDTH, treemap::FILE_LABEL_MIN_HEIGHT),
+        LabelKind::File => (treemap::FILE_LABEL_MIN_WIDTH, treemap::FILE_LABEL_MIN_HEIGHT),
+        LabelKind::Outline => (0.0, 0.0),
+    };
+    let (w, h) = (f64::from(width), f64::from(height));
+    Placed { x, y, width, height, shown: w >= min_w && h >= min_h, two_lines: h >= FILE_LABEL_TWO_LINES }
 }
 
 /// The frame of move `m` at time `t` (0 to 1) of the move, eased out: `treemap::zoom_at` for the
@@ -1253,6 +1266,7 @@ fn wire_tree_and_treemap(ui: &MainWindow) {
     ui.on_tip_position(tree_view::tip_position);
     ui.on_tip_break_points(|path| tip::break_points(&path).into());
     ui.on_zoom_frame(|m, t| frame_at(&m, t));
+    ui.on_place_label(|p, kind, from_w, from_h, to_w, to_h| place_label(p, kind, (from_w, from_h), (to_w, to_h)));
     ui.on_theme_changed({
         let weak = ui.as_weak();
         move || {
@@ -2264,7 +2278,7 @@ mod tests {
         let data = data();
         SESSION.with_borrow_mut(|s| {
             s.loaded = Some(loaded(&data));
-            s.held = Some(super::Layout { root: NodeId(0), rects: Vec::new(), image: None, labels: (Vec::new(), Vec::new()) });
+            s.held = Some(super::Layout { root: NodeId(0), rects: Vec::new(), image: None, labels: (Vec::new(), Vec::new()), size: (0.0, 0.0) });
             s.out_from = Some(NodeId(1));
             s.fade_next = true;
         });

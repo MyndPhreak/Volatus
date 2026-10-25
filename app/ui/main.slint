@@ -141,6 +141,9 @@ export component MainWindow inherits Window {
     in property <[FrameLabel]> labels;
     /// Labels of the treemap file tiles.
     in property <[FileLabel]> file-labels;
+    /// The treemap size the shown picture and labels were made for, in logical pixels.
+    in property <length> layout-width;
+    in property <length> layout-height;
     /// The treemap node under the pointer.
     in property <Hover> hover;
     /// The renderer draws drop shadows (false: the software renderer).
@@ -197,6 +200,8 @@ export component MainWindow inherits Window {
     pure callback tip-break-points(string) -> string;
     /// Where the moving picture is at time t (0 to 1) of a move.
     pure callback zoom-frame(ZoomMove, float) -> ZoomFrame;
+    /// Where a label or outline of the shown layout goes on the stretched treemap picture.
+    pure callback place-label(Placed, LabelKind, length, length, length, length) -> Placed;
     callback restart-admin();
     /// The system theme changed between light and dark.
     callback theme-changed();
@@ -448,6 +453,8 @@ export component MainWindow inherits Window {
                         value: root.map-value;
                         labels: root.labels;
                         file-labels: root.file-labels;
+                        layout-width: root.layout-width;
+                        layout-height: root.layout-height;
                         has-selection: root.has-selection;
                         selection-x: root.selection-x;
                         selection-y: root.selection-y;
@@ -469,6 +476,7 @@ export component MainWindow inherits Window {
                         tip-position(pointer, size, extent, gap) => { return root.tip-position(pointer, size, extent, gap); }
                         break-points(path) => { return root.tip-break-points(path); }
                         zoom-frame(m, t) => { return root.zoom-frame(m, t); }
+                        place(p, kind, from-w, from-h, to-w, to-h) => { return root.place-label(p, kind, from-w, from-h, to-w, to-h); }
                         clicked(x, y) => { root.treemap-click(x, y); }
                         double-clicked(x, y) => { root.treemap-open(x, y); }
                         key(k) => { root.map-key(k); }

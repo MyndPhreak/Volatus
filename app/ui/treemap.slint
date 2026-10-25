@@ -281,6 +281,16 @@ export component TreemapView inherits Rectangle {
     callback resized(float, float);
     /// Where the moving picture is at time t (0 to 1) of move `zoom`.
     pure callback zoom-frame(ZoomMove, float) -> ZoomFrame;
+    /// The map size the shown picture and its labels were made for. After a resize the picture is
+    /// stretched over the map until the new layout lands, and the labels and outlines go with it.
+    in property <length> layout-width;
+    in property <length> layout-height;
+    /// Where a label or outline of kind `LabelKind` of the shown layout goes on the stretched
+    /// picture: (box, kind, layout width, layout height, map width, map height).
+    pure callback place(Placed, LabelKind, length, length, length, length) -> Placed;
+    /// The hovered node on the stretched picture, and the label of a lifted tile.
+    private property <Placed> hover-at: root.place({ x: root.hover.x, y: root.hover.y, width: root.hover.width, height: root.hover.height, shown: true, two-lines: false }, LabelKind.outline, root.layout-width, root.layout-height, root.width, root.height);
+    private property <Placed> hover-label-at: root.place({ x: root.hover.x, y: root.hover.y, width: root.hover.width, height: root.hover.height, shown: true, two-lines: false }, LabelKind.file, root.layout-width, root.layout-height, root.width, root.height);
 
     /// The move starts now: `zoom-t` is 0.
     public function start-zoom() {
@@ -329,11 +339,12 @@ export component TreemapView inherits Rectangle {
         // Above the picture, so no frame cuts a label off. The name keeps its full width when it
         // fits and is cut with "…" when it does not; the size takes what is left.
         for l in root.labels : Rectangle {
-            visible: !root.zoom-shown;
-            x: l.x;
-            y: l.y;
-            width: l.width;
-            height: l.height;
+            property <Placed> at: root.place({ x: l.x, y: l.y, width: l.width, height: l.height, shown: true, two-lines: false }, LabelKind.frame, root.layout-width, root.layout-height, root.width, root.height);
+            visible: !root.zoom-shown && self.at.shown;
+            x: self.at.x;
+            y: self.at.y;
+            width: self.at.width;
+            height: self.at.height;
             label-name := Text {
                 x: 3px;
                 width: min(self.preferred-width, parent.width - 6px);
@@ -359,12 +370,13 @@ export component TreemapView inherits Rectangle {
         }
         // File names on their tiles, in the tile's ink.
         for f in root.file-labels : FileLabelView {
-            visible: !root.zoom-shown;
-            x: f.x;
-            y: f.y;
-            width: f.width;
-            height: f.height;
-            label: f;
+            property <Placed> at: root.place({ x: f.x, y: f.y, width: f.width, height: f.height, shown: true, two-lines: f.two-lines }, LabelKind.file, root.layout-width, root.layout-height, root.width, root.height);
+            visible: !root.zoom-shown && self.at.shown;
+            x: self.at.x;
+            y: self.at.y;
+            width: self.at.width;
+            height: self.at.height;
+            label: { x: f.x, y: f.y, width: f.width, height: f.height, name: f.name, size: f.size, ink: f.ink, two-lines: self.at.two-lines };
         }
         if root.note != "" : Text {
             text: root.note;
@@ -377,20 +389,21 @@ export component TreemapView inherits Rectangle {
     }
     // The selection outline, above the frames. It slides to the next selected node.
     if root.has-selection && !root.zoom-shown : Rectangle {
-        x: root.selection-x;
-        y: root.selection-y;
-        width: root.selection-width;
-        height: root.selection-height;
+        property <Placed> at: root.place({ x: root.selection-x, y: root.selection-y, width: root.selection-width, height: root.selection-height, shown: true, two-lines: false }, LabelKind.outline, root.layout-width, root.layout-height, root.width, root.height);
+        x: self.at.x;
+        y: self.at.y;
+        width: self.at.width;
+        height: self.at.height;
         border-width: 2px;
         border-color: Palette.foreground;
         animate x, y, width, height { duration: 120ms; easing: ease-out; }
     }
     // The hover, above everything in the map. A folder frame gets a light highlight, with no lift.
     if root.hover.visible && !root.hover.lift && !root.zoom-shown : Rectangle {
-        x: root.hover.x;
-        y: root.hover.y;
-        width: root.hover.width;
-        height: root.hover.height;
+        x: root.hover-at.x;
+        y: root.hover-at.y;
+        width: root.hover-at.width;
+        height: root.hover-at.height;
         border-radius: min(4px, min(self.width, self.height) / 2);
         background: Palette.foreground.transparentize(93%);
         border-width: 1px;
@@ -400,29 +413,29 @@ export component TreemapView inherits Rectangle {
     // so a clear rect 3 px bigger on each side carries the shadow to give the glow more reach (P1
     // spike). Without shadows (software renderer) the tile gets a 2 px bright border instead.
     if root.hover.visible && root.hover.lift && !root.zoom-shown : Rectangle {
-        x: root.hover.x - 3px;
-        y: root.hover.y - 2px - 3px;
-        width: root.hover.width + 6px;
-        height: root.hover.height + 6px;
-        border-radius: min(4px, min(root.hover.width, root.hover.height) / 2) + 3px;
+        x: root.hover-at.x - 3px;
+        y: root.hover-at.y - 2px - 3px;
+        width: root.hover-at.width + 6px;
+        height: root.hover-at.height + 6px;
+        border-radius: min(4px, min(root.hover-at.width, root.hover-at.height) / 2) + 3px;
         drop-shadow-blur: root.glow ? 14px : 0px;
         drop-shadow-color: root.glow ? root.hover.color : transparent;
         Rectangle {
             x: 3px;
             y: 3px;
-            width: root.hover.width;
-            height: root.hover.height;
+            width: root.hover-at.width;
+            height: root.hover-at.height;
             border-radius: min(4px, min(self.width, self.height) / 2);
             background: @linear-gradient(180deg, root.hover.color.brighter(45%) 0%, root.hover.color.brighter(15%) 55%);
             border-width: root.glow ? 1px : 2px;
             border-color: root.glow ? #ffffff99 : #ffffffd9;
             // The lifted tile covers the label on the picture, so it shows the label itself.
-            if root.hover.labelled : FileLabelView {
+            if root.hover.labelled && root.hover-label-at.shown : FileLabelView {
                 x: 0px;
                 y: 0px;
                 width: 100%;
                 height: 100%;
-                label: root.hover.label;
+                label: { x: root.hover.label.x, y: root.hover.label.y, width: root.hover.label.width, height: root.hover.label.height, name: root.hover.label.name, size: root.hover.label.size, ink: root.hover.label.ink, two-lines: root.hover-label-at.two-lines };
             }
         }
     }
