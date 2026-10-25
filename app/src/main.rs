@@ -1356,6 +1356,11 @@ fn sync_browsing(ui: &MainWindow) {
     ui.set_browsing(SESSION.with_borrow(|s| s.browse.is_open()));
 }
 
+/// Keeps the options and notices of the command line for the whole run.
+fn apply_args(_args: &cli::Args) {
+    todo!("apply_args")
+}
+
 fn main() {
     let args = cli::parse_args(std::env::args().skip(1));
     SESSION.with_borrow_mut(|s| {
@@ -1483,6 +1488,7 @@ mod tests {
         Loaded, RowModel, SESSION, file_labels, frame_labels, glow_drawn, hover_of, map_labels, note_hover, restart_admin,
         store_chips, Move, picture_point, zoom_frame_at, take_launch_path, forget_scan, gate_hover, left_map,
         shows_start_at_launch, relaunch_path, LabelKind, LogicalBox, Placed, place_label, stretch,
+        apply_args,
     };
     use crate::tip;
     use crate::motion::Kind;
@@ -1925,6 +1931,17 @@ mod tests {
         for ((w, h), to, want) in cases {
             assert_eq!(place_label(placed(w, h), LabelKind::File, (100.0, 100.0), to).two_lines, want, "{w} x {h} to {to:?}");
         }
+    }
+
+    #[test]
+    fn apply_args_keeps_the_flags_and_the_notices_in_the_session() {
+        let args = crate::cli::parse_args_with(["--threads", "3", "--method", "walk", "--timing", "--foo"].map(String::from), 8);
+
+        apply_args(&args);
+
+        let (flags, notices) = SESSION.with_borrow(|s| (s.flags, s.notices.clone()));
+        assert_eq!((flags.threads, flags.method, flags.timing), (Some(3), Some(Method::Walk), true));
+        assert_eq!(notices, vec!["Volatus ignored the unknown option --foo.".to_string()]);
     }
 
     fn zf(x: f32, y: f32, width: f32, height: f32, opacity: f32) -> ZoomFrame {
