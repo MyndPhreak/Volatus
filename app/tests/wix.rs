@@ -450,6 +450,20 @@ fn the_menu_is_a_feature_on_by_default_offered_on_first_install_only() {
     assert!(add[0].2 < new_dialog[0].2 && remove[0].2 < new_dialog[0].2, "the choice is applied before the page changes");
 }
 
+/// `msiexec /i volatus.msi /qn EXPLORERMENU=0` installs without the menu: the property sets the
+/// feature's level to 0, also with no UI. First install or upgrade only (`NOT Installed`): a level
+/// of 0 on an installed feature would keep its keys at uninstall.
+#[test]
+fn explorermenu_0_on_the_command_line_leaves_the_menu_out() {
+    let source = source();
+    let doc = Document::parse(&source).unwrap();
+    let feature = by_id(&doc, "Feature", "ExplorerMenu");
+    let conditions: Vec<Node> = feature.children().filter(|n| is(n, "Condition")).collect();
+    assert_eq!(conditions.len(), 1, "one feature condition");
+    assert_eq!(attr(&conditions[0], "Level"), Some("0"), "the feature is left out");
+    assert_eq!(clauses(&conditions[0]), set(&["NOT Installed", r#"EXPLORERMENU = "0""#]));
+}
+
 /// The menu's command names the exe in the install folder, so it is only right when the exe is
 /// installed too: the menu feature is a child of the exe's feature, and that feature can't be
 /// left out.
