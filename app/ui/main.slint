@@ -13,6 +13,8 @@ export struct TreeRow {
     depth: int,
     expanded: bool,
     has-children: bool,
+    /// What a screen reader says for the row: name, size, percent and files.
+    spoken: string,
 }
 
 /// One file type in the footer: its share of the scan and its tile colour. Text is formatted by the host.
@@ -21,6 +23,8 @@ export struct TypeChip {
     percent: string,
     share: float,
     color: color,
+    /// What a screen reader says for the chip: label, percent and size.
+    spoken: string,
 }
 
 /// Sort column ids shared with the host: 0 name, 1 size, 2 percent of parent, 3 files.
@@ -56,6 +60,7 @@ component HeaderCell inherits Rectangle {
             font-weight: 600;
             text: root.text + (root.active ? (root.descending ? " ▼" : " ▲") : "");
             overflow: elide;
+            accessible-role: none;
         }
         touch := TouchArea { clicked => { root.clicked(); focus.focus(); } }
     }
@@ -74,6 +79,7 @@ component NumberCell inherits Rectangle {
         vertical-alignment: center;
         overflow: elide;
         color: root.text-color;
+        accessible-role: none;
     }
 }
 
@@ -129,6 +135,8 @@ export component MainWindow inherits Window {
     in property <length> selection-height;
     /// Text over the treemap when it shows nothing, or "".
     in property <string> map-note;
+    /// The selected node for a screen reader: its name and size.
+    in property <string> map-value;
     /// Labels of the treemap frames.
     in property <[FrameLabel]> labels;
     /// Labels of the treemap file tiles.
@@ -355,6 +363,7 @@ export component MainWindow inherits Window {
                             return accept;
                         }
                         list := ListView {
+                            accessible-label: "Rows of the file tree";
                             // Inside the focus ring, so the ring does not cover the last column.
                             x: 2px;
                             y: 2px;
@@ -363,6 +372,10 @@ export component MainWindow inherits Window {
                             for row[i] in root.rows : Rectangle {
                                 height: 24px;
                                 border-radius: 4px;
+                                accessible-role: list-item;
+                                accessible-label: row.spoken;
+                                accessible-item-selected: i == root.selected-row;
+                                accessible-item-index: i;
                                 background: i == root.selected-row ? Palette.selection-background : (row-touch.has-hover ? Palette.alternate-background : transparent);
                                 row-touch := TouchArea { clicked => { root.tree-select(i); tree-focus.focus(); } }
                                 HorizontalLayout {
@@ -387,6 +400,7 @@ export component MainWindow inherits Window {
                                                 text: row.name;
                                                 vertical-alignment: center;
                                                 overflow: elide;
+                                                accessible-role: none;
                                                 color: i == root.selected-row ? Palette.selection-foreground : Palette.foreground;
                                             }
                                         }
@@ -426,6 +440,7 @@ export component MainWindow inherits Window {
                         vertical-stretch: 1;
                         source: root.treemap;
                         note: root.map-note;
+                        value: root.map-value;
                         labels: root.labels;
                         file-labels: root.file-labels;
                         has-selection: root.has-selection;
@@ -512,6 +527,7 @@ export component MainWindow inherits Window {
                             overflow: elide;
                             color: Palette.foreground.transparentize(20%);
                             accessible-role: text;
+                            accessible-label: chip.spoken;
                         }
                     }
                 }

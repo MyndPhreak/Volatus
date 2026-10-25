@@ -97,11 +97,14 @@ impl Model for RowModel {
         let tree = &self.data.tree;
         let node = tree.node(row.node);
         let parent_size = node.parent.map_or(node.size, |p| tree.node(p).size);
+        let (name, size) = (model::display_name(tree.name(row.node)), format_size(node.size));
+        let (percent, files) = (tree_view::format_percent(node.size, parent_size), self.data.counts[row.node.0 as usize]);
         Some(TreeRow {
-            name: model::display_name(tree.name(row.node)).as_ref().into(),
-            size: format_size(node.size).into(),
-            percent: tree_view::format_percent(node.size, parent_size).into(),
-            files: group_digits(self.data.counts[row.node.0 as usize]).into(),
+            spoken: tree_view::row_spoken(&name, &size, &percent, files).into(),
+            name: name.as_ref().into(),
+            size: size.into(),
+            percent: percent.into(),
+            files: group_digits(files).into(),
             depth: row.depth as i32,
             expanded: row.expanded,
             has_children: row.has_children,
@@ -281,8 +284,11 @@ fn sync_rows(ui: &MainWindow) {
 
 /// Moves the selection outline to the selected node's area in the shown treemap, or to its
 /// nearest drawn folder when the node itself is too small to draw (`tree_view::outline_node`).
+/// The treemap value for a screen reader names the selected node.
 fn sync_selection(ui: &MainWindow) {
     let scale = ui.window().scale_factor() as f64;
+    let value = with_loaded(|l| l.selected.map(|n| tree_view::map_value(&l.data.tree, n))).flatten();
+    ui.set_map_value(value.unwrap_or_default().into());
     let bounds = with_loaded(|l| {
         let shown = tree_view::outline_node(&l.data.tree, &l.rects, l.selected?)?;
         tree_view::selection_bounds(&l.rects, shown)
@@ -834,6 +840,7 @@ fn type_chip(c: &footer::Chip, theme: Theme) -> TypeChip {
         percent: c.percent.as_str().into(),
         share: c.share,
         color: slint::Color::from_rgb_u8(r, g, b),
+        spoken: footer::spoken(c).into(),
     }
 }
 
@@ -852,6 +859,7 @@ fn clear(ui: &MainWindow) {
     ui.set_labels(ModelRc::default());
     ui.set_file_labels(ModelRc::default());
     ui.set_map_note(SharedString::new());
+    ui.set_map_value(SharedString::new());
     sync_types(ui);
     leave(ui);
     ui.set_has_selection(false);

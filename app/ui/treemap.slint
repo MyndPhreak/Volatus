@@ -214,6 +214,8 @@ export component TreemapView inherits Rectangle {
     in property <[FileLabel]> file-labels;
     /// Text over the map when it shows nothing, or "".
     in property <string> note;
+    /// The selected node for a screen reader: its name and size.
+    in property <string> value;
     in property <bool> has-selection;
     in property <length> selection-x;
     in property <length> selection-y;
@@ -291,6 +293,8 @@ export component TreemapView inherits Rectangle {
             height: 100%;
             source: root.source;
             image-fit: fill;
+            // The map focus scope below is the treemap for a screen reader.
+            accessible-role: none;
         }
         // The moving picture, over the picture and cut at the map edge like it.
         if root.zoom-shown : Image {
@@ -302,6 +306,7 @@ export component TreemapView inherits Rectangle {
             opacity: self.at.opacity;
             source: root.zoom-image;
             image-fit: fill;
+            accessible-role: none;
         }
         // Above the picture, so no frame cuts a label off. The name keeps its full width when it
         // fits and is cut with "…" when it does not; the size takes what is left.
@@ -441,6 +446,7 @@ export component TreemapView inherits Rectangle {
     map-focus := FocusScope {
         accessible-role: image;
         accessible-label: "Treemap";
+        accessible-value: root.value;
         accessible-description: "Press an arrow key to move the selection. Press Enter to open the folder. Press Backspace to go up one folder.";
         key-pressed(event) => {
             if (Keys.name(event.text) == "" || event.text == " ") { return reject; }

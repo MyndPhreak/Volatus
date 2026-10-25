@@ -296,19 +296,20 @@ pub const TIP_FLIP_GAP: f32 = 8.0;
 
 /// A share as `format_percent` gives it, in words for a screen reader: `"10.5%"` -> `"10.5 percent"`.
 pub fn spoken_percent(percent: &str) -> String {
-    todo!("{percent}")
+    format!("{} percent", percent.trim_end_matches('%'))
 }
 
 /// What a screen reader says for one row of the file tree, from the row's shown text and its file
 /// count: `"target, 18.3 GB, 82.9 percent, 34,140 files"`.
 pub fn row_spoken(name: &str, size: &str, percent: &str, files: u64) -> String {
-    todo!("{name}{size}{percent}{files}")
+    let noun = if files == 1 { "file" } else { "files" };
+    format!("{name}, {size}, {}, {} {noun}", spoken_percent(percent), crate::model::group_digits(files))
 }
 
 /// The value of the treemap for a screen reader: the name and size of `node`, the selected node,
 /// as `"kernel32.dll, 12.0 MB"`. The name goes through `display_name`.
 pub fn map_value(tree: &Tree, node: NodeId) -> String {
-    todo!("{}", tree.name(node))
+    format!("{}, {}", display_name(tree.name(node)), crate::model::format_size(tree.node(node).size))
 }
 
 /// Order of two siblings: the chosen column, flipped if descending, then name, then id.

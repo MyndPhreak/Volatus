@@ -1,7 +1,7 @@
 //! File-type footer: the chips for the biggest file types. Plain functions, no Slint types.
 
-use crate::model::display_name;
-use crate::tree_view::format_percent;
+use crate::model::{display_name, format_size};
+use crate::tree_view::{format_percent, spoken_percent};
 use treemap::filetype::{Category, TypeTotal, category_of_ext};
 
 /// One chip of the footer: a file type, its share of the scan and its tile category.
@@ -35,7 +35,7 @@ pub fn chips(totals: &[TypeTotal], total: u64, max: usize) -> Vec<Chip> {
         label,
         percent: format_percent(bytes, total),
         share: (bytes as f64 / total as f64) as f32,
-        size: String::new(),
+        size: format_size(bytes),
         category,
     };
     let mut top: Vec<&TypeTotal> = totals.iter().filter(|t| t.bytes > 0).collect();
@@ -57,7 +57,7 @@ pub fn chips(totals: &[TypeTotal], total: u64, max: usize) -> Vec<Chip> {
 
 /// What a screen reader says for chip `c`: ".dll, 10.5 percent, 12.3 GB".
 pub fn spoken(c: &Chip) -> String {
-    todo!("{}", c.label)
+    format!("{}, {}, {}", c.label, spoken_percent(&c.percent), c.size)
 }
 
 #[cfg(test)]
