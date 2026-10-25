@@ -298,6 +298,7 @@ export component MainWindow inherits Window {
                 width: 100%;
                 height: 100%;
                 indeterminate: true;
+                accessible-label: "Scan progress";
             }
         }
         if root.elevate-note != "" : Text {
@@ -487,10 +488,10 @@ export component MainWindow inherits Window {
                 padding-top: 8px;
                 padding-bottom: 8px;
                 spacing: 6px;
-                if root.types-counting || root.type-chips.length == 0 : Text {
+                if root.types-counting || (root.type-chips.length == 0 && root.rows.length > 0) : Text {
                     height: 32px;
-                    // The tree has rows only while a scan is shown.
-                    text: root.types-counting ? "Counting file types." : (root.rows.length > 0 ? "No file sizes to show." : "");
+                    // The tree has rows only while a scan is shown; with no rows there is no text.
+                    text: root.types-counting ? "Counting file types." : "No file sizes to show.";
                     vertical-alignment: center;
                     color: Glass.dim;
                     accessible-role: text;
