@@ -283,8 +283,8 @@ pub fn append_timing(banner: String, timing: Option<&str>) -> String {
 pub struct TimingRun {
     /// When the Scan click reached `start_scan`.
     clicked: Instant,
-    /// When the scan result reached the UI thread.
-    returned: Option<Instant>,
+    /// When the worker's scan() returned, captured on the worker.
+    finished: Option<Instant>,
     /// The scan result, for the scan time and the steps.
     summary: Option<Summary>,
     /// The finished line. Set once, when the first treemap of the scan is shown.
@@ -293,20 +293,13 @@ pub struct TimingRun {
 
 impl TimingRun {
     pub fn new(clicked: Instant) -> Self {
-        Self { clicked, returned: None, summary: None, line: None }
-    }
-
-    /// The scan result reached the UI thread at `at`. "After scan" counts from here, so window
-    /// start-up before the event loop runs is not part of it.
-    pub fn scan_returned(&mut self, at: Instant, summary: &Summary) {
-        (self.returned, self.summary) = (Some(at), Some(summary.clone()));
+        Self { clicked, finished: None, summary: None, line: None }
     }
 
     /// The worker finished the scan at `finished`. "After scan" counts from here, so the wait until
     /// the UI thread takes the result is part of it.
     pub fn scan_finished(&mut self, finished: Instant, summary: &Summary) {
-        let _ = (finished, summary);
-        todo!("scan_finished")
+        (self.finished, self.summary) = (Some(finished), Some(summary.clone()));
     }
 
     /// The first treemap of the scan is shown at `now`. Returns the finished line once; `None`
@@ -315,8 +308,8 @@ impl TimingRun {
         if self.line.is_some() {
             return None;
         }
-        let returned = self.returned?;
-        let line = format_timing(self.summary.as_ref()?, now - returned, now - self.clicked);
+        let finished = self.finished?;
+        let line = format_timing(self.summary.as_ref()?, now - finished, now - self.clicked);
         self.line = Some(line.clone());
         Some(line)
     }
@@ -512,18 +505,6 @@ mod tests {
 
     // ---- TimingRun ----
     #[test]
-    fn timing_run_after_scan_counts_from_the_ui_thread_arrival() {
-        let t0 = Instant::now();
-        let mut run = TimingRun::new(t0);
-        run.scan_returned(t0 + ms(5900), &timed(Method::Walk, ms(5300), phases(0, 4100, 0, 1200)));
-        let line = run.complete(t0 + ms(6100));
-        assert_eq!(
-            line.as_deref(),
-            Some("Timing: scan 5.3 s (read 4.1, rollup 1.2), after scan 0.2 s, total 6.1 s.")
-        );
-    }
-
-    #[test]
     fn timing_run_after_scan_counts_from_the_worker_finish_so_the_wait_for_the_ui_thread_is_in_it() {
         let t0 = Instant::now();
         let mut run = TimingRun::new(t0);
@@ -548,7 +529,7 @@ mod tests {
     fn timing_run_complete_twice_gives_the_line_once() {
         let t0 = Instant::now();
         let mut run = TimingRun::new(t0);
-        run.scan_returned(t0 + Duration::from_secs(2), &timed(Method::Walk, Duration::from_secs(2), Phases::default()));
+        run.scan_finished(t0 + Duration::from_secs(2), &timed(Method::Walk, Duration::from_secs(2), Phases::default()));
         let first = run.complete(t0 + Duration::from_secs(3));
         assert!(first.is_some());
         assert_eq!(run.line(), first.as_deref());

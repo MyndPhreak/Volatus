@@ -840,8 +840,9 @@ fn post(ui: &Weak<MainWindow>, generation: u64, event: Event) {
 /// Like `post` for `Finished`, and installs the scanned tree in the window. Both are dropped if
 /// a newer scan has started or the scan was cancelled (`ScanControl::finish` decides).
 /// `root` is the scan root as the worker resolved it (`Session::resolved_root`).
-/// The post-scan time of `--timing` starts when this runs on the UI thread.
-fn post_done(ui: &Weak<MainWindow>, generation: u64, data: Data, summary: Summary, root: PathBuf) {
+/// The post-scan time of `--timing` starts at `finished`, when the worker's scan returned, so the
+/// wait for the UI thread is counted.
+fn post_done(ui: &Weak<MainWindow>, generation: u64, data: Data, summary: Summary, root: PathBuf, finished: Instant) {
     let ui = ui.clone();
     let _ = slint::invoke_from_event_loop(move || {
         let Some(ui) = ui.upgrade() else { return };
@@ -850,7 +851,7 @@ fn post_done(ui: &Weak<MainWindow>, generation: u64, data: Data, summary: Summar
             SESSION.with_borrow_mut(|s| {
                 s.resolved_root = Some(root);
                 if let Some(run) = s.run.as_mut() {
-                    run.scan_returned(Instant::now(), &shown);
+                    run.scan_finished(finished, &shown);
                 }
             });
             install(&ui, Arc::new(data));
@@ -902,12 +903,13 @@ fn start_scan(ui: &MainWindow, path: &str) {
 
     std::thread::spawn(move || match scan::scan(&root, tx, &cancel) {
         Ok((tree, stats)) => {
+            let finished = Instant::now();
             let summary = Summary::new(&stats, tree.node(tree.root()).size);
             // Counted here, not on the UI thread: it visits every node.
             let counts = tree_view::file_counts(&tree);
             // Resolved here once per scan, not on the UI thread at every event: it asks the file system.
             let resolved = std::fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
-            post_done(&weak, generation, Data { tree, counts }, summary, resolved);
+            post_done(&weak, generation, Data { tree, counts }, summary, resolved, finished);
         }
         Err(ScanError::Cancelled) => post(&weak, generation, Event::Cancelled),
         Err(e) => post(&weak, generation, Event::Failed(error_message(&e))),
