@@ -60,6 +60,8 @@ const FILE_LABEL_TWO_LINES: f64 = 32.0;
 const TIP_DELAY: Duration = Duration::from_millis(400);
 /// Most file-type chips in the footer before "Other".
 const FOOTER_CHIPS: usize = 8;
+/// Time after which the folder argument's scan starts even if the window has drawn no frame.
+const LAUNCH_FALLBACK: Duration = Duration::from_secs(2);
 
 /// A finished scan plus its derived per-node data. Shared with treemap layout threads.
 struct Data {
@@ -1275,10 +1277,20 @@ fn main() {
     SESSION.with_borrow_mut(|s| s.timing = args.timing);
     let ui = MainWindow::new().expect("create window");
     // The renderer is chosen when the window is made (winit falls back to software when OpenGL
-    // cannot start), so the answer is final here. The notifier only counts the frames drawn.
-    let notifier = ui.window().set_rendering_notifier(|state, _| {
+    // cannot start), so the answer is final here. The notifier counts the frames drawn and starts
+    // the folder argument's scan after the first one.
+    let first_frame = ui.as_weak();
+    let notifier = ui.window().set_rendering_notifier(move |state, _| {
         if matches!(state, slint::RenderingState::AfterRendering) {
             FRAMES.with(|f| f.set(f.get() + 1));
+            if let Some(path) = take_launch_path() {
+                let weak = first_frame.clone();
+                Timer::single_shot(Duration::ZERO, move || {
+                    if let Some(ui) = weak.upgrade() {
+                        start_scan(&ui, &path);
+                    }
+                });
+            }
         }
     });
     if !glow_drawn(notifier) {
@@ -1331,9 +1343,17 @@ fn main() {
         }
     })
     .expect("queue Mica setup");
-    // Started by "Restart as administrator": scan the folder that was open.
-    if let Some(path) = args.path {
-        start_scan(&ui, &path);
+    // Started with a folder (also by "Restart as administrator"): scan it after the first frame,
+    // so the window draws before the walker takes the CPUs. A window that never draws
+    // (minimised, hidden) starts it after `LAUNCH_FALLBACK`.
+    if args.path.is_some() {
+        SESSION.with_borrow_mut(|s| s.launch_path = args.path);
+        let weak = ui.as_weak();
+        Timer::single_shot(LAUNCH_FALLBACK, move || {
+            if let (Some(ui), Some(path)) = (weak.upgrade(), take_launch_path()) {
+                start_scan(&ui, &path);
+            }
+        });
     } else {
         refresh_drives(&ui);
     }
@@ -1350,7 +1370,7 @@ fn main() {
 /// The command-line folder to scan, the first time it is asked for: on the first frame or when
 /// `LAUNCH_FALLBACK` is up. Every later call gets `None`.
 fn take_launch_path() -> Option<String> {
-    todo!("take_launch_path")
+    SESSION.with_borrow_mut(|s| s.launch_path.take())
 }
 
 /// Starts the elevated copy through `launch(path, timing)`. `--timing` is carried over from the session.
