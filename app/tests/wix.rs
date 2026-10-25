@@ -463,6 +463,74 @@ fn the_menu_feature_is_always_installed_with_the_exe() {
     }
 }
 
+// ---- running copy and last page ----
+
+const UTIL_NS: &str = "http://schemas.microsoft.com/wix/UtilExtension";
+
+/// An upgrade or uninstall asks a running Volatus to close (WM_CLOSE, then 5 s wait) before
+/// InstallValidate checks for files in use, so RemoveExistingProducts and InstallFiles find the
+/// exe free. No reboot prompt and no forced kill: a copy that does not close (an elevated one,
+/// which WM_CLOSE from setup can't reach) gets Windows' Files in Use dialog.
+#[test]
+fn a_running_copy_is_asked_to_close_before_files_are_checked() {
+    let source = source();
+    let doc = Document::parse(&source).unwrap();
+    let close: Vec<Node> = doc
+        .descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "CloseApplication" && n.tag_name().namespace() == Some(UTIL_NS))
+        .collect();
+    assert_eq!(close.len(), 1, "one util:CloseApplication");
+    let close = close[0];
+    assert_eq!(attr(&close, "Target"), Some("volatus.exe"));
+    assert_eq!(attr(&close, "CloseMessage"), Some("yes"));
+    // RebootPrompt defaults to yes, which schedules a deferred step at run time: that fails
+    // before InstallInitialize (WiX CloseApps.cpp), and Volatus never needs a reboot.
+    assert_eq!(attr(&close, "RebootPrompt"), Some("no"));
+    for forced in ["ElevatedCloseMessage", "ElevatedEndSessionMessage", "EndSessionMessage", "TerminateProcess", "PromptToContinue"] {
+        assert!(attr(&close, forced).is_none(), "no {forced}");
+    }
+    // WixUtilExtension schedules it before InstallFiles, after RemoveExistingProducts has already
+    // met the locked exe; this moves it. The id is the x64 one (captured from the built MSI).
+    let sequence = one(&doc, "InstallExecuteSequence");
+    let customs: Vec<Node> = sequence.children().filter(|n| is(n, "Custom")).collect();
+    let moved: Vec<&Node> = customs.iter().filter(|c| attr(c, "Action") == Some("WixCloseApplications_x64")).collect();
+    assert_eq!(moved.len(), 1, "WixCloseApplications_x64 is scheduled once");
+    assert_eq!(attr(moved[0], "Before"), Some("InstallValidate"));
+    assert!(attr(moved[0], "After").is_none() && attr(moved[0], "Sequence").is_none());
+    assert_eq!(condition(moved[0]), "", "on every install, upgrade, repair and uninstall");
+    assert!(!source.contains("WixCloseApplicationsDeferred"), "no deferred close step");
+}
+
+/// "Launch Volatus" on the last page: unticked, first install or upgrade only, through
+/// WixShellExec from the dialog (setup's own window, so not elevated when the user started setup
+/// by a double-click).
+#[test]
+fn launch_volatus_is_offered_unticked_on_the_last_page() {
+    let source = source();
+    let doc = Document::parse(&source).unwrap();
+    assert_eq!(property(&doc, "WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT"), Some("Launch Volatus"));
+    assert!(!all(&doc, "Property").iter().any(|p| attr(p, "Id") == Some("WIXUI_EXITDIALOGOPTIONALCHECKBOX")), "no default: unticked");
+    assert_eq!(property(&doc, "WixShellExecTarget"), Some("[#VolatusExe]"));
+    let launch = by_id(&doc, "CustomAction", "LaunchVolatus");
+    assert_eq!(attr(&launch, "BinaryKey"), Some("WixCA"));
+    assert_eq!(attr(&launch, "DllEntry"), Some("WixShellExec"));
+    assert_eq!(attr(&launch, "Impersonate"), Some("yes"));
+    let published: Vec<Node> = all(&doc, "Publish")
+        .into_iter()
+        .filter(|p| attr(p, "Event") == Some("DoAction") && attr(p, "Value") == Some("LaunchVolatus"))
+        .collect();
+    assert_eq!(published.len(), 1);
+    assert_eq!((attr(&published[0], "Dialog"), attr(&published[0], "Control")), (Some("ExitDialog"), Some("Finish")));
+    assert_eq!(condition(&published[0]), "WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND NOT Installed");
+    let end: Vec<Node> = all(&doc, "Publish")
+        .into_iter()
+        .filter(|p| attr(p, "Dialog") == Some("ExitDialog") && attr(p, "Event") == Some("EndDialog"))
+        .collect();
+    assert_eq!(end.len(), 1);
+    let order = |p: &Node| attr(p, "Order").map_or(0, |o| o.parse::<u32>().unwrap());
+    assert!(order(&published[0]) < order(&end[0]), "launch before the dialog ends");
+}
+
 /// The feature that holds the component `id`.
 fn component_feature<'a>(doc: &'a Document, id: &str) -> Node<'a, 'a> {
     let refs: Vec<Node> = all(doc, "ComponentRef").into_iter().filter(|r| attr(r, "Id") == Some(id)).collect();
