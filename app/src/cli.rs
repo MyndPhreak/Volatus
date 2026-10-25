@@ -68,20 +68,20 @@ pub fn parse_args_with<I: IntoIterator<Item = String>>(args: I, logical: usize) 
                 if name == "method" {
                     match value.as_deref().and_then(parse_method) {
                         Some(method) => out.flags.method = method,
-                        None => out.notices.push("Invalid value for --method. Use auto, mft or walk.".into()),
+                        None => out.notices.push("The value for --method is not correct. Use auto, mft or walk.".into()),
                     }
                 } else {
                     match value.as_deref().and_then(parse_threads) {
                         Some(n) if n > cap => {
                             out.flags.threads = Some(cap);
-                            out.notices.push(format!("The value for --threads is too high. Using {cap}."));
+                            out.notices.push(format!("The value for --threads is too high. Volatus uses {cap}."));
                         }
                         Some(n) => out.flags.threads = Some(n),
-                        None => out.notices.push(format!("Invalid value for --threads. Use a number from 1 to {cap}.")),
+                        None => out.notices.push(format!("The value for --threads is not correct. Use a number from 1 to {cap}.")),
                     }
                 }
             }
-            _ => out.notices.push(format!("Unknown option ignored: {arg}.")),
+            _ => out.notices.push(format!("Volatus ignored the unknown option {arg}.")),
         }
     }
     out

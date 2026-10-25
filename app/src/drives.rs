@@ -11,7 +11,7 @@ use windows_sys::Win32::System::WindowsProgramming::{DRIVE_FIXED, DRIVE_REMOVABL
 /// The note under the drive list while the app runs without administrator rights.
 /// The start screen shows "Restart as administrator" with it.
 const ADMIN_NOTE: &str =
-    "Whole NTFS drives scan much faster as administrator. Volatus then reads the file index (the MFT) directly.";
+    "As administrator, Volatus reads the NTFS file index (MFT). A scan of a full NTFS drive is then much faster.";
 /// Longest DOS device target, in UTF-16 units (a `subst` target is a path).
 const TARGET_UNITS: usize = 1024;
 /// Longest file system name, in UTF-16 units, plus the end mark (`MAX_PATH + 1`).

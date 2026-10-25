@@ -343,7 +343,7 @@ pub fn error_message(e: &ScanError) -> String {
 pub fn scan_error_message(e: &ScanError, method: Option<Method>) -> String {
     match e {
         ScanError::Io(io) if method == Some(Method::Mft) && io.kind() != ErrorKind::NotFound => {
-            "The MFT method needs administrator rights and a whole NTFS drive.".into()
+            "The MFT method needs administrator rights and a folder on a local NTFS drive.".into()
         }
         _ => error_message(e),
     }
