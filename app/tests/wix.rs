@@ -93,6 +93,10 @@ const MENU: [(&str, &str, &str, &str); 3] = [
     ("MenuDrive", "C057D819-1438-463A-BCFC-19B8B087E8D4", r"Software\Classes\Drive\shell\Volatus", "%1"),
 ];
 
+/// The exe as the menu's values name it: the install folder (with its trailing `\`) and the file
+/// name, not `[#VolatusExe]`, which ICE69 refuses across features.
+const MENU_EXE: &str = "[INSTALLFOLDER]volatus.exe";
+
 /// Every element that writes or removes registry data.
 const REGISTRY_WRITES: [&str; 5] = ["RegistryKey", "RegistryValue", "RemoveRegistryKey", "RemoveRegistryValue", "Registry"];
 
@@ -312,8 +316,8 @@ fn the_menu_registry_matches_the_contract() {
     let mut want = BTreeSet::new();
     for (_, _, key, arg) in MENU {
         want.insert(value(key.to_string(), "", "Scan with Volatus".to_string()));
-        want.insert(value(key.to_string(), "Icon", "[#VolatusExe],0".to_string()));
-        want.insert(value(format!(r"{key}\command"), "", format!(r#""[#VolatusExe]" "{arg}""#)));
+        want.insert(value(key.to_string(), "Icon", format!("{MENU_EXE},0")));
+        want.insert(value(format!(r"{key}\command"), "", format!(r#""{MENU_EXE}" "{arg}""#)));
     }
     assert_eq!(found, want);
     assert_eq!(all(&doc, "RegistryValue").len(), 9, "no value twice");
@@ -446,10 +450,9 @@ fn the_menu_is_a_feature_on_by_default_offered_on_first_install_only() {
     assert!(add[0].2 < new_dialog[0].2 && remove[0].2 < new_dialog[0].2, "the choice is applied before the page changes");
 }
 
-/// The menu's command names the exe through `[#VolatusExe]`, which is empty when the exe's
-/// component is not installed. ICE69 is suppressed for this (app/Cargo.toml), so the structure
-/// that makes it safe is checked here: the menu feature is a child of the exe's feature, and that
-/// feature can't be left out.
+/// The menu's command names the exe in the install folder, so it is only right when the exe is
+/// installed too: the menu feature is a child of the exe's feature, and that feature can't be
+/// left out.
 #[test]
 fn the_menu_feature_is_always_installed_with_the_exe() {
     let source = source();
@@ -461,6 +464,17 @@ fn the_menu_feature_is_always_installed_with_the_exe() {
         let feature = component_feature(&doc, id);
         assert!(feature.ancestors().any(|a| a == exe_feature), "{id}: inside the exe's feature");
     }
+}
+
+/// ICE69 is not suppressed: the menu names the exe through `[INSTALLFOLDER]`, which ICE69 accepts,
+/// so a real ICE69 finding fails the build.
+#[test]
+fn ice69_is_not_suppressed() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+    let manifest = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let args: Vec<&str> = manifest.lines().filter(|l| l.trim_start().starts_with("linker-args")).collect();
+    assert_eq!(args.len(), 1, "one linker-args line in [package.metadata.wix]");
+    assert!(!args[0].contains("ICE69"), "{}", args[0]);
 }
 
 // ---- running copy and last page ----

@@ -271,7 +271,7 @@ mod tests {
             })
             .collect();
         assert_eq!(commands.len(), 3, "Directory, Background and Drive: {commands:?}");
-        let exe = "C:\\Program Files\\Volatus\\volatus.exe";
+        let install_folder = "C:\\Program Files\\Volatus\\";
         let roots = ["C:\\", "D:\\"];
         let folders = ["C:\\", "D:\\", "C:\\My Files", UNI, "\\\\server\\share"];
         for (verb, template) in commands {
@@ -281,8 +281,9 @@ mod tests {
                 _ => ("%1", &folders[..]),
             };
             assert!(template.contains(placeholder), "{verb}: {template}");
+            assert!(template.starts_with("\"[INSTALLFOLDER]volatus.exe\" "), "{verb}: {template}");
             for path in paths {
-                let line = template.replace("[#VolatusExe]", exe).replace(placeholder, path);
+                let line = template.replace("[INSTALLFOLDER]", install_folder).replace(placeholder, path);
                 let a = parse_args(argv(&line).into_iter().skip(1));
                 assert_eq!((a.path.as_deref(), a.notices.len()), (Some(*path), 0), "{verb}: {line}");
             }
