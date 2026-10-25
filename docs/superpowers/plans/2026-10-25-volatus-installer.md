@@ -36,7 +36,7 @@ Today Volatus runs only from `target\release`. This work adds: (P1) a repair in 
 ## Architectural Decisions
 | Decision | Reason |
 |---|---|
-| Menu commands `"[#VolatusExe]" "%1"` (Directory, Drive) and `"[#VolatusExe]" "%V"` (Background). **Deviation**: the spec's `"%1."` layer is dropped (OD2). | `%1.` gives `C:\Some Dir.`: the UI shows the dot, and child paths `C:\Some Dir.\x` are not normalised by Win32 (only the last segment loses trailing dots), so the walker could fail on every child. The parser repair alone covers the only case that breaks: a root ending in `\`. |
+| Menu commands `"[INSTALLFOLDER]volatus.exe" "%1"` (Directory, Drive) and `"[INSTALLFOLDER]volatus.exe" "%V"` (Background). **Deviation**: the spec's `"%1."` layer is dropped (OD2). | `%1.` gives `C:\Some Dir.`: the UI shows the dot, and child paths `C:\Some Dir.\x` are not normalised by Win32 (only the last segment loses trailing dots), so the walker could fail on every child. The parser repair alone covers the only case that breaks: a root ending in `\`. |
 | Repair is pure: a folder argument with exactly one `"`, as last char, not first, gets that `"` replaced by `\`. **Deviation**: no "repaired path exists" check. | `"` is illegal in Win32 file names, so such an argument can never name a folder; the repair cannot turn a valid path into another. No file-system seam needed. |
 | Repair lives in `parse_args_with` at the single point the folder is taken (`cli.rs:56`). | One entry point for every launch: `main.rs:1368` (Start menu, Explorer, Run box) and the elevated relaunch (same `main`; `elevate::quote_arg` already quotes correctly, `elevate.rs:19-41`). |
 | No runtime flag for the repair. **Deviation** from golden rule 7. | Only arguments that were always invalid change. Parity test: every existing `cli.rs`/`elevate.rs` test unchanged, plus "no `"` in argument -> identity". The menu itself is gated by the installer feature. |
@@ -81,7 +81,7 @@ Today Volatus runs only from `target\release`. This work adds: (P1) a repair in 
 
 ## Contracts
 - `fn repair_folder(arg: String) -> String` (private, `cli.rs`). Returns `arg` with its only `"` replaced by `\` when that `"` is the last char and `arg.len() > 1`; otherwise `arg` unchanged. Applied to the folder in both branches (before and after `--`). `parse_args`/`parse_args_with` signatures unchanged.
-- Registry contract (per key K in `Directory\shell`, `Directory\Background\shell`, `Drive\shell`): `HKLM\Software\Classes\K\Volatus` default = `Scan with Volatus`, `Icon` = `[#VolatusExe],0`; `...\Volatus\command` default = `"[#VolatusExe]" "%1"` (`"%V"` for Background). Key `...\Volatus` has `ForceCreateOnInstall`/`ForceDeleteOnUninstall="yes"`. Fixed component GUIDs.
+- Registry contract (per key K in `Directory\shell`, `Directory\Background\shell`, `Drive\shell`): `HKLM\Software\Classes\K\Volatus` default = `Scan with Volatus`, `Icon` = `[INSTALLFOLDER]volatus.exe,0`; `...\Volatus\command` default = `"[INSTALLFOLDER]volatus.exe" "%1"` (`"%V"` for Background). Key `...\Volatus` has `ForceCreateOnInstall`/`ForceDeleteOnUninstall="yes"`. Fixed component GUIDs.
 - `build-msi.ps1 -Version <X.Y.Z>` -> exactly one `target/wix/volatus-<X.Y.Z>-x86_64.msi`, path written to `$env:GITHUB_ENV` as `MSI_PATH` when present; non-zero exit on any failure.
 - `check-msi.ps1 <msi> <X.Y.Z>`: throws unless ProductVersion = X.Y.Z, UpgradeCode = the fixed one, close action seq < InstallValidate < InstallInitialize < RemoveExistingProducts < InstallFiles, no deferred close action, every Registry row Root=2 and key under the three `\Volatus` paths.
 
@@ -96,7 +96,7 @@ Today Volatus runs only from `target\release`. This work adds: (P1) a repair in 
 - argument without `"` (every folder in existing tests + fuzz-free list of 10) -> identity (parity)
 - all existing `cli.rs` and `elevate.rs` tests pass unchanged (parity)
 `app/src/cli.rs` (unit; P3.T3, reads `include_str!("../wix/main.wxs")`)
-- `menu_command_lines_round_trip_through_the_parser`: each of the three `command` values, `[#VolatusExe]` -> `C:\Program Files\Volatus\volatus.exe`, `%1`/`%V` -> each path in the P1 list (drive roots for Drive and Background) -> `parse_args` path = the folder, no notices
+- `menu_command_lines_round_trip_through_the_parser`: each of the three `command` values, `[INSTALLFOLDER]volatus.exe` -> `C:\Program Files\Volatus\volatus.exe`, `%1`/`%V` -> each path in the P1 list (drive roots for Drive and Background) -> `parse_args` path = the folder, no notices
 `app/tests/wix.rs` (integration, roxmltree; P3)
 - `the_upgrade_code_is_fixed_and_a_guid`: UpgradeCode = constant; Product Id `*`; Name Volatus; Manufacturer MyndPhreak; Version `$(var.Version)`
 - `the_package_version_is_one_an_msi_can_carry`: `CARGO_PKG_VERSION` X.Y.Z digits in range
@@ -203,6 +203,6 @@ P1, P2, P5: sonnet builder. P3, P4: opus/high builder; one verifier (opus/high) 
 - **OD4 Cargo.lock version.** Options: accept drift (Negotium) / bump via a jsonpath filter (unverified in release-please's jsonpath-plus use). Recommend accept. Cost: one-line lock change in the next PR after each release.
 
 ## Self-review
-- Assumptions left open: `CurrentMajorVersionNumber` absent on 8.1; WM_CLOSE blocked to an elevated copy (M10 covers both outcomes); `Icon` value format `[#VolatusExe],0` (M5).
+- Assumptions left open: `CurrentMajorVersionNumber` absent on 8.1; WM_CLOSE blocked to an elevated copy (M10 covers both outcomes); `Icon` value format `[INSTALLFOLDER]volatus.exe,0` (M5).
 - `MigrateFeatures` keeping "menu off" on upgrade is runtime behaviour: M8 only.
 - Spec items changed: OD2, no exists-check, package name, static CRT added, no Slint UI tests exist in `app` (spec goal 2 line is moot).
