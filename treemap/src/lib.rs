@@ -164,8 +164,7 @@ pub const FILE_LABEL_MIN_HEIGHT: f64 = 14.0;
 /// The least tile `(width, height)` in physical pixels that shows its file name at `scale`
 /// (1.0 = 100%). The one rule of the label layer and of the cushion shading.
 pub fn file_label_min(scale: f64) -> (f64, f64) {
-    let _ = scale;
-    todo!("file_label_min")
+    (FILE_LABEL_MIN_WIDTH * scale, FILE_LABEL_MIN_HEIGHT * scale)
 }
 
 /// Where the file names go: the tile of each file in `rects` that is at least `min_w` x `min_h`.
@@ -345,6 +344,7 @@ pub fn render_framed(tree: &Tree, rects: &[Rect], w: u32, h: u32, chrome: Chrome
     let edge = |v: f64, max: usize| (v.round().max(0.0) as usize).min(max);
     // The column terms of one cushion tile, kept from tile to tile.
     let mut columns = Vec::new();
+    let (label_w, label_h) = file_label_min(chrome.pad / 2.0);
     for r in rects {
         let b = Bounds { x0: edge(r.x, wu), x1: edge(r.x + r.w, wu), y0: edge(r.y, hu), y1: edge(r.y + r.h, hu) };
         if b.x0 >= b.x1 || b.y0 >= b.y1 {
@@ -356,8 +356,9 @@ pub fn render_framed(tree: &Tree, rects: &[Rect], w: u32, h: u32, chrome: Chrome
             draw_frame(&mut px, wu, &b, radius, unit, &glass);
         } else {
             let c = filetype::colour(filetype::category_of(tree.name(r.node)), theme);
-            // Under 24 logical px (the pad is 2 logical px) on the short side: a cushion.
-            if side < 12.0 * chrome.pad {
+            // Under 24 logical px (the pad is 2 logical px) on the short side: a cushion, unless the
+            // tile shows a file label: the shade would take the ink below AA contrast.
+            if side < 12.0 * chrome.pad && !(r.w >= label_w && r.h >= label_h) {
                 draw_cushion(&mut px, wu, &b, radius, unit, c, &mut columns);
             } else {
                 draw_tile(&mut px, wu, &b, radius, unit, c);

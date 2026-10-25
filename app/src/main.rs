@@ -51,9 +51,6 @@ const LABEL_MIN_WIDTH: f64 = 24.0;
 /// a median of 50.7 to 55.7 ms. The C: drive has 554 frames and 76 file tiles with a label at that
 /// size (630), so the cap rarely applies.
 const LABEL_CAP: usize = 650;
-/// Least file tile that shows its name, in logical pixels: room for a few characters and "…".
-const FILE_LABEL_MIN_WIDTH: f64 = 40.0;
-const FILE_LABEL_MIN_HEIGHT: f64 = 14.0;
 /// File tiles at least this high, in logical pixels, show the size on a second line.
 const FILE_LABEL_TWO_LINES: f64 = 32.0;
 /// Time the pointer stays on one treemap node before its tooltip shows.
@@ -362,7 +359,7 @@ fn frame_labels(tree: &Tree, rects: &[Rect], chrome: Chrome, scale: f64) -> Vec<
 /// at most `cap`, the largest tiles first, with the text colour of each tile in `theme`.
 fn file_labels(tree: &Tree, rects: &[Rect], scale: f64, theme: Theme, cap: usize) -> Vec<FileLabel> {
     let px = |v: f64| (v / scale) as f32;
-    let (min_w, min_h) = (FILE_LABEL_MIN_WIDTH * scale, FILE_LABEL_MIN_HEIGHT * scale);
+    let (min_w, min_h) = treemap::file_label_min(scale);
     treemap::file_label_spots(tree, rects, min_w, min_h, cap)
         .iter()
         .map(|r| {
@@ -1430,7 +1427,7 @@ fn restart_admin(path: &str, launch: impl FnOnce(&str, bool) -> Result<(), Strin
 #[cfg(test)]
 mod tests {
     use super::{
-        Data, FILE_LABEL_MIN_HEIGHT, FILE_LABEL_MIN_WIDTH, FILE_LABEL_TWO_LINES, FileLabel, FrameLabel, Hover, LABEL_CAP, ZoomFrame, ZoomMove, frame_at,
+        Data, FILE_LABEL_TWO_LINES, FileLabel, FrameLabel, Hover, LABEL_CAP, ZoomFrame, ZoomMove, frame_at,
         Loaded, RowModel, SESSION, file_labels, frame_labels, glow_drawn, hover_of, map_labels, note_hover, restart_admin,
         store_chips, Move, picture_point, zoom_frame_at, take_launch_path, forget_scan, gate_hover, left_map,
         shows_start_at_launch,
@@ -1440,7 +1437,7 @@ mod tests {
     use std::time::Instant;
     use slint::SetRenderingNotifierError;
     use scan::{NodeId, Tree};
-    use treemap::Theme;
+    use treemap::{FILE_LABEL_MIN_HEIGHT, FILE_LABEL_MIN_WIDTH, Theme};
     use crate::footer::Chip;
     use crate::model::{Event, Summary};
     use crate::tree_view::ViewState;
