@@ -213,6 +213,21 @@ pub fn scan(
     scan_with(root, progress, cancel, &ScanOptions::default())
 }
 
+/// `scan_with` for a given `route` and MFT scanner `mft`: the seam that lets a test inject an MFT
+/// failure on any folder.
+#[doc(hidden)]
+pub fn scan_routed(
+    root: &Path,
+    progress: Sender<Progress>,
+    cancel: &AtomicBool,
+    opts: &ScanOptions,
+    route: Route,
+    mft: impl FnOnce() -> Result<(Tree, ScanStats), ScanError>,
+) -> Result<(Tree, ScanStats), ScanError> {
+    let _ = (root, progress, cancel, opts, route, mft);
+    todo!("scan_routed")
+}
+
 /// `scan` with tuning knobs. `opts.method` set to one scanner runs only that one, with no
 /// fallback; `opts.threads` runs the scan on its own thread pool of that size.
 pub fn scan_with(

@@ -3,7 +3,7 @@
 mod common;
 
 use common::TempDir;
-use scan::{DEFAULT_CHUNK, Method, ScanOptions, ScanStats, Tree, background_pool, scan_with, walker_threads};
+use scan::{DEFAULT_CHUNK, Method, Route, ScanError, ScanOptions, ScanStats, Tree, background_pool, scan_routed, scan_with, walker_threads};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::channel;
@@ -140,4 +140,32 @@ fn walk_reports_listing_time() {
     let (_, stats) = walk_with(&t, None);
 
     assert!(stats.phases.read > Duration::ZERO, "{:?}", stats.phases);
+}
+
+#[test]
+fn scan_routed_mft_failure_falls_back_to_the_walker_on_the_background_pool() {
+    let t = TempDir::new();
+    sample(&t);
+    let (tx, _rx) = channel();
+    let route = Route { method: Method::Mft, fallback_to_walk: true };
+    let logical = std::thread::available_parallelism().map_or(1, |n| n.get());
+
+    let (_, stats) = scan_routed(t.path(), tx, &AtomicBool::new(false), &ScanOptions::default(), route, || {
+        Err(ScanError::Io(std::io::Error::other("no admin")))
+    })
+    .unwrap();
+
+    assert_eq!((stats.method, stats.threads), (Method::Walk, walker_threads(logical)));
+}
+
+#[test]
+fn scan_routed_mft_cancel_does_not_fall_back() {
+    let t = TempDir::new();
+    sample(&t);
+    let (tx, _rx) = channel();
+    let route = Route { method: Method::Mft, fallback_to_walk: true };
+
+    let got = scan_routed(t.path(), tx, &AtomicBool::new(false), &ScanOptions::default(), route, || Err(ScanError::Cancelled));
+
+    assert!(matches!(got, Err(ScanError::Cancelled)));
 }
