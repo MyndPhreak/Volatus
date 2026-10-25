@@ -1,0 +1,5 @@
+# The static C runtime: volatus.exe imports no VCRUNTIME140.dll / api-ms-win-crt-* DLLs, so the
+# MSI (which ships only the exe) runs on a machine without the Visual C++ Redistributable. The MSI
+# build checks the release exe's imports (.github/scripts/check-imports.ps1).
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
