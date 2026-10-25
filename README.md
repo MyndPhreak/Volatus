@@ -8,6 +8,15 @@ Volatus shows what uses the space on a Windows drive. It scans a drive or a fold
 
 Volatus is written in Rust with the Slint UI toolkit. It is built and tested on Windows 11. Windows 10 is not tested.
 
+## Install
+
+Download `volatus-X.Y.Z-x86_64.msi` from [Releases](https://github.com/MyndPhreak/Volatus/releases) and run it. It installs Volatus for all users in `C:\Program Files\Volatus` and asks for administrator rights one time. Volatus is then in the Start menu. It needs 64-bit Windows 10 or newer.
+
+- The MSI is not signed. If Windows SmartScreen shows "Windows protected your PC", select **More info**, then **Run anyway**.
+- The installer adds "Scan with Volatus" to the Explorer menu of folders, folder backgrounds and drives. You can clear this option during the installation. On Windows 11, the entry is under **Show more options**.
+- To install with no window, run `msiexec /i volatus-X.Y.Z-x86_64.msi /qn` in a terminal that runs as administrator. Add `EXPLORERMENU=0` to install without the Explorer menu.
+- To uninstall, select Volatus in **Settings > Apps > Installed apps** (**Apps & features** on Windows 10), then **Uninstall**. This also removes the Explorer menu entries.
+
 ## Use
 
 See [docs/USAGE.md](docs/USAGE.md) for the screens, the keys and the command line:
