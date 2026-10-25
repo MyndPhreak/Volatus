@@ -1,8 +1,10 @@
 //! Static checks on the installer's WiX source (`wix/main.wxs`): what it installs where, the fixed
-//! UpgradeCode, upgrades, the launch condition and the license page. The MSI itself is built by
-//! `.github/scripts/build-msi.ps1` and its tables are checked by `.github/scripts/check-msi.ps1`;
-//! these checks never build, install or run it.
+//! UpgradeCode, upgrades, the launch condition, the license page and the Explorer menu's registry
+//! keys. The MSI itself is built by `.github/scripts/build-msi.ps1` and its tables are checked by
+//! `.github/scripts/check-msi.ps1`; these checks never build, install or run it, and never touch
+//! the registry.
 use roxmltree::{Document, Node};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 const WIX_NS: &str = "http://schemas.microsoft.com/wix/2006/wi";
@@ -67,6 +69,49 @@ fn resolve(source_path: &str) -> PathBuf {
 /// A condition with its whitespace normalised.
 fn condition(node: &Node) -> String {
     node.text().unwrap_or_default().split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// A condition's `AND`ed clauses. An `OR` would need real parsing, so it fails the test instead.
+fn clauses(node: &Node) -> BTreeSet<String> {
+    let condition = condition(node);
+    assert!(!condition.contains(" OR "), "{condition:?}: only conjunctions are checked");
+    condition.split(" AND ").map(str::to_string).filter(|c| !c.is_empty()).collect()
+}
+
+fn set(parts: &[&str]) -> BTreeSet<String> {
+    parts.iter().map(|p| p.to_string()).collect()
+}
+
+const FIRST_INSTALL: [&str; 2] = ["NOT Installed", "NOT WIX_UPGRADE_DETECTED"];
+
+/// The Explorer menu: one verb key per place, each a component with a fixed GUID (a component's
+/// GUID must stay the same for as long as its key path does). `%1` is the folder or drive that was
+/// right-clicked; `%V` is the folder whose background was right-clicked.
+const MENU: [(&str, &str, &str, &str); 3] = [
+    ("MenuDirectory", "41C7BA3F-1D39-478A-9629-C08E1CBCD053", r"Software\Classes\Directory\shell\Volatus", "%1"),
+    ("MenuBackground", "D1D6A47D-523E-4BCD-9A37-4B6E4BF365D8", r"Software\Classes\Directory\Background\shell\Volatus", "%V"),
+    ("MenuDrive", "C057D819-1438-463A-BCFC-19B8B087E8D4", r"Software\Classes\Drive\shell\Volatus", "%1"),
+];
+
+/// Every element that writes or removes registry data.
+const REGISTRY_WRITES: [&str; 5] = ["RegistryKey", "RegistryValue", "RemoveRegistryKey", "RemoveRegistryValue", "Registry"];
+
+/// The root and full key of a registry element: its own `Key` under each enclosing
+/// `<RegistryKey Key>`, and the nearest `Root`.
+fn registry_path(node: &Node) -> (String, String) {
+    let root = node.ancestors().find_map(|a| attr(&a, "Root")).unwrap_or_default().to_string();
+    let mut keys: Vec<&str> = node
+        .ancestors()
+        .filter(|a| REGISTRY_WRITES.iter().any(|w| is(a, w)))
+        .filter_map(|a| attr(&a, "Key"))
+        .collect();
+    keys.reverse();
+    (root, keys.join(r"\"))
+}
+
+/// The component that holds `node`.
+fn component<'a>(node: &Node<'a, 'a>) -> Node<'a, 'a> {
+    node.ancestors().find(|a| is(a, "Component")).expect("inside a Component")
 }
 
 #[test]
@@ -245,4 +290,158 @@ fn uninstall_leaves_nothing_behind() {
     }
     let menu_folder = by_id(&doc, "Directory", "ProgramMenuFolder");
     assert!(!menu_folder.children().any(|n| is(&n, "Directory")), "no Start menu subfolder");
+}
+
+// ---- Explorer menu ----
+
+/// Each verb key holds its label and the exe's icon; its `command` key starts the installed exe
+/// with the folder as the only argument. Nothing else is written.
+#[test]
+fn the_menu_registry_matches_the_contract() {
+    let source = source();
+    let doc = Document::parse(&source).unwrap();
+    let found: BTreeSet<(String, String, String, String, String)> = all(&doc, "RegistryValue")
+        .iter()
+        .map(|v| {
+            let (root, key) = registry_path(v);
+            let name = attr(v, "Name").unwrap_or_default().to_string();
+            (root, key, name, attr(v, "Value").unwrap_or_default().to_string(), attr(v, "Type").unwrap_or_default().to_string())
+        })
+        .collect();
+    let value = |key: String, name: &str, value: String| ("HKLM".to_string(), key, name.to_string(), value, "string".to_string());
+    let mut want = BTreeSet::new();
+    for (_, _, key, arg) in MENU {
+        want.insert(value(key.to_string(), "", "Scan with Volatus".to_string()));
+        want.insert(value(key.to_string(), "Icon", "[#VolatusExe],0".to_string()));
+        want.insert(value(format!(r"{key}\command"), "", format!(r#""[#VolatusExe]" "{arg}""#)));
+    }
+    assert_eq!(found, want);
+    assert_eq!(all(&doc, "RegistryValue").len(), 9, "no value twice");
+    for v in all(&doc, "RegistryValue") {
+        assert_eq!(attr(&component(&v), "Win64"), Some("yes"), "the 64-bit registry view");
+    }
+}
+
+/// Uninstall removes these keys, and nothing outside them is written: no HKCU (other users would
+/// keep a menu entry naming a removed exe), no HKCR (it maps to HKCU for elevated writes too).
+#[test]
+fn no_registry_write_outside_the_three_verb_keys() {
+    let source = source();
+    let doc = Document::parse(&source).unwrap();
+    let allowed: Vec<&str> = MENU.iter().map(|(_, _, key, _)| *key).collect();
+    let writes: Vec<Node> = REGISTRY_WRITES.iter().flat_map(|w| all(&doc, w)).collect();
+    assert!(writes.len() >= 3, "the menu keys are written");
+    for write in writes {
+        let (root, key) = registry_path(&write);
+        assert_eq!(root, "HKLM", "{key}");
+        assert!(allowed.iter().any(|a| key == *a || key.starts_with(&format!(r"{a}\"))), "{key} is outside the menu keys");
+    }
+    for node in doc.descendants().filter(|n| n.is_element()) {
+        if let Some(root) = attr(&node, "Root") {
+            assert_eq!(root, "HKLM", "<{}> uses {root}", node.tag_name().name());
+        }
+    }
+}
+
+/// `ForceDeleteOnUninstall` removes a key with everything under it, so it may only sit on the
+/// `...\shell\Volatus` keys, never on `...\shell` (other programs' verbs live there).
+#[test]
+fn only_the_volatus_verb_keys_are_force_deleted() {
+    let source = source();
+    let doc = Document::parse(&source).unwrap();
+    let forced: BTreeSet<String> = all(&doc, "RegistryKey")
+        .iter()
+        .filter(|k| attr(k, "ForceDeleteOnUninstall") == Some("yes"))
+        .map(|k| registry_path(k).1)
+        .collect();
+    let want: BTreeSet<String> = MENU.iter().map(|(_, _, key, _)| key.to_string()).collect();
+    assert_eq!(forced, want);
+    for key in &forced {
+        assert!(key.ends_with(r"\shell\Volatus"), "{key}");
+    }
+    for key in all(&doc, "RegistryKey").iter().filter(|k| want.contains(&registry_path(k).1)) {
+        assert_eq!(attr(key, "ForceCreateOnInstall"), Some("yes"), "{}", registry_path(key).1);
+    }
+}
+
+#[test]
+fn every_component_guid_is_fixed_unique_and_a_guid() {
+    let source = source();
+    let doc = Document::parse(&source).unwrap();
+    let mut guids = BTreeSet::new();
+    for component in all(&doc, "Component") {
+        let id = attr(&component, "Id").expect("Component Id");
+        let guid = attr(&component, "Guid").expect("Component Guid");
+        if component.children().any(|n| is(&n, "File")) {
+            // WiX derives a file component's GUID from its key path, which never changes.
+            assert_eq!(guid, "*", "{id}");
+        } else {
+            assert!(is_guid(guid), "{id}: {guid}");
+            assert!(guids.insert(guid.to_uppercase()), "{id}: {guid} is used twice");
+        }
+        // Exactly one key path: it tells Windows Installer whether the component is installed.
+        let key_paths = component.descendants().filter(|n| n.is_element() && attr(n, "KeyPath") == Some("yes")).count();
+        assert_eq!(key_paths, 1, "{id}: one key path");
+        let refs: Vec<Node> = all(&doc, "ComponentRef").into_iter().filter(|r| attr(r, "Id") == Some(id)).collect();
+        assert_eq!(refs.len(), 1, "{id} is in exactly one feature");
+        assert!(refs[0].parent().is_some_and(|p| is(&p, "Feature")), "{id}");
+    }
+    for (id, guid, key, _) in MENU {
+        let component = by_id(&doc, "Component", id);
+        assert_eq!(attr(&component, "Guid"), Some(guid), "{id}: the GUID never changes");
+        let key_path = component.descendants().find(|n| attr(n, "KeyPath") == Some("yes")).unwrap();
+        assert!(is(&key_path, "RegistryValue") && attr(&key_path, "Name").is_none(), "{id}: the verb's label");
+        assert_eq!(registry_path(&key_path).1, key, "{id}");
+    }
+}
+
+/// The menu is its own feature, on by default: Windows Installer keeps a feature's state across
+/// major upgrades, so "off" survives an upgrade with no code. The checkbox is on the options page,
+/// shown on a first install only.
+#[test]
+fn the_menu_is_a_feature_on_by_default_offered_on_first_install_only() {
+    let source = source();
+    let doc = Document::parse(&source).unwrap();
+    let feature = by_id(&doc, "Feature", "ExplorerMenu");
+    assert_eq!(attr(&feature, "Level"), Some("1"), "on by default");
+    assert_ne!(attr(&feature, "Absent"), Some("disallow"), "it can be left out");
+    let refs: BTreeSet<&str> = feature.children().filter(|n| is(n, "ComponentRef")).filter_map(|r| attr(&r, "Id")).collect();
+    assert_eq!(refs, MENU.iter().map(|(id, _, _, _)| *id).collect(), "the three menu components, nothing else");
+
+    let checkbox = by_id(&doc, "Property", "EXPLORERMENU");
+    assert_eq!(attr(&checkbox, "Value"), Some("1"), "ticked by default");
+    // Public properties set in the UI only reach the elevated install when they are secure.
+    assert_eq!(attr(&checkbox, "Secure"), Some("yes"));
+    let boxes: Vec<Node> = all(&doc, "Control")
+        .into_iter()
+        .filter(|c| attr(c, "Type") == Some("CheckBox") && attr(c, "Property") == Some("EXPLORERMENU"))
+        .collect();
+    assert_eq!(boxes.len(), 1, "one checkbox");
+    assert_eq!(attr(&boxes[0], "Text"), Some("Add Scan with Volatus to the Explorer menu"));
+    assert_eq!(attr(&boxes[0], "CheckBoxValue"), Some("1"));
+    assert!(boxes[0].ancestors().any(|a| is(&a, "Dialog") && attr(&a, "Id") == Some("OptionsDlg")));
+
+    let publish = all(&doc, "Publish");
+    let to_options: Vec<&Node> = publish
+        .iter()
+        .filter(|p| attr(p, "Event") == Some("NewDialog") && attr(p, "Value") == Some("OptionsDlg"))
+        .collect();
+    assert!(!to_options.is_empty(), "the options page is reachable");
+    for p in to_options {
+        assert!(clauses(p).is_superset(&set(&FIRST_INSTALL)), "{:?} -> OptionsDlg: first install only", attr(p, "Dialog"));
+    }
+
+    let next: Vec<&Node> = publish.iter().filter(|p| attr(p, "Dialog") == Some("OptionsDlg") && attr(p, "Control") == Some("Next")).collect();
+    let event = |name: &str| -> Vec<(String, String, u32)> {
+        next.iter()
+            .filter(|p| attr(p, "Event") == Some(name))
+            .map(|p| (attr(p, "Value").unwrap_or_default().to_string(), condition(p), attr(p, "Order").map_or(0, |o| o.parse().unwrap())))
+            .collect()
+    };
+    let (add, remove, new_dialog) = (event("AddLocal"), event("Remove"), event("NewDialog"));
+    let shown = |events: &[(String, String, u32)]| events.iter().map(|(v, c, _)| (v.clone(), c.clone())).collect::<Vec<_>>();
+    assert_eq!(shown(&add), [("ExplorerMenu".to_string(), "EXPLORERMENU".to_string())]);
+    assert_eq!(shown(&remove), [("ExplorerMenu".to_string(), "NOT EXPLORERMENU".to_string())]);
+    assert_eq!(new_dialog.len(), 1, "Next goes on to one page");
+    assert!(add[0].2 < new_dialog[0].2 && remove[0].2 < new_dialog[0].2, "the choice is applied before the page changes");
 }

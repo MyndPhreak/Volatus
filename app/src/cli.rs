@@ -255,6 +255,40 @@ mod tests {
         }
     }
 
+    /// The three `command` values the installer writes (`wix/main.wxs`), filled in as Explorer
+    /// does, give the right-clicked folder to the parser unchanged.
+    #[test]
+    fn menu_command_lines_round_trip_through_the_parser() {
+        use crate::elevate::tests::argv;
+        let doc = roxmltree::Document::parse(include_str!("../wix/main.wxs")).unwrap();
+        let commands: Vec<(&str, &str)> = doc
+            .descendants()
+            .filter(|n| n.has_tag_name("RegistryKey") && n.attribute("Key") == Some("command"))
+            .map(|command| {
+                let verb = command.parent().and_then(|p| p.attribute("Key")).unwrap_or_default();
+                let value = command.children().find(|v| v.has_tag_name("RegistryValue") && v.attribute("Name").is_none());
+                (verb, value.and_then(|v| v.attribute("Value")).unwrap_or_default())
+            })
+            .collect();
+        assert_eq!(commands.len(), 3, "Directory, Background and Drive: {commands:?}");
+        let exe = "C:\\Program Files\\Volatus\\volatus.exe";
+        let roots = ["C:\\", "D:\\"];
+        let folders = ["C:\\", "D:\\", "C:\\My Files", UNI, "\\\\server\\share"];
+        for (verb, template) in commands {
+            let (placeholder, paths) = match verb {
+                "Software\\Classes\\Drive\\shell\\Volatus" => ("%1", &roots[..]),
+                "Software\\Classes\\Directory\\Background\\shell\\Volatus" => ("%V", &folders[..]),
+                _ => ("%1", &folders[..]),
+            };
+            assert!(template.contains(placeholder), "{verb}: {template}");
+            for path in paths {
+                let line = template.replace("[#VolatusExe]", exe).replace(placeholder, path);
+                let a = parse_args(argv(&line).into_iter().skip(1));
+                assert_eq!((a.path.as_deref(), a.notices.len()), (Some(*path), 0), "{verb}: {line}");
+            }
+        }
+    }
+
     #[test]
     fn parse_args_drive_root_followed_by_a_flag_in_one_quoted_word_is_unchanged() {
         use crate::elevate::tests::argv;
