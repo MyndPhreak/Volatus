@@ -1,6 +1,6 @@
 use scan::rollup::{RawEntry, rollup};
 use scan::{NodeId, Tree};
-use treemap::{Chrome, Frame, Rect, Theme, ease_out, eased, file_label_spots, label_spots, layout, layout_framed, render_framed, unzoom, zoom_at, zoom_frame};
+use treemap::{Chrome, Frame, Rect, Theme, ease_out, eased, file_label_min, file_label_spots, label_spots, layout, layout_framed, render_framed, unzoom, zoom_at, zoom_frame};
 
 const W: u32 = 800;
 const H: u32 = 600;
@@ -1086,4 +1086,89 @@ fn unzoom_frame_with_no_area_or_not_finite_is_none() {
         unzoom((0.0, 0.0, VW, VH), VW, VH, f64::INFINITY, 1.0),
     ];
     assert_eq!(got, [None; 4]);
+}
+
+// ---- no cushion under a file label ----
+
+/// One file named `name` as a `w` x `h` tile at `scale` in `theme`: the picture, the tree and the rects.
+fn named_tile(name: &str, w: u32, h: u32, scale: f64, theme: Theme) -> (Vec<u8>, Tree, Vec<Rect>) {
+    let entries = vec![
+        RawEntry { id: 0, parent: 0, name: "root".into(), size: 0, allocated: 0, is_dir: true },
+        RawEntry { id: 1, parent: 0, name: name.into(), size: 10, allocated: 10, is_dir: false },
+    ];
+    let tree = rollup(0, entries).unwrap().tree;
+    let file = tree.children(tree.root()).next().unwrap();
+    let rects = vec![Rect { node: file, x: 0.0, y: 0.0, w: f64::from(w), h: f64::from(h) }];
+    (render_framed(&tree, &rects, w, h, Chrome::scaled(scale), theme), tree, rects)
+}
+
+fn luminance(c: [u8; 3]) -> f64 {
+    let lin = |v: u8| {
+        let v = f64::from(v) / 255.0;
+        if v <= 0.040_45 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+    };
+    0.2126 * lin(c[0]) + 0.7152 * lin(c[1]) + 0.0722 * lin(c[2])
+}
+
+fn contrast(a: [u8; 3], b: [u8; 3]) -> f64 {
+    let (x, y) = (luminance(a), luminance(b));
+    (x.max(y) + 0.05) / (x.min(y) + 0.05)
+}
+
+#[test]
+fn file_label_min_is_the_logical_minimum_times_the_scale() {
+    assert_eq!(file_label_min(1.0), (40.0, 14.0));
+    assert_eq!(file_label_min(2.0), (80.0, 28.0));
+}
+
+#[test]
+fn render_framed_tile_with_a_file_label_keeps_the_ink_contrast_of_its_colour() {
+    use treemap::filetype::{Category, category_of, colour, ink};
+    let names = [
+        ("a.mp4", Category::Video), ("a.png", Category::Image), ("a.mp3", Category::Audio), ("a.zip", Category::Archive),
+        ("a.exe", Category::Program), ("a.pdf", Category::Document), ("a.rs", Category::Code), ("a.iso", Category::DiskImage),
+        ("a.pak", Category::GameData), ("a.db", Category::Data), ("a.zzqq", Category::Other),
+    ];
+    let mut worst = (f64::MAX, String::new());
+    for theme in [Theme::Dark, Theme::Light] {
+        for (name, cat) in names {
+            assert_eq!(category_of(name), cat, "{name}");
+            let k = ink(colour(cat, theme));
+            for (w, h) in [(40u32, 14u32), (60, 20), (120, 23)] {
+                let (px, _, _) = named_tile(name, w, h, 1.0, theme);
+                for y in 0..h.min(16) {
+                    for x in 4..w - 4 {
+                        let i = ((y * w + x) * 4) as usize;
+                        if px[i + 3] == 255 {
+                            let c = contrast(k, [px[i], px[i + 1], px[i + 2]]);
+                            if c < worst.0 {
+                                worst = (c, format!("{theme:?} {cat:?} {w}x{h} at {x},{y}"));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(worst.0 >= 4.5, "worst label box contrast {:.2} ({})", worst.0, worst.1);
+}
+
+#[test]
+fn render_framed_is_shaded_exactly_where_no_file_label_fits() {
+    for scale in [1.0, 2.0] {
+        let (min_w, min_h) = file_label_min(scale);
+        for w in [30u32, 39, 40, 41, 60, 90] {
+            for h in [8u32, 13, 14, 15, 22, 23, 24, 30] {
+                let (w, h) = ((f64::from(w) * scale) as u32, (f64::from(h) * scale) as u32);
+                let (px, tree, rects) = named_tile("a.zzqq", w, h, scale, Theme::Dark);
+                // A row in the lower part of the tile, between the corners: flat unless shaded.
+                let y = h * 3 / 4;
+                let at = |x: u32| px[((y * w + x) * 4) as usize..][..4].to_vec();
+                let shaded = at((f64::from(w) * 0.25) as u32) != at((f64::from(w) * 0.75) as u32);
+                let labelled = !file_label_spots(&tree, &rects, min_w, min_h, 10).is_empty();
+                let small = f64::from(w.min(h)) < 24.0 * scale;
+                assert_eq!(shaded, small && !labelled, "{w}x{h} at {scale}: shaded {shaded}, labelled {labelled}");
+            }
+        }
+    }
 }

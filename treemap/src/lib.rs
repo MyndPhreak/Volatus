@@ -157,6 +157,17 @@ pub fn label_spots(tree: &Tree, rects: &[Rect], chrome: Chrome, min_w: f64, cap:
     spots.into_iter().map(|(_, s)| s).collect()
 }
 
+/// Least file tile that shows its name, in logical pixels: room for a few characters and "…".
+pub const FILE_LABEL_MIN_WIDTH: f64 = 40.0;
+pub const FILE_LABEL_MIN_HEIGHT: f64 = 14.0;
+
+/// The least tile `(width, height)` in physical pixels that shows its file name at `scale`
+/// (1.0 = 100%). The one rule of the label layer and of the cushion shading.
+pub fn file_label_min(scale: f64) -> (f64, f64) {
+    let _ = scale;
+    todo!("file_label_min")
+}
+
 /// Where the file names go: the tile of each file in `rects` that is at least `min_w` x `min_h`.
 /// Folders get none.
 ///
