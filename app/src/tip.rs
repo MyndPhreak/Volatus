@@ -63,6 +63,16 @@ pub fn step(state: TipState, event: TipEvent) -> (TipState, TipAction) {
     }
 }
 
+/// Zero width space: a point where a line may break, drawn as nothing.
+pub const BREAK: char = '\u{200B}';
+
+/// `path` with a `BREAK` after each run of `\` and `/` that has more text after it, so the tooltip
+/// wraps a long path between folders and not inside a name. A name longer than the line still
+/// breaks inside it (the window's word wrap does that).
+pub fn break_points(path: &str) -> String {
+    todo!("{path}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::TipAction::{Hide, None as Nothing, Show, Start};
@@ -163,6 +173,42 @@ mod tests {
     fn step_click_then_the_delay_passes_stays_hidden() {
         let (state, _) = step(Shown, Click);
         assert_eq!(step(state, Timer), (Suppressed, Nothing));
+    }
+
+    #[test]
+    fn break_points_go_after_each_backslash_between_names() {
+        assert_eq!(break_points("C:\\Windows\\System32\\a.dll"), "C:\\\u{200B}Windows\\\u{200B}System32\\\u{200B}a.dll");
+    }
+
+    #[test]
+    fn break_points_go_after_a_forward_slash_too() {
+        assert_eq!(break_points("a/b"), "a/\u{200B}b");
+    }
+
+    #[test]
+    fn break_points_none_after_a_separator_at_the_end() {
+        assert_eq!(break_points("C:\\"), "C:\\");
+    }
+
+    #[test]
+    fn break_points_one_after_a_run_of_separators() {
+        assert_eq!(break_points("\\\\server\\share"), "\\\\\u{200B}server\\\u{200B}share");
+    }
+
+    #[test]
+    fn break_points_name_with_no_separator_is_unchanged() {
+        assert_eq!(break_points("pagefile.sys"), "pagefile.sys");
+    }
+
+    #[test]
+    fn break_points_empty_is_empty() {
+        assert_eq!(break_points(""), "");
+    }
+
+    #[test]
+    fn break_points_keep_every_character_of_the_path() {
+        let path = "D:\\Données 日本語\\x\u{FFFD}y\\file.txt";
+        assert_eq!(break_points(path).replace(BREAK, ""), path);
     }
 
     #[test]

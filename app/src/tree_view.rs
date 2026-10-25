@@ -294,6 +294,23 @@ pub fn tip_position(pointer: f32, size: f32, extent: f32, gap: f32) -> f32 {
 /// Space between the pointer and a tooltip shown before it (left or above), in logical pixels.
 pub const TIP_FLIP_GAP: f32 = 8.0;
 
+/// A share as `format_percent` gives it, in words for a screen reader: `"10.5%"` -> `"10.5 percent"`.
+pub fn spoken_percent(percent: &str) -> String {
+    todo!("{percent}")
+}
+
+/// What a screen reader says for one row of the file tree, from the row's shown text and its file
+/// count: `"target, 18.3 GB, 82.9 percent, 34,140 files"`.
+pub fn row_spoken(name: &str, size: &str, percent: &str, files: u64) -> String {
+    todo!("{name}{size}{percent}{files}")
+}
+
+/// The value of the treemap for a screen reader: the name and size of `node`, the selected node,
+/// as `"kernel32.dll, 12.0 MB"`. The name goes through `display_name`.
+pub fn map_value(tree: &Tree, node: NodeId) -> String {
+    todo!("{}", tree.name(node))
+}
+
 /// Order of two siblings: the chosen column, flipped if descending, then name, then id.
 fn compare(tree: &Tree, counts: &[u64], view: &ViewState, a: NodeId, b: NodeId) -> Ordering {
     let name = |n: NodeId| tree.name(n).chars().flat_map(char::to_lowercase);
@@ -1329,5 +1346,53 @@ mod tests {
             }
         }
         assert!(checked > 10_000, "{checked}");
+    }
+
+    // ---- spoken text ----
+    #[test]
+    fn spoken_percent_sign_becomes_the_word_percent() {
+        assert_eq!(spoken_percent("10.5%"), "10.5 percent");
+    }
+
+    #[test]
+    fn spoken_percent_zero_and_whole_are_spoken_the_same_way() {
+        assert_eq!([spoken_percent("0.0%"), spoken_percent("100.0%")], ["0.0 percent", "100.0 percent"]);
+    }
+
+    #[test]
+    fn row_spoken_folder_gives_name_size_percent_and_files() {
+        assert_eq!(row_spoken("target", "18.3 GB", "82.9%", 34_140), "target, 18.3 GB, 82.9 percent, 34,140 files");
+    }
+
+    #[test]
+    fn row_spoken_one_file_says_1_file() {
+        assert_eq!(row_spoken("Cargo.lock", "152.2 KB", "0.0%", 1), "Cargo.lock, 152.2 KB, 0.0 percent, 1 file");
+    }
+
+    #[test]
+    fn row_spoken_empty_folder_says_0_files() {
+        assert_eq!(row_spoken("none", "0 B", "0.0%", 0), "none, 0 B, 0.0 percent, 0 files");
+    }
+
+    /// The map value of the node at `path` (names from the root down) in `tip_tree`.
+    fn value(path: &[&str]) -> String {
+        let t = tip_tree();
+        let node = path.iter().fold(t.root(), |n, name| find(&t, n, name));
+        map_value(&t, node)
+    }
+
+    #[test]
+    fn map_value_file_gives_its_name_and_size() {
+        assert_eq!(value(&["Windows", "System32", "kernel32.dll"]), "kernel32.dll, 12.0 MB");
+    }
+
+    #[test]
+    fn map_value_scan_root_gives_its_path_and_size() {
+        assert_eq!(value(&[]), "C:\\, 12.0 MB");
+    }
+
+    #[test]
+    fn map_value_name_with_a_right_to_left_override_shows_a_placeholder() {
+        assert_eq!(value(&["invoice\u{202E}fdp.exe"]), "invoice\u{FFFD}fdp.exe, 10 B");
     }
 }

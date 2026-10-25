@@ -464,6 +464,32 @@ fn hover(ui: &MainWindow, x: f32, y: f32) {
     SESSION.with_borrow_mut(|s| s.hover_slowest = s.hover_slowest.max(took));
 }
 
+/// The hover gate: keeps `node` as the hovered node and calls `show` with it only when it is not
+/// the node hovered before (`note_hover`). Returns (a node is under the pointer and shown, it
+/// changed); `show` returns whether the hover is visible.
+fn gate_hover(node: Option<NodeId>, show: impl FnOnce(Option<NodeId>) -> bool) -> (bool, bool) {
+    todo!("{node:?}{}", show(node))
+}
+
+/// The pointer left the map: nothing is hovered (`show` gets `None` when a node was) and the
+/// tooltip gets `Leave`. Returns what the tooltip does next.
+fn left_map(show: impl FnOnce(Option<NodeId>) -> bool) -> tip::TipAction {
+    todo!("{}", show(None))
+}
+
+/// Drops the shown scan from the session: its data, the picture kept or moving for it and its
+/// hover (`left_map`). Returns what the tooltip does next.
+fn forget_scan(show: impl FnOnce(Option<NodeId>) -> bool) -> tip::TipAction {
+    todo!("{}", show(None))
+}
+
+/// The window opens on the start screen unless a folder to scan was given on the command line:
+/// that scan starts after the first frame, so the first frame shows the results screen. A blank
+/// folder fails at once and shows the start screen with the error, so it opens there.
+fn shows_start_at_launch(launch_path: Option<&str>) -> bool {
+    todo!("{launch_path:?}")
+}
+
 /// The pointer left the treemap: nothing is hovered.
 fn leave(ui: &MainWindow) {
     if note_hover(None) {
@@ -1383,8 +1409,10 @@ mod tests {
     use super::{
         Data, FILE_LABEL_MIN_HEIGHT, FILE_LABEL_MIN_WIDTH, FILE_LABEL_TWO_LINES, FileLabel, FrameLabel, Hover, LABEL_CAP, ZoomFrame, ZoomMove, frame_at,
         Loaded, RowModel, SESSION, file_labels, frame_labels, glow_drawn, hover_of, map_labels, note_hover, restart_admin,
-        store_chips, Move, picture_point, zoom_frame_at, take_launch_path,
+        store_chips, Move, picture_point, zoom_frame_at, take_launch_path, forget_scan, gate_hover, left_map,
+        shows_start_at_launch,
     };
+    use crate::tip;
     use crate::motion::Kind;
     use std::time::Instant;
     use slint::SetRenderingNotifierError;
@@ -1815,7 +1843,7 @@ mod tests {
     }
 
     fn chips() -> Vec<Chip> {
-        vec![Chip { label: ".txt".into(), percent: "100.0%".into(), share: 1.0, category: Category::Document }]
+        vec![Chip { label: ".txt".into(), percent: "100.0%".into(), share: 1.0, size: "10 B".into(), category: Category::Document }]
     }
 
     fn summary() -> Summary {
@@ -1975,5 +2003,117 @@ mod tests {
         let (frame, fallback) = (take_launch_path(), take_launch_path());
 
         assert_eq!((frame, fallback), (None, None));
+    }
+
+    #[test]
+    fn shows_start_at_launch_with_no_folder_argument_is_the_start_screen() {
+        assert!(shows_start_at_launch(None));
+    }
+
+    #[test]
+    fn shows_start_at_launch_with_a_folder_argument_is_the_results_screen() {
+        assert!(!shows_start_at_launch(Some("C:\\")));
+    }
+
+    #[test]
+    fn shows_start_at_launch_with_a_blank_folder_argument_is_the_start_screen() {
+        assert!(shows_start_at_launch(Some("  ")));
+    }
+
+    // ---- hover gate and the end of a shown scan ----
+    /// Calls of a `show` closure, and what it returns.
+    fn shown() -> (Rc<RefCell<Vec<Option<NodeId>>>>, impl Fn(Option<NodeId>) -> bool + Clone) {
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let record = calls.clone();
+        (calls, move |n: Option<NodeId>| {
+            record.borrow_mut().push(n);
+            n.is_some()
+        })
+    }
+
+    #[test]
+    fn gate_hover_same_node_twice_shows_it_once() {
+        let (calls, show) = shown();
+        let a = Some(NodeId(1));
+
+        gate_hover(a, show.clone());
+        gate_hover(a, show);
+
+        assert_eq!(*calls.borrow(), [a]);
+    }
+
+    #[test]
+    fn gate_hover_new_node_is_over_and_changed() {
+        let (_, show) = shown();
+
+        assert_eq!(gate_hover(Some(NodeId(1)), show), (true, true));
+    }
+
+    #[test]
+    fn gate_hover_same_node_again_is_over_and_not_changed() {
+        let (_, show) = shown();
+        gate_hover(Some(NodeId(1)), show.clone());
+
+        assert_eq!(gate_hover(Some(NodeId(1)), show), (true, false));
+    }
+
+    #[test]
+    fn gate_hover_off_every_node_after_a_node_hides_it() {
+        let (calls, show) = shown();
+        gate_hover(Some(NodeId(1)), show.clone());
+
+        let result = gate_hover(None, show);
+
+        assert_eq!((result, calls.borrow().last().copied()), ((false, true), Some(None)));
+    }
+
+    #[test]
+    fn left_map_with_a_hovered_node_hides_it_and_the_tooltip() {
+        let (calls, show) = shown();
+        gate_hover(Some(NodeId(1)), show.clone());
+        SESSION.with_borrow_mut(|s| s.tip = tip::TipState::Shown);
+
+        let action = left_map(show);
+
+        let state = SESSION.with_borrow(|s| (s.hovered, s.tip));
+        assert_eq!((action, state, calls.borrow().len()), (tip::TipAction::Hide, (None, tip::TipState::Idle), 2));
+    }
+
+    #[test]
+    fn left_map_with_nothing_hovered_does_not_call_show() {
+        let (calls, show) = shown();
+
+        left_map(show);
+
+        assert!(calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn forget_scan_with_a_hovered_node_hides_it_and_the_tooltip() {
+        let (calls, show) = shown();
+        gate_hover(Some(NodeId(1)), show.clone());
+        SESSION.with_borrow_mut(|s| s.tip = tip::TipState::Pending);
+
+        let action = forget_scan(show);
+
+        let state = SESSION.with_borrow(|s| (s.hovered, s.tip));
+        assert_eq!((action, state, calls.borrow().last().copied()), (tip::TipAction::Hide, (None, tip::TipState::Idle), Some(None)));
+    }
+
+    #[test]
+    fn forget_scan_drops_the_shown_scan_and_its_pictures() {
+        let data = data();
+        SESSION.with_borrow_mut(|s| {
+            s.loaded = Some(loaded(&data));
+            s.held = Some(super::Layout { root: NodeId(0), rects: Vec::new(), image: None, labels: (Vec::new(), Vec::new()) });
+            s.out_from = Some(NodeId(1));
+            s.fade_next = true;
+        });
+        let (_, show) = shown();
+
+        forget_scan(show);
+
+        let left = SESSION.with_borrow(|s| (s.loaded.is_none(), s.held.is_none(), s.out_from, s.fade_next));
+        assert_eq!(left, (true, true, None, false));
     }
 }

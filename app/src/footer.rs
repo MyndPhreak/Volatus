@@ -13,6 +13,8 @@ pub struct Chip {
     pub percent: String,
     /// Share of `total`, 0..=1: the width of the chip's part of the strip.
     pub share: f32,
+    /// Bytes of the type as `format_size` gives them: "12.3 GB".
+    pub size: String,
     /// Gives the colour, the same as the tiles of this type.
     pub category: Category,
 }
@@ -33,6 +35,7 @@ pub fn chips(totals: &[TypeTotal], total: u64, max: usize) -> Vec<Chip> {
         label,
         percent: format_percent(bytes, total),
         share: (bytes as f64 / total as f64) as f32,
+        size: String::new(),
         category,
     };
     let mut top: Vec<&TypeTotal> = totals.iter().filter(|t| t.bytes > 0).collect();
@@ -50,6 +53,11 @@ pub fn chips(totals: &[TypeTotal], total: u64, max: usize) -> Vec<Chip> {
         out.push(chip(OTHER.to_string(), rest, Category::Other));
     }
     out
+}
+
+/// What a screen reader says for chip `c`: ".dll, 10.5 percent, 12.3 GB".
+pub fn spoken(c: &Chip) -> String {
+    todo!("{}", c.label)
 }
 
 #[cfg(test)]
@@ -175,7 +183,7 @@ mod tests {
 
         assert_eq!(
             chips,
-            vec![Chip { label: ".iso".into(), percent: "100.0%".into(), share: 1.0, category: Category::DiskImage }]
+            vec![Chip { label: ".iso".into(), percent: "100.0%".into(), share: 1.0, size: "42 B".into(), category: Category::DiskImage }]
         );
     }
 
@@ -200,6 +208,38 @@ mod tests {
         let cats: Vec<Category> = chips.iter().map(|c| c.category).collect();
 
         assert_eq!(cats, vec![Category::Program, Category::Other, Category::Other]);
+    }
+
+    #[test]
+    fn chips_size_is_format_size_of_the_bytes_of_the_type() {
+        let chips = chips(&[total("dll", 3 * 1024 * 1024), total("exe", 1024)], 3 * 1024 * 1024 + 1024, 8);
+
+        let sizes: Vec<&str> = chips.iter().map(|c| c.size.as_str()).collect();
+
+        assert_eq!(sizes, vec!["3.0 MB", "1.0 KB"]);
+    }
+
+    #[test]
+    fn chips_size_of_other_is_the_bytes_of_the_rest() {
+        let chips = chips(&ten(), 550, 8);
+
+        assert_eq!(chips[8].size, "30 B");
+    }
+
+    #[test]
+    fn spoken_chip_gives_label_percent_in_words_and_size() {
+        let chips = chips(&[total("dll", 103), total("exe", 897)], 1000, 8);
+
+        assert_eq!(spoken(&chips[1]), ".dll, 10.3 percent, 103 B");
+    }
+
+    #[test]
+    fn spoken_other_and_no_extension_chips_use_their_labels() {
+        let chips = chips(&[total("dll", 5), total("", 3), total("exe", 2)], 10, 2);
+
+        let said: Vec<String> = chips.iter().map(spoken).collect();
+
+        assert_eq!(said, vec![".dll, 50.0 percent, 5 B", "No extension, 30.0 percent, 3 B", "Other, 20.0 percent, 2 B"]);
     }
 
     /// Files `(name, size)` directly under a root folder.
