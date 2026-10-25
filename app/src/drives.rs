@@ -428,7 +428,7 @@ mod tests {
     fn admin_note_is_shown_only_when_not_admin_and_a_listed_drive_is_ntfs() {
         let ntfs = DriveInfo { is_ntfs: true, ..info('C', "", DriveKind::Fixed, None) };
         let fat = info('E', "", DriveKind::Removable, None);
-        let note = "Whole NTFS drives scan much faster as administrator. Volatus then reads the file index (the MFT) directly.";
+        let note = "As administrator, Volatus reads the NTFS file index (MFT). A scan of a full NTFS drive is then much faster.";
         // No drives is also the state while the first drive list loads: the window starts with no note.
         let cases: [(&[DriveInfo], bool, &str); 8] = [
             (&[], false, ""),

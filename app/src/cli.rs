@@ -175,10 +175,10 @@ mod tests {
     // ---- options ----
     const CPUS: usize = 8;
     const CAP: usize = 32;
-    const UNKNOWN: &str = "Unknown option ignored: ";
-    const BAD_METHOD: &str = "Invalid value for --method. Use auto, mft or walk.";
-    const BAD_THREADS: &str = "Invalid value for --threads. Use a number from 1 to 32.";
-    const HIGH_THREADS: &str = "The value for --threads is too high. Using 32.";
+    const UNKNOWN: &str = "Volatus ignored the unknown option ";
+    const BAD_METHOD: &str = "The value for --method is not correct. Use auto, mft or walk.";
+    const BAD_THREADS: &str = "The value for --threads is not correct. Use a number from 1 to 32.";
+    const HIGH_THREADS: &str = "The value for --threads is too high. Volatus uses 32.";
 
     fn parse_n(args: &[&str]) -> Args {
         parse_args_with(args.iter().map(|s| s.to_string()), CPUS)
@@ -291,7 +291,7 @@ mod tests {
     #[test]
     fn parse_args_threads_cap_follows_the_cpu_count() {
         let a = parse_args_with(["--threads".to_string(), "5".to_string()], 1);
-        assert_eq!((a.flags.threads, a.notices), (Some(4), one("The value for --threads is too high. Using 4.")));
+        assert_eq!((a.flags.threads, a.notices), (Some(4), one("The value for --threads is too high. Volatus uses 4.")));
         let a = parse_args_with(["--threads".to_string(), "5".to_string()], 0);
         assert_eq!(a.flags.threads, Some(4), "zero CPUs counts as one");
     }

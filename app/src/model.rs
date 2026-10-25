@@ -598,7 +598,7 @@ mod tests {
     }
 
     // ---- scan_error_message ----
-    const MFT_MESSAGE: &str = "The MFT method needs administrator rights and a whole NTFS drive.";
+    const MFT_MESSAGE: &str = "The MFT method needs administrator rights and a folder on a local NTFS drive.";
 
     #[test]
     fn scan_error_message_explicit_mft_io_errors_explain_the_mft_needs() {
@@ -659,7 +659,7 @@ mod tests {
 
     #[test]
     fn with_options_notices_follow_the_banner_in_every_state() {
-        let list = notices(&["Unknown option ignored: --foo.", "Invalid value for --method. Use auto, mft or walk."]);
+        let list = notices(&["Volatus ignored the unknown option --foo.", "The value for --method is not correct. Use auto, mft or walk."]);
         let states = [
             ScanState::Idle,
             ScanState::Scanning { files: 1, dirs: 1 },
@@ -668,7 +668,7 @@ mod tests {
             ScanState::Cancelled,
         ];
         for state in states {
-            let want = "B. Unknown option ignored: --foo. Invalid value for --method. Use auto, mft or walk.";
+            let want = "B. Volatus ignored the unknown option --foo. The value for --method is not correct. Use auto, mft or walk.";
             assert_eq!(with_options("B.".into(), &state, None, &list), want, "state {state:?}");
         }
     }
