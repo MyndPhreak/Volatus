@@ -64,4 +64,4 @@ Other people, and the owner, should be able to download Volatus from GitHub, ins
 
 ## Open items for the owner
 
-One: the per-machine install to Program Files (one UAC prompt at install) is the writer's call, not yet confirmed by the owner.
+None. The owner confirmed the per-machine install to Program Files with one UAC prompt (2026-10-25).
