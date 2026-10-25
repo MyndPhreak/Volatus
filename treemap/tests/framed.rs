@@ -506,6 +506,120 @@ fn render_framed_light_fill_differs_from_dark_fill() {
     assert_ne!(dark.band("n1"), light.band("n1"));
 }
 
+// ---- cushion shading of small tiles ----
+
+/// One file "f1" (file type Other) drawn as a `side` x `side` tile filling a `side` x `side`
+/// picture at chrome `chrome`. Returns a pixel getter.
+fn one_tile(side: u32, chrome: Chrome) -> impl Fn(u32, u32) -> [u8; 4] {
+    let tree = tree_of(&[10]);
+    let file = named(&tree, "f1");
+    let rects = [Rect { node: file, x: 0.0, y: 0.0, w: f64::from(side), h: f64::from(side) }];
+    let px = render_framed(&tree, &rects, side, side, chrome, Theme::Dark);
+    move |x, y| {
+        let i = ((y * side + x) * 4) as usize;
+        px[i..i + 4].try_into().unwrap()
+    }
+}
+
+#[test]
+fn render_framed_small_tile_left_is_brighter_than_right_on_one_row() {
+    let at = one_tile(16, ONE);
+
+    // x 4 and 10 lie the same distance from the middle of the 15 px tile (1 px gap on the right).
+    let (left, right) = (at(4, 5), at(10, 5));
+
+    assert!(lum_over_dark(left) > lum_over_dark(right), "left {left:?}, right {right:?}");
+}
+
+#[test]
+fn render_framed_small_tile_bottom_right_is_darker_than_its_colour() {
+    let at = one_tile(16, ONE);
+    let [r, g, b] = treemap::filetype::colour(treemap::filetype::Category::Other, Theme::Dark);
+
+    let corner = at(11, 11);
+
+    assert!(lum_over_dark(corner) < lum_over_dark([r, g, b, 255]), "bottom right {corner:?}, colour {:?}", [r, g, b]);
+}
+
+#[test]
+fn render_framed_tile_of_23_px_is_shaded_across_a_row() {
+    let at = one_tile(23, ONE);
+
+    let (left, right) = (at(5, 6), at(17, 6));
+
+    assert!(lum_over_dark(left) > lum_over_dark(right), "left {left:?}, right {right:?}");
+}
+
+#[test]
+fn render_framed_tile_of_24_px_keeps_flat_rows() {
+    let at = one_tile(24, ONE);
+
+    let (left, right) = (at(5, 6), at(17, 6));
+
+    assert_eq!(left, right);
+}
+
+#[test]
+fn render_framed_at_scale_two_tile_of_46_px_is_shaded_across_a_row() {
+    let at = one_tile(46, Chrome::scaled(2.0));
+
+    let (left, right) = (at(10, 12), at(33, 12));
+
+    assert!(lum_over_dark(left) > lum_over_dark(right), "left {left:?}, right {right:?}");
+}
+
+#[test]
+fn render_framed_at_scale_two_tile_of_48_px_keeps_flat_rows() {
+    let at = one_tile(48, Chrome::scaled(2.0));
+
+    let (left, right) = (at(10, 12), at(35, 12));
+
+    assert_eq!(left, right);
+}
+
+#[test]
+fn render_framed_large_tile_is_unchanged_flat_rows_and_plain_bottom() {
+    let at = one_tile(100, ONE);
+    let [r, g, b] = treemap::filetype::colour(treemap::filetype::Category::Other, Theme::Dark);
+
+    let row: Vec<[u8; 4]> = (2..96).map(|x| at(x, 30)).collect();
+    let bottom = at(50, 90);
+
+    assert!(row.iter().all(|&p| p == row[0]), "row 30 is not flat: {row:?}");
+    assert_eq!(bottom, [r, g, b, 255]);
+}
+
+#[test]
+fn render_framed_small_tiles_same_input_gives_the_same_pixels() {
+    let tree = tree_of(&[50, 30, 20, 10, 5, 5, 3, 2, 1, 1]);
+    let rects = layout_framed(&tree, tree.root(), 60, 40, ONE);
+
+    let (a, b) = (render_framed(&tree, &rects, 60, 40, ONE, Theme::Dark), render_framed(&tree, &rects, 60, 40, ONE, Theme::Dark));
+
+    assert_eq!(a, b);
+}
+
+#[test]
+fn render_framed_every_small_tile_size_paints_opaque_pixels_without_overflow() {
+    let tree = tree_of(&[10]);
+    let file = named(&tree, "f1");
+    for chrome in [ONE, Chrome::scaled(2.0)] {
+        for w in 1..=48u32 {
+            for h in 1..=48u32 {
+                let rects = [Rect { node: file, x: 0.0, y: 0.0, w: f64::from(w), h: f64::from(h) }];
+                for theme in [Theme::Dark, Theme::Light] {
+                    let px = render_framed(&tree, &rects, w, h, chrome, theme);
+
+                    // The first pixel of the middle row is painted: no corner and no gap there.
+                    let i = (((h / 2) * w) * 4) as usize;
+                    assert_eq!(px.len(), (w * h * 4) as usize);
+                    assert!(px[i + 3] > 0, "{w}x{h} {chrome:?} {theme:?}: middle row starts clear");
+                }
+            }
+        }
+    }
+}
+
 // ---- label_spots ----
 
 /// A rect of node `name` in `sample()`.
