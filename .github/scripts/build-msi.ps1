@@ -42,7 +42,17 @@ Write-Host "Package $($package.name) $Version"
 New-Item -ItemType Directory -Force -Path $ToolsDir | Out-Null
 $zip = Join-Path $ToolsDir 'wix314-binaries.zip'
 $wix = Join-Path $ToolsDir 'wix314'
-Invoke-WebRequest -Uri "https://github.com/wixtoolset/wix3/releases/download/$WixTag/wix314-binaries.zip" -OutFile $zip
+# Three tries, 5 s then 10 s apart: one network fault does not fail the build.
+for ($try = 1; ; $try++) {
+  try {
+    Invoke-WebRequest -Uri "https://github.com/wixtoolset/wix3/releases/download/$WixTag/wix314-binaries.zip" -OutFile $zip
+    break
+  } catch {
+    if ($try -ge 3) { throw }
+    Write-Host "WiX download failed (try $try of 3): $($_.Exception.Message)"
+    Start-Sleep -Seconds (5 * $try)
+  }
+}
 $actual = (Get-FileHash -Path $zip -Algorithm SHA256).Hash
 if ($actual -ne $WixSha256) { throw "WiX archive SHA-256 mismatch: expected $WixSha256, got $actual" }
 if (Test-Path $wix) { Remove-Item -Recurse -Force $wix }
