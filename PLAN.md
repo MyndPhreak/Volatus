@@ -15,6 +15,23 @@ A Rust, WizTree-style disk usage analyzer for Windows. Speed comes from reading 
 | Mica: `window-vibrancy::apply_mica` on the HWND, Slint window `background: transparent`, Fluent style, winit backend | Native Windows 11 backdrop, no custom compositor. |
 | Elevation: manifest `asInvoker`; a "Scan faster (restart as admin)" button re-launches via `runas` | The app stays usable without admin. |
 
+### Main screen redesign (2026-10-23/24, plan `docs/superpowers/plans/2026-10-23-volatus-main-screen.md`)
+| Decision | Reason |
+|---|---|
+| Treemap is nested, labelled glass frames: `layout_framed` gives each folder a label band and an inset, with its own scale per folder; `render_framed` draws translucent frames and rounded, lit file tiles into one RGBA bitmap on a worker | Folders show as groups, as in the approved mockup. One bitmap stays fast; the UI thread never lays out or draws it. |
+| Folder and file names are Slint `Text` labels over the bitmap (largest first, one cap of 650 for both, measured at 4K and 200%) | Crisp text that a frame cannot cut. The cap keeps the label update of a relayout under 50 ms. |
+| Tiles under 24 logical px on the short side get cushion shading (bright top left, dark bottom right); bigger tiles keep the glass highlight | Thousands of small tiles stay easy to tell apart. |
+| Start screen: one glass button per ready fixed or removable drive (drive list on a worker, `SEM_FAILCRITICALERRORS`), plus "Choose folder" | An empty card reader or a sleeping disk cannot block the window or show a system dialog. |
+| `subst` drives are not shown (`QueryDosDeviceW`) | A `subst` drive is a folder of another drive; a button for it looks like a whole drive. |
+| Tile colour is a fixed file-type category of the name; the footer shows the biggest types with their share, from a worker pass that is dropped when it is late | The colour is known at the first frame; footer and tiles use the same colours. |
+| Hover lift and glow, tooltip, selection outline and zoom are Slint layers over the bitmap; hover changes properties only | Overlays are never cut by a frame, and hover never draws the bitmap again. The software renderer gets a bright border, as it draws no shadow. |
+| Motion: open zooms in (180 ms ease-out), up zooms out, the first picture of a scan fades in (250 ms); input never waits for a move | The map change is easy to follow, and a fast user is not slowed. |
+| Every name the window shows goes through `display_name`: bidi and other invisible characters become U+FFFD | A file name cannot show other text than it holds (for example a reversed extension). |
+| The mimalloc allocator was measured against the start-up stall and not adopted | It met the bar in 0 of 10 runs and used 2.2 to 2.9 times the private memory. |
+| With no `--threads`, the walker runs on one thread fewer than the logical CPUs, at below-normal priority; the MFT path is unchanged | The window keeps a CPU to draw while a walk runs. Scan time grows by 0.6% on C:. |
+| A folder given on the command line is scanned after the window's first frame (2 s fallback timer); the window then opens on the results screen, not on the start screen | The window draws before the walker takes the CPUs. |
+| No runtime flag for the redesign (owner decision) | The owner approved a replacement; rollback is a per-phase `git revert`. |
+
 ## Failure behaviour (explicit)
 - Volume not NTFS, no admin, or MFT parse error on a record: log, skip that record, count it in `ScanStats.skipped`. If the volume header or `$MFT` run list fails, fall back to the walker and show a banner. Never show partial totals as complete.
 - Fixup (update sequence) mismatch: record is dropped and counted. Never trusted.
@@ -32,6 +49,7 @@ A Rust, WizTree-style disk usage analyzer for Windows. Speed comes from reading 
 | `treemap/src/lib.rs` | Squarified layout + rasterizer |
 | `app/src/main.rs`, `app/ui/main.slint` | Window, tree list, treemap, scan controls, Mica |
 | `app/build.rs`, `app/app.manifest` | Slint compile, manifest |
+| `docs/USAGE.md` | What the screens do, keys, administrator rights, command line |
 
 ## API stubs (land compiling, bodies `unimplemented!`/empty)
 ```rust
