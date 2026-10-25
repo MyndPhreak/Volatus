@@ -599,6 +599,25 @@ fn show_layout(ui: &MainWindow, Layout { root, rects, image, labels: (labels, fi
     note_treemap_shown(ui);
 }
 
+/// A box (x, y, w, h) in logical pixels.
+type LogicalBox = (f32, f32, f32, f32);
+
+/// Box `b` of a layout made for a `from` (w, h) map, on a `to` (w, h) map that shows the picture of
+/// that layout stretched over it: each axis scales by its own factor, so the box stays on its frame.
+/// An axis with no `from` size (no layout yet) does not scale.
+fn stretch(b: LogicalBox, from: (f32, f32), to: (f32, f32)) -> LogicalBox {
+    let _ = (b, from, to);
+    todo!("stretch")
+}
+
+/// Label or outline `p` of the layout made for a `from` map, on the `to` map (`stretch`). A label
+/// shows only while its box is still as big as a label of `kind` needs; the text keeps its size. A
+/// file label keeps the size on a second line only while the box is high enough for two lines.
+fn place_label(p: Placed, kind: LabelKind, from: (f32, f32), to: (f32, f32)) -> Placed {
+    let _ = (p, kind, from, to);
+    todo!("place_label")
+}
+
 /// The frame of move `m` at time `t` (0 to 1) of the move, eased out: `treemap::zoom_at` for the
 /// place and `treemap::eased` for the opacity, in logical pixels.
 fn frame_at(m: &ZoomMove, t: f32) -> ZoomFrame {
@@ -1436,7 +1455,7 @@ mod tests {
         Data, FILE_LABEL_TWO_LINES, FileLabel, FrameLabel, Hover, LABEL_CAP, ZoomFrame, ZoomMove, frame_at,
         Loaded, RowModel, SESSION, file_labels, frame_labels, glow_drawn, hover_of, map_labels, note_hover, restart_admin,
         store_chips, Move, picture_point, zoom_frame_at, take_launch_path, forget_scan, gate_hover, left_map,
-        shows_start_at_launch, relaunch_path,
+        shows_start_at_launch, relaunch_path, LabelKind, LogicalBox, Placed, place_label, stretch,
     };
     use crate::tip;
     use crate::motion::Kind;
@@ -1757,6 +1776,108 @@ mod tests {
     }
 
     // ---- moving picture ----
+    // ---- labels on a stretched picture ----
+    #[test]
+    fn stretch_at_the_layout_size_is_the_same_box() {
+        for b in [(0.0, 0.0, 0.0, 0.0), (10.0, 20.0, 30.0, 40.0), (799.5, 0.25, 0.5, 599.75)] {
+            assert_eq!(stretch(b, (800.0, 600.0), (800.0, 600.0)), b);
+        }
+    }
+
+    #[test]
+    fn stretch_growth_scales_place_and_size() {
+        assert_eq!(stretch((10.0, 20.0, 30.0, 40.0), (100.0, 100.0), (200.0, 300.0)), (20.0, 60.0, 60.0, 120.0));
+    }
+
+    #[test]
+    fn stretch_shrink_scales_place_and_size() {
+        assert_eq!(stretch((10.0, 20.0, 30.0, 40.0), (100.0, 100.0), (50.0, 25.0)), (5.0, 5.0, 15.0, 10.0));
+    }
+
+    #[test]
+    fn stretch_aspect_change_scales_each_axis_on_its_own() {
+        assert_eq!(stretch((10.0, 20.0, 30.0, 40.0), (100.0, 100.0), (150.0, 100.0)), (15.0, 20.0, 45.0, 40.0));
+    }
+
+    #[test]
+    fn stretch_axis_with_no_layout_size_does_not_scale() {
+        let b = (10.0, 20.0, 30.0, 40.0);
+        let cases = [
+            ((0.0, 0.0), b),
+            ((0.0, 100.0), (10.0, 60.0, 30.0, 120.0)),
+            ((100.0, 0.0), (20.0, 20.0, 60.0, 40.0)),
+            ((f32::NAN, 100.0), (10.0, 60.0, 30.0, 120.0)),
+            ((-5.0, 100.0), (10.0, 60.0, 30.0, 120.0)),
+        ];
+        for (from, want) in cases {
+            assert_eq!(stretch(b, from, (200.0, 300.0)), want, "from {from:?}");
+        }
+    }
+
+    #[test]
+    fn stretch_to_a_map_with_no_size_gives_an_empty_box() {
+        assert_eq!(stretch((10.0, 20.0, 30.0, 40.0), (100.0, 100.0), (0.0, 0.0)), (0.0, 0.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn stretch_in_logical_pixels_matches_the_physical_picture_at_every_scale() {
+        let (b, from, to) = ((12.0, 34.0, 56.0, 78.0), (640.0, 480.0), (1000.0, 300.0));
+        let logical = stretch(b, from, to);
+        for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+            let s = |(x, y, w, h): LogicalBox| (x * scale, y * scale, w * scale, h * scale);
+
+            let (x, y, w, h) = stretch(s(b), (from.0 * scale, from.1 * scale), (to.0 * scale, to.1 * scale));
+
+            let back = [x / scale - logical.0, y / scale - logical.1, w / scale - logical.2, h / scale - logical.3];
+            assert!(back.iter().all(|d| d.abs() < 1e-3), "scale {scale}: {back:?}");
+        }
+    }
+
+    fn placed(width: f32, height: f32) -> Placed {
+        Placed { x: 0.0, y: 0.0, width, height, shown: false, two_lines: false }
+    }
+
+    #[test]
+    fn place_label_each_kind_shows_only_while_its_box_has_room() {
+        let (half_wide, half_high) = ((50.0, 100.0), (100.0, 50.0));
+        let cases = [
+            // Frame labels: at least 24 x 14 after the stretch.
+            (LabelKind::Frame, (48.0, 28.0), half_wide, true),
+            (LabelKind::Frame, (46.0, 28.0), half_wide, false),
+            (LabelKind::Frame, (48.0, 28.0), half_high, true),
+            (LabelKind::Frame, (48.0, 26.0), half_high, false),
+            // File labels: at least 40 x 14 after the stretch.
+            (LabelKind::File, (80.0, 28.0), half_wide, true),
+            (LabelKind::File, (78.0, 28.0), half_wide, false),
+            (LabelKind::File, (80.0, 28.0), half_high, true),
+            (LabelKind::File, (80.0, 26.0), half_high, false),
+            // Outlines always show.
+            (LabelKind::Outline, (2.0, 2.0), half_wide, true),
+            (LabelKind::Outline, (2.0, 2.0), half_high, true),
+            (LabelKind::Outline, (0.0, 0.0), half_high, true),
+        ];
+        for (kind, (w, h), to, want) in cases {
+            assert_eq!(place_label(placed(w, h), kind, (100.0, 100.0), to).shown, want, "{kind:?} {w} x {h} to {to:?}");
+        }
+    }
+
+    #[test]
+    fn place_label_keeps_the_label_on_its_stretched_frame() {
+        let p = Placed { x: 10.0, y: 20.0, width: 80.0, height: 30.0, shown: false, two_lines: false };
+
+        let got = place_label(p, LabelKind::Frame, (100.0, 100.0), (200.0, 50.0));
+
+        assert_eq!(got, Placed { x: 20.0, y: 10.0, width: 160.0, height: 15.0, shown: true, two_lines: false });
+    }
+
+    #[test]
+    fn place_label_file_label_has_two_lines_only_while_the_box_is_two_lines_high() {
+        let cases = [((80.0, 64.0), (100.0, 50.0), true), ((80.0, 63.9), (100.0, 50.0), false), ((80.0, 20.0), (100.0, 200.0), true)];
+        for ((w, h), to, want) in cases {
+            assert_eq!(place_label(placed(w, h), LabelKind::File, (100.0, 100.0), to).two_lines, want, "{w} x {h} to {to:?}");
+        }
+    }
+
     fn zf(x: f32, y: f32, width: f32, height: f32, opacity: f32) -> ZoomFrame {
         ZoomFrame { x, y, width, height, opacity }
     }

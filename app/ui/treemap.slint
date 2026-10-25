@@ -70,6 +70,22 @@ export struct ZoomFrame {
     opacity: float,
 }
 
+/// What sits on the map picture: a frame label, a file label, or an outline (selection or hover).
+export enum LabelKind { frame, file, outline }
+
+/// Where a label or an outline of the shown layout goes while the map has another size than that
+/// layout (a resize before the new layout lands), in logical pixels. From the host.
+export struct Placed {
+    x: length,
+    y: length,
+    width: length,
+    height: length,
+    /// The box has room for the label.
+    shown: bool,
+    /// A file label has room for its size on a second line.
+    two-lines: bool,
+}
+
 /// A move of a picture over the map: from one frame to another.
 export struct ZoomMove {
     from: ZoomFrame,
