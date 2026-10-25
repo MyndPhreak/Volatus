@@ -425,7 +425,7 @@ fn glow_drawn(notifier: Result<(), SetRenderingNotifierError>) -> bool {
 }
 
 /// The node of the shown treemap under the window point (x, y) in logical pixels. While a zoom in
-/// shows, the point is on the zooming picture, so it is found in that picture's own rects.
+/// or out shows, the point is on the zooming picture, so it is found in that picture's own rects.
 fn node_at(ui: &MainWindow, x: f32, y: f32) -> Option<NodeId> {
     let (x, y) = to_physical(ui, x, y);
     let moving = SESSION.with_borrow(|s| s.moving);
@@ -671,16 +671,16 @@ fn stop_move(ui: &MainWindow) {
     }
 }
 
-/// Where the picture of a zoom in is on the treemap now (physical pixels), or `None` when no zoom
-/// in shows.
-fn zoom_in_frame(ui: &MainWindow) -> Option<Frame> {
+/// Where the picture of a zoom in or out is on the treemap now (physical pixels), or `None` when no
+/// zoom shows.
+fn zoom_now(ui: &MainWindow) -> Option<Frame> {
     zoom_frame_at(SESSION.with_borrow(|s| s.moving), f64::from(ui.get_zoom_t()))
 }
 
-/// Where the picture of zoom `moving` is on the treemap at time `t` of it (physical pixels), or
-/// `None` when no zoom shows.
+/// Where the picture of zoom `moving` (in or out) is on the treemap at time `t` of it (physical
+/// pixels), or `None` when no zoom shows (no move, or a fade).
 fn zoom_frame_at(moving: Option<Move>, t: f64) -> Option<Frame> {
-    let m = moving.filter(|m| m.kind == motion::Kind::In)?;
+    let m = moving.filter(|m| matches!(m.kind, motion::Kind::In | motion::Kind::Out))?;
     Some(treemap::zoom_at(m.from, m.to, t))
 }
 
@@ -982,7 +982,7 @@ fn show_folder(ui: &MainWindow, folder: NodeId) {
 }
 
 /// The picture starts to move for the change of the shown folder to `folder`
-/// (`tree_view::zoom_way`): it zooms in at once, from where a zoom in is now; or the move out waits
+/// (`tree_view::zoom_way`): it zooms in at once, from where a zoom in or out is now; or the move out waits
 /// for the new layout; or the picture stays still and a move that shows hides.
 fn move_to_folder(ui: &MainWindow, folder: NodeId) {
     let way = with_loaded(|l| tree_view::zoom_way(&l.data.tree, l.shown_root, &l.rects, folder));
@@ -991,7 +991,7 @@ fn move_to_folder(ui: &MainWindow, folder: NodeId) {
     match way {
         Some(tree_view::ZoomWay::In((x, y, rw, rh))) if motion_on() => {
             if let Some(to) = treemap::zoom_frame(&Rect { node: folder, x, y, w: rw, h: rh }, w, h) {
-                let from = zoom_in_frame(ui).unwrap_or((0.0, 0.0, w, h));
+                let from = zoom_now(ui).unwrap_or((0.0, 0.0, w, h));
                 return start_move(ui, motion::Kind::In, ui.get_treemap(), from, to, (1.0, 1.0));
             }
         }
@@ -1729,6 +1729,20 @@ mod tests {
     fn picture_point_click_half_way_through_a_zoom_out_hits_the_tile_drawn_there() {
         // ease_out(0.5) = 0.875: the frame is (0, 0, 550, 550), so tile 1 is drawn at (0, 0, 137.5, 137.5).
         assert_eq!(tile_under(Some(zoom_out_of_tile_1()), 0.5, 120.0, 120.0), Some(NodeId(1)));
+    }
+
+    #[test]
+    fn picture_point_click_at_the_end_of_a_zoom_in_hits_the_tile_that_fills_the_view() {
+        let full = (0.0, 0.0, VIEW.0, VIEW.1);
+        let zoom_in = Move { kind: Kind::In, from: full, to: zoom_out_of_tile_1().from, ..zoom_out_of_tile_1() };
+        assert_eq!(tile_under(Some(zoom_in), 1.0, 200.0, 200.0), Some(NodeId(1)));
+    }
+
+    #[test]
+    fn zoom_frame_at_fade_is_none() {
+        let full = (0.0, 0.0, VIEW.0, VIEW.1);
+        let fade = Move { kind: Kind::Fade, from: full, to: full, ..zoom_out_of_tile_1() };
+        assert_eq!(zoom_frame_at(Some(fade), 0.5), None);
     }
 
     // ---- glow or border ----
