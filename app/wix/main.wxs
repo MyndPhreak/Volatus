@@ -1,7 +1,138 @@
 <?xml version="1.0" encoding="windows-1252"?>
-<!-- Stub: the installer is not written yet (app/tests/wix.rs fails on it). -->
+<!--
+  Volatus's installer (WiX Toolset v3), built from the repository root with cargo-wix:
+  `cargo wix -p app` (add `-b <WiX bin folder>` when WiX isn't on PATH or in %WIX%), or
+  .github/scripts/build-msi.ps1, which writes target\wix\volatus-<version>-x86_64.msi. cargo-wix
+  passes Version (the app package's version) and CargoTargetBinDir, and links WixUIExtension and
+  WixUtilExtension; app/Cargo.toml's [package.metadata.wix] adds the rest. Files next to this one
+  are found through $(sys.SOURCEFILEDIR), so the build works from any folder.
+
+  Per-machine, to C:\Program Files\Volatus, with a Start menu shortcut. Every release is a major
+  upgrade (a new ProductCode, the fixed UpgradeCode below) that replaces the installed version in
+  place; downgrades are refused. Uninstall removes everything this file installs.
+
+  The installer never runs volatus.exe to do its work. app/tests/wix.rs checks this file;
+  .github/scripts/check-msi.ps1 checks the built MSI's tables.
+-->
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
-  <Product Id="*" Name="Volatus" Language="1033" Version="$(var.Version)" Manufacturer="MyndPhreak">
-    <Package InstallerVersion="500" Compressed="yes"/>
+  <Product
+      Id="*"
+      Name="Volatus"
+      UpgradeCode="FB5B570F-DD29-49B8-A6AE-35855278CAE6"
+      Manufacturer="MyndPhreak"
+      Language="1033"
+      Codepage="1252"
+      Version="$(var.Version)">
+
+    <Package
+        Id="*"
+        Keywords="Installer"
+        Description="Volatus shows what uses the space on a drive"
+        Manufacturer="MyndPhreak"
+        InstallerVersion="500"
+        Languages="1033"
+        Compressed="yes"
+        InstallScope="perMachine"
+        InstallPrivileges="elevated"
+        Platform="x64"
+        SummaryCodepage="1252"/>
+
+    <!-- Inside the install transaction: a failed upgrade rolls back to the old version. -->
+    <MajorUpgrade
+        Schedule="afterInstallInitialize"
+        AllowSameVersionUpgrades="yes"
+        DowngradeErrorMessage="A newer version of [ProductName] is installed. To install this version, remove the newer version first."/>
+
+    <!-- VersionNT is 603 on Windows 8.1, 10 and 11; CurrentMajorVersionNumber exists from Windows
+         10 on. 32-bit Windows is refused by the x64 package itself. ARM64 Windows runs this x64
+         build under emulation (allowed, not tested). -->
+    <Property Id="VOLATUS_WIN10">
+      <RegistrySearch Id="WindowsMajorVersionSearch" Root="HKLM" Win64="yes" Type="raw"
+          Key="SOFTWARE\Microsoft\Windows NT\CurrentVersion" Name="CurrentMajorVersionNumber"/>
+    </Property>
+    <Condition Message="Volatus needs 64-bit Windows 10 or newer.">Installed OR VOLATUS_WIN10</Condition>
+
+    <Media Id="1" Cabinet="media1.cab" EmbedCab="yes" DiskPrompt="CD-ROM #1"/>
+    <Property Id="DiskPrompt" Value="Volatus Installation"/>
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLFOLDER" Name="Volatus">
+          <Component Id="VolatusExe" Guid="*" Win64="yes">
+            <File
+                Id="VolatusExe"
+                Name="volatus.exe"
+                DiskId="1"
+                Source="$(var.CargoTargetBinDir)\volatus.exe"
+                KeyPath="yes">
+              <!-- Not advertised: it starts the exe directly (no Windows Installer check on each
+                   start). -->
+              <Shortcut
+                  Id="VolatusShortcut"
+                  Name="Volatus"
+                  Description="See what uses the space on a drive"
+                  Directory="ProgramMenuFolder"
+                  WorkingDirectory="INSTALLFOLDER"
+                  Advertise="no"/>
+            </File>
+          </Component>
+        </Directory>
+      </Directory>
+      <Directory Id="ProgramMenuFolder"/>
+    </Directory>
+
+    <Feature Id="Main" Title="Volatus" Level="1" Absent="disallow" AllowAdvertise="no">
+      <ComponentRef Id="VolatusExe"/>
+    </Feature>
+
+    <!-- Installed apps: the exe's icon, links, and nothing to change after install. -->
+    <Icon Id="volatus.ico" SourceFile="$(sys.SOURCEFILEDIR)..\assets\volatus.ico"/>
+    <Property Id="ARPPRODUCTICON" Value="volatus.ico"/>
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/MyndPhreak/Volatus"/>
+    <Property Id="ARPHELPLINK" Value="https://github.com/MyndPhreak/Volatus/issues"/>
+    <Property Id="ARPNOMODIFY" Value="1"/>
+
+    <WixVariable Id="WixUILicenseRtf" Value="$(sys.SOURCEFILEDIR)License.rtf"/>
+
+    <UI Id="VolatusUI">
+      <TextStyle Id="WixUI_Font_Normal" FaceName="Tahoma" Size="8"/>
+      <TextStyle Id="WixUI_Font_Bigger" FaceName="Tahoma" Size="12"/>
+      <TextStyle Id="WixUI_Font_Title" FaceName="Tahoma" Size="9" Bold="yes"/>
+      <Property Id="DefaultUIFont" Value="WixUI_Font_Normal"/>
+      <Property Id="WixUI_Mode" Value="Minimal"/>
+
+      <DialogRef Id="ErrorDlg"/>
+      <DialogRef Id="FatalError"/>
+      <DialogRef Id="FilesInUse"/>
+      <DialogRef Id="MsiRMFilesInUse"/>
+      <DialogRef Id="PrepareDlg"/>
+      <DialogRef Id="ProgressDlg"/>
+      <DialogRef Id="ResumeDlg"/>
+      <DialogRef Id="UserExit"/>
+      <DialogRef Id="WelcomeDlg"/>
+      <DialogRef Id="LicenseAgreementDlg"/>
+      <DialogRef Id="MaintenanceWelcomeDlg"/>
+      <DialogRef Id="MaintenanceTypeDlg"/>
+      <DialogRef Id="VerifyReadyDlg"/>
+      <DialogRef Id="ExitDialog"/>
+
+      <!-- First install: Welcome, License, Ready. An upgrade or maintenance skips the license. -->
+      <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="LicenseAgreementDlg">NOT Installed AND NOT WIX_UPGRADE_DETECTED</Publish>
+      <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="VerifyReadyDlg">Installed OR WIX_UPGRADE_DETECTED</Publish>
+      <Publish Dialog="LicenseAgreementDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg">1</Publish>
+      <Publish Dialog="LicenseAgreementDlg" Control="Next" Event="NewDialog" Value="VerifyReadyDlg">LicenseAccepted = "1"</Publish>
+
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="LicenseAgreementDlg" Order="1">NOT Installed AND NOT WIX_UPGRADE_DETECTED</Publish>
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg" Order="2">(NOT Installed AND WIX_UPGRADE_DETECTED) OR (Installed AND PATCH)</Publish>
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="MaintenanceTypeDlg" Order="3">Installed AND NOT PATCH</Publish>
+
+      <Publish Dialog="MaintenanceWelcomeDlg" Control="Next" Event="NewDialog" Value="MaintenanceTypeDlg">1</Publish>
+      <Publish Dialog="MaintenanceTypeDlg" Control="RepairButton" Event="NewDialog" Value="VerifyReadyDlg">1</Publish>
+      <Publish Dialog="MaintenanceTypeDlg" Control="RemoveButton" Event="NewDialog" Value="VerifyReadyDlg">1</Publish>
+      <Publish Dialog="MaintenanceTypeDlg" Control="Back" Event="NewDialog" Value="MaintenanceWelcomeDlg">1</Publish>
+
+      <Publish Dialog="ExitDialog" Control="Finish" Event="EndDialog" Value="Return" Order="999">1</Publish>
+    </UI>
+    <UIRef Id="WixUI_Common"/>
   </Product>
 </Wix>

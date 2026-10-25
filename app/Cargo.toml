@@ -26,3 +26,13 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage
 # tests/wix.rs and the menu round trip in cli.rs read the installer source (already in the lock through Slint).
 [dev-dependencies]
 roxmltree = "0.21.1"
+
+# The installer: `cargo wix -p app` (WiX Toolset v3) builds wix/main.wxs into
+# target/wix/volatus-<version>-x86_64.msi (.github/scripts/build-msi.ps1 does every step).
+# ICE43 and ICE57 assume a per-user install (a Start menu shortcut in a component keyed by a file
+# in Program Files); this one is per-machine (ALLUSERS=1), where the Start menu folder is the
+# machine's. Re-check both suppressions whenever main.wxs's components change: they hide every
+# ICE43/ICE57 finding, not only this one.
+[package.metadata.wix]
+name = "volatus"
+linker-args = ["-sice:ICE43", "-sice:ICE57"]
