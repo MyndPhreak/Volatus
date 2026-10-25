@@ -234,3 +234,7 @@ That gap is open (see the P4 report, FOLLOW-UPS); compare the MFT runs: there bo
 - Only a whole-drive root (for example `C:\`) uses the MFT. A sub-folder is always walked,
   because the MFT path counts a hard-linked file only under its first name. `--method mft`
   still forces the MFT for any root, with no fallback.
+- With no `--threads` the walker runs on one thread fewer than the logical CPUs (at least one), at
+  below-normal priority; the MFT path is unchanged (P8 start-up stall, user approved, no flag).
+- A folder given on the command line starts its scan after the window's first frame (or after 2 s
+  if the window does not draw), not before the window shows (P8 start-up stall, user approved, no flag).
