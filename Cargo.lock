@@ -217,6 +217,7 @@ version = "0.1.0"
 dependencies = [
  "embed-resource",
  "rfd",
+ "roxmltree",
  "scan",
  "slint",
  "slint-build",

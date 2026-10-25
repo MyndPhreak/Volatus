@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="windows-1252"?>
+<!-- Stub: the installer is not written yet (app/tests/wix.rs fails on it). -->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*" Name="Volatus" Language="1033" Version="$(var.Version)" Manufacturer="MyndPhreak">
+    <Package InstallerVersion="500" Compressed="yes"/>
+  </Product>
+</Wix>
