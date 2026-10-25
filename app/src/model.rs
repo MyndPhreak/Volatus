@@ -348,8 +348,7 @@ pub fn offer_elevation(method: Method, root: &Path, is_admin: bool) -> bool {
 /// [`offer_elevation`] for the window in `state`: only a finished scan can offer it. `root` is the
 /// scan root as the worker resolved it once per scan; `None` while it is not known gives no offer.
 pub fn offer_for(state: &ScanState, root: Option<&Path>, is_admin: bool) -> bool {
-    let _ = (state, root, is_admin);
-    todo!("offer_for")
+    matches!((state, root), (ScanState::Done(s), Some(root)) if offer_elevation(s.method, root, is_admin))
 }
 
 /// Text for the status banner in each state. Never empty. `offer_elevation` is the result of

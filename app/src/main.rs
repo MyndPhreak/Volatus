@@ -20,7 +20,7 @@ mod tree_view;
 use browse::BrowseState;
 use model::{
     Event, ScanControl, ScanState, Summary, TimingRun, append_timing, banner_text, error_message, format_size,
-    group_digits, offer_elevation, shows_start, timing_for_state,
+    group_digits, offer_for, shows_start, timing_for_state,
 };
 use nav::{Dir, TreeMove};
 use scan::{NodeId, Progress, ScanError, Tree};
@@ -138,6 +138,9 @@ struct Session {
     layout_seq: u64,
     /// Root of the latest scan, as typed. Decides whether "Restart as administrator" is offered.
     scan_root: PathBuf,
+    /// `scan_root` as the worker resolved it, once per scan: canonical, or as typed when it cannot
+    /// be resolved (same rule as `scan::scan_with`). `None` until the scan finished.
+    resolved_root: Option<PathBuf>,
     /// Browse dialog state: at most one dialog at a time.
     browse: BrowseState,
     /// `--timing` was given. Also passed on by "Restart as administrator".
@@ -195,6 +198,7 @@ thread_local! {
         map_size: (0.0, 0.0),
         layout_seq: 0,
         scan_root: PathBuf::new(),
+        resolved_root: None,
         browse: BrowseState::default(),
         timing: false,
         run: None,
@@ -243,10 +247,7 @@ fn show_state(ui: &MainWindow) {
     ui.set_show_new_scan(matches!(state, ScanState::Done(_)));
     ui.set_scanning(matches!(state, ScanState::Scanning { .. }));
     ui.set_banner_is_error(matches!(state, ScanState::Error(_)));
-    let root = SESSION.with_borrow(|s| s.scan_root.clone());
-    // A root that cannot be resolved is not a drive root (same rule as `scan::scan_with`).
-    let root = std::fs::canonicalize(&root).unwrap_or(root);
-    let offer = matches!(&state, ScanState::Done(s) if offer_elevation(s.method, &root, elevate::is_admin()));
+    let offer = SESSION.with_borrow(|s| offer_for(&state, s.resolved_root.as_deref(), elevate::is_admin()));
     let line = SESSION.with_borrow(|s| timing_for_state(&state, s.run.as_ref().and_then(TimingRun::line)));
     ui.set_banner(append_timing(banner_text(&state, offer), line.as_deref()).into());
     ui.set_show_elevate(offer);
@@ -838,14 +839,16 @@ fn post(ui: &Weak<MainWindow>, generation: u64, event: Event) {
 
 /// Like `post` for `Finished`, and installs the scanned tree in the window. Both are dropped if
 /// a newer scan has started or the scan was cancelled (`ScanControl::finish` decides).
+/// `root` is the scan root as the worker resolved it (`Session::resolved_root`).
 /// The post-scan time of `--timing` starts when this runs on the UI thread.
-fn post_done(ui: &Weak<MainWindow>, generation: u64, data: Data, summary: Summary) {
+fn post_done(ui: &Weak<MainWindow>, generation: u64, data: Data, summary: Summary, root: PathBuf) {
     let ui = ui.clone();
     let _ = slint::invoke_from_event_loop(move || {
         let Some(ui) = ui.upgrade() else { return };
         let shown = summary.clone();
         if let Some(data) = SESSION.with_borrow_mut(|s| s.scan.finish(generation, summary, data)) {
             SESSION.with_borrow_mut(|s| {
+                s.resolved_root = Some(root);
                 if let Some(run) = s.run.as_mut() {
                     run.scan_returned(Instant::now(), &shown);
                 }
@@ -871,6 +874,7 @@ fn start_scan(ui: &MainWindow, path: &str) {
     };
     SESSION.with_borrow_mut(|s| {
         s.scan_root = PathBuf::from(path);
+        s.resolved_root = None;
         s.run = s.timing.then(|| TimingRun::new(Instant::now()));
     });
     show_state(ui);
@@ -901,7 +905,9 @@ fn start_scan(ui: &MainWindow, path: &str) {
             let summary = Summary::new(&stats, tree.node(tree.root()).size);
             // Counted here, not on the UI thread: it visits every node.
             let counts = tree_view::file_counts(&tree);
-            post_done(&weak, generation, Data { tree, counts }, summary);
+            // Resolved here once per scan, not on the UI thread at every event: it asks the file system.
+            let resolved = std::fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
+            post_done(&weak, generation, Data { tree, counts }, summary, resolved);
         }
         Err(ScanError::Cancelled) => post(&weak, generation, Event::Cancelled),
         Err(e) => post(&weak, generation, Event::Failed(error_message(&e))),
