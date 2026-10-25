@@ -44,6 +44,8 @@ const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 const RESIZE_DEBOUNCE: Duration = Duration::from_millis(80);
 /// Narrowest frame label, in logical pixels: room for a few characters and "…".
 const LABEL_MIN_WIDTH: f64 = 24.0;
+/// A frame label hides while the stretched picture makes its box lower than this (logical px).
+const FRAME_LABEL_MIN_STRETCHED_HEIGHT: f64 = 8.0;
 /// Most labels on the map, frames and file tiles together: the frames first, then the largest
 /// tiles. Measured at 3840x2160 and 200%, release, 3 runs of 10 frames, each with a new image
 /// (P8.P6b fix 1): 650 labels (554 frames and 96 files) show in a median of 36.6 to 38.1 ms and a
@@ -626,9 +628,10 @@ fn stretch(b: LogicalBox, from: (f32, f32), to: (f32, f32)) -> LogicalBox {
 /// file label keeps the size on a second line only while the box is high enough for two lines.
 fn place_label(p: Placed, kind: LabelKind, from: (f32, f32), to: (f32, f32)) -> Placed {
     let (x, y, width, height) = stretch((p.x, p.y, p.width, p.height), from, to);
-    // A frame label needs its least width and, like a file label, the height of one line of text.
+    // A frame label needs its least width and, while the picture is stretched, only half the label
+    // box in height: the text keeps its size and the final layout re-fits it.
     let (min_w, min_h) = match kind {
-        LabelKind::Frame => (LABEL_MIN_WIDTH, treemap::FILE_LABEL_MIN_HEIGHT),
+        LabelKind::Frame => (LABEL_MIN_WIDTH, FRAME_LABEL_MIN_STRETCHED_HEIGHT),
         LabelKind::File => (treemap::FILE_LABEL_MIN_WIDTH, treemap::FILE_LABEL_MIN_HEIGHT),
         LabelKind::Outline => (0.0, 0.0),
     };
