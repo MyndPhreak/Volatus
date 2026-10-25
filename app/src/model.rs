@@ -302,6 +302,13 @@ impl TimingRun {
         (self.returned, self.summary) = (Some(at), Some(summary.clone()));
     }
 
+    /// The worker finished the scan at `finished`. "After scan" counts from here, so the wait until
+    /// the UI thread takes the result is part of it.
+    pub fn scan_finished(&mut self, finished: Instant, summary: &Summary) {
+        let _ = (finished, summary);
+        todo!("scan_finished")
+    }
+
     /// The first treemap of the scan is shown at `now`. Returns the finished line once; `None`
     /// before the scan result arrived and for later layouts of the same scan.
     pub fn complete(&mut self, now: Instant) -> Option<String> {
@@ -513,6 +520,19 @@ mod tests {
         assert_eq!(
             line.as_deref(),
             Some("Timing: scan 5.3 s (read 4.1, rollup 1.2), after scan 0.2 s, total 6.1 s.")
+        );
+    }
+
+    #[test]
+    fn timing_run_after_scan_counts_from_the_worker_finish_so_the_wait_for_the_ui_thread_is_in_it() {
+        let t0 = Instant::now();
+        let mut run = TimingRun::new(t0);
+        // The worker finished at 5.3 s and the treemap showed at 6.1 s, after the UI thread took the result.
+        run.scan_finished(t0 + ms(5300), &timed(Method::Walk, ms(5300), phases(0, 4100, 0, 1200)));
+        let line = run.complete(t0 + ms(6100));
+        assert_eq!(
+            line.as_deref(),
+            Some("Timing: scan 5.3 s (read 4.1, rollup 1.2), after scan 0.8 s, total 6.1 s.")
         );
     }
 
