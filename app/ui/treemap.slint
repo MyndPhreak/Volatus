@@ -253,6 +253,8 @@ export component TreemapView inherits Rectangle {
     callback hide-tip(bool);
     /// Where the tooltip starts on one axis: (pointer, tooltip size, map size, gap after the pointer).
     pure callback tip-position(float, float, float, float) -> float;
+    /// The tooltip path with a break point after each folder, so it wraps between names.
+    pure callback break-points(string) -> string;
     /// A click at a point in logical pixels.
     callback clicked(float, float);
     /// A double-click at a point in logical pixels.
@@ -409,7 +411,8 @@ export component TreemapView inherits Rectangle {
         }
     }
     // The tooltip of the hovered node, above the hover and inside the map: after the pointer when it
-    // fits, else before it (the host's tip-position). A long path wraps at any character.
+    // fits, else before it (the host's tip-position). A long path wraps after a folder (the host's
+    // break-points); a name longer than the line wraps inside it.
     if root.tip-visible && root.hover.visible && !root.zoom-shown : Rectangle {
         width: min(tip-lines.preferred-width, min(root.width, 520px));
         height: tip-lines.preferred-height;
@@ -428,10 +431,10 @@ export component TreemapView inherits Rectangle {
             padding-bottom: 6px;
             spacing: 2px;
             Text {
-                text: root.hover.title;
+                text: root.break-points(root.hover.title);
                 accessible-role: none;
                 font-size: 12px;
-                wrap: char-wrap;
+                wrap: word-wrap;
                 color: Palette.foreground;
             }
             Text {

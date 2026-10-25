@@ -463,8 +463,7 @@ fn hover(ui: &MainWindow, x: f32, y: f32) {
     let started = Instant::now();
     SESSION.with_borrow_mut(|s| s.pointer = (x, y));
     let node = node_at(ui, x, y);
-    let changed = note_hover(node);
-    let over = if changed { show_hover(ui, node) } else { node.is_some() };
+    let (over, changed) = gate_hover(node, |n| show_hover(ui, n));
     tip_event(ui, tip::TipEvent::Moved { over, changed });
     let took = started.elapsed();
     SESSION.with_borrow_mut(|s| s.hover_slowest = s.hover_slowest.max(took));
@@ -474,42 +473,47 @@ fn hover(ui: &MainWindow, x: f32, y: f32) {
 /// the node hovered before (`note_hover`). Returns (a node is under the pointer and shown, it
 /// changed); `show` returns whether the hover is visible.
 fn gate_hover(node: Option<NodeId>, show: impl FnOnce(Option<NodeId>) -> bool) -> (bool, bool) {
-    todo!("{node:?}{}", show(node))
+    let changed = note_hover(node);
+    let over = if changed { show(node) } else { node.is_some() };
+    (over, changed)
 }
 
 /// The pointer left the map: nothing is hovered (`show` gets `None` when a node was) and the
 /// tooltip gets `Leave`. Returns what the tooltip does next.
 fn left_map(show: impl FnOnce(Option<NodeId>) -> bool) -> tip::TipAction {
-    todo!("{}", show(None))
+    gate_hover(None, show);
+    step_tip(tip::TipEvent::Leave)
 }
 
 /// Drops the shown scan from the session: its data, the picture kept or moving for it and its
 /// hover (`left_map`). Returns what the tooltip does next.
 fn forget_scan(show: impl FnOnce(Option<NodeId>) -> bool) -> tip::TipAction {
-    todo!("{}", show(None))
+    SESSION.with_borrow_mut(|s| {
+        s.loaded = None;
+        s.held = None;
+        s.out_from = None;
+        s.fade_next = false;
+    });
+    left_map(show)
 }
 
 /// The window opens on the start screen unless a folder to scan was given on the command line:
 /// that scan starts after the first frame, so the first frame shows the results screen. A blank
 /// folder fails at once and shows the start screen with the error, so it opens there.
 fn shows_start_at_launch(launch_path: Option<&str>) -> bool {
-    todo!("{launch_path:?}")
+    launch_path.is_none_or(|p| p.trim().is_empty())
 }
 
 /// The pointer left the treemap: nothing is hovered.
 fn leave(ui: &MainWindow) {
-    if note_hover(None) {
-        show_hover(ui, None);
-    }
-    tip_event(ui, tip::TipEvent::Leave);
+    let action = left_map(|n| show_hover(ui, n));
+    do_tip(ui, action);
 }
 
 /// The shown rects changed or the shown folder changes: the old hover and tooltip go. The node
 /// under a pointer that has not moved is not looked up; the next pointer move finds it.
 fn drop_hover(ui: &MainWindow) {
-    if note_hover(None) {
-        show_hover(ui, None);
-    }
+    gate_hover(None, |n| show_hover(ui, n));
     tip_event(ui, tip::TipEvent::Layout);
 }
 
@@ -524,14 +528,24 @@ fn show_hover(ui: &MainWindow, node: Option<NodeId>) -> bool {
     shown
 }
 
-/// Feeds `event` to the tooltip state machine and does what it says: the tooltip of the old node
-/// hides; the one of the new node shows after `TIP_DELAY`, at the pointer.
+/// Feeds `event` to the tooltip state machine and does what it says (`do_tip`).
 fn tip_event(ui: &MainWindow, event: tip::TipEvent) {
-    let action = SESSION.with_borrow_mut(|s| {
+    let action = step_tip(event);
+    do_tip(ui, action);
+}
+
+/// Feeds `event` to the tooltip state machine of the session. Returns what the tooltip does next.
+fn step_tip(event: tip::TipEvent) -> tip::TipAction {
+    SESSION.with_borrow_mut(|s| {
         let (next, action) = tip::step(s.tip, event);
         s.tip = next;
         action
-    });
+    })
+}
+
+/// Does what the tooltip state machine said: the tooltip of the old node hides; the one of the new
+/// node shows after `TIP_DELAY`, at the pointer.
+fn do_tip(ui: &MainWindow, action: tip::TipAction) {
     match action {
         tip::TipAction::None => {}
         tip::TipAction::Hide => hide_tip(ui),
@@ -847,12 +861,7 @@ fn type_chip(c: &footer::Chip, theme: Theme) -> TypeChip {
 /// Drops the shown scan.
 fn clear(ui: &MainWindow) {
     stop_move(ui);
-    SESSION.with_borrow_mut(|s| {
-        s.loaded = None;
-        s.held = None;
-        s.out_from = None;
-        s.fade_next = false;
-    });
+    let tip = forget_scan(|n| show_hover(ui, n));
     ui.set_rows(ModelRc::default());
     ui.set_treemap(Image::default());
     ui.set_crumbs(ModelRc::default());
@@ -861,7 +870,7 @@ fn clear(ui: &MainWindow) {
     ui.set_map_note(SharedString::new());
     ui.set_map_value(SharedString::new());
     sync_types(ui);
-    leave(ui);
+    do_tip(ui, tip);
     ui.set_has_selection(false);
     ui.set_selected_row(-1);
 }
@@ -1226,6 +1235,7 @@ fn wire_tree_and_treemap(ui: &MainWindow) {
         }
     });
     ui.on_tip_position(tree_view::tip_position);
+    ui.on_tip_break_points(|path| tip::break_points(&path).into());
     ui.on_zoom_frame(|m, t| frame_at(&m, t));
     ui.on_theme_changed({
         let weak = ui.as_weak();
@@ -1331,7 +1341,12 @@ fn main() {
         eprintln!("This renderer draws no shadows. The hovered tile gets a border.");
         ui.set_glow(false);
     }
-    ui.set_banner(banner_text(&ScanState::Idle, false).into());
+    // A folder to scan opens on the results screen: the start screen would show for one frame.
+    if shows_start_at_launch(args.path.as_deref()) {
+        ui.set_banner(banner_text(&ScanState::Idle, false).into());
+    } else {
+        ui.set_start_screen(false);
+    }
     ui.on_scan_drive({
         let weak = ui.as_weak();
         move |root| {
@@ -2030,7 +2045,9 @@ mod tests {
 
     // ---- hover gate and the end of a shown scan ----
     /// Calls of a `show` closure, and what it returns.
-    fn shown() -> (Rc<RefCell<Vec<Option<NodeId>>>>, impl Fn(Option<NodeId>) -> bool + Clone) {
+    type Calls = Rc<RefCell<Vec<Option<NodeId>>>>;
+
+    fn shown() -> (Calls, impl Fn(Option<NodeId>) -> bool + Clone) {
         let calls = Rc::new(RefCell::new(Vec::new()));
         let record = calls.clone();
         (calls, move |n: Option<NodeId>| {

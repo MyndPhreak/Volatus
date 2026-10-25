@@ -70,7 +70,16 @@ pub const BREAK: char = '\u{200B}';
 /// wraps a long path between folders and not inside a name. A name longer than the line still
 /// breaks inside it (the window's word wrap does that).
 pub fn break_points(path: &str) -> String {
-    todo!("{path}")
+    let is_sep = |c: char| c == '\\' || c == '/';
+    let mut out = String::with_capacity(path.len() + path.len() / 4);
+    let mut chars = path.chars().peekable();
+    while let Some(c) = chars.next() {
+        out.push(c);
+        if is_sep(c) && chars.peek().is_some_and(|&n| !is_sep(n)) {
+            out.push(BREAK);
+        }
+    }
+    out
 }
 
 #[cfg(test)]
