@@ -236,5 +236,7 @@ That gap is open (see the P4 report, FOLLOW-UPS); compare the MFT runs: there bo
   still forces the MFT for any root, with no fallback.
 - With no `--threads` the walker runs on one thread fewer than the logical CPUs (at least one), at
   below-normal priority; the MFT path is unchanged (P8 start-up stall, user approved, no flag).
+- Walker rows measured with `--threads` before this change are not comparable: `--threads` now
+  also runs the walker at below-normal priority.
 - A folder given on the command line starts its scan after the window's first frame (or after 2 s
   if the window does not draw), not before the window shows (P8 start-up stall, user approved, no flag).

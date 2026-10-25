@@ -66,8 +66,10 @@ volatus.exe [folder] [--timing] [--method auto|mft|walk] [--threads N]
   `docs/BENCHMARK.md` for what each time means.
 - `--method auto|mft|walk`: `auto` is the default. `mft` reads the NTFS file table and `walk` reads
   the folders one by one. A scan with `mft` does not fall back to `walk`. If it cannot run, the
-  top bar says that it needs administrator rights and an NTFS drive.
+  top bar says that it needs administrator rights and a folder on a local NTFS drive.
 - `--threads N`: use N threads. The most is 4 for each logical CPU. The top bar shows the number.
+- `--method` and `--threads` take the next word as their value. Put the folder first or after `--`.
+  A folder after `--method` or `--threads` becomes its value, and the option gets a notice.
 - `--method=mft` and `--threads=4` also work. Values are not case sensitive. If an option is given
   again, the last good value is used. A bad value or an unknown option is ignored, with a notice.
 - `--`: what follows is a folder, also when it starts with `--`.
@@ -75,6 +77,6 @@ volatus.exe [folder] [--timing] [--method auto|mft|walk] [--threads N]
 
 Examples:
 ```
-volatus.exe C:\Users\mynd\DEV --timing
+volatus.exe C:\Projects --timing
 volatus.exe D:\ --method walk --threads 8
 ```
