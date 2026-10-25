@@ -1865,11 +1865,11 @@ mod tests {
     fn place_label_each_kind_shows_only_while_its_box_has_room() {
         let (half_wide, half_high) = ((50.0, 100.0), (100.0, 50.0));
         let cases = [
-            // Frame labels: at least 24 x 14 after the stretch.
+            // Frame labels: at least 24 wide and 8 high after the stretch.
             (LabelKind::Frame, (48.0, 28.0), half_wide, true),
             (LabelKind::Frame, (46.0, 28.0), half_wide, false),
-            (LabelKind::Frame, (48.0, 28.0), half_high, true),
-            (LabelKind::Frame, (48.0, 26.0), half_high, false),
+            (LabelKind::Frame, (48.0, 16.0), half_high, true),
+            (LabelKind::Frame, (48.0, 15.8), half_high, false),
             // File labels: at least 40 x 14 after the stretch.
             (LabelKind::File, (80.0, 28.0), half_wide, true),
             (LabelKind::File, (78.0, 28.0), half_wide, false),
@@ -1883,6 +1883,28 @@ mod tests {
         for (kind, (w, h), to, want) in cases {
             assert_eq!(place_label(placed(w, h), kind, (100.0, 100.0), to).shown, want, "{kind:?} {w} x {h} to {to:?}");
         }
+    }
+
+    #[test]
+    fn place_label_frame_label_keeps_its_name_through_a_modest_vertical_shrink() {
+        // A frame label band is 16 px high. Shrink factors 1.0, 0.9, 0.875, 0.7, 0.5 keep the name;
+        // 0.3 (4.8 px) is below the floor.
+        for (factor, want) in [(1.0, true), (0.9, true), (0.875, true), (0.7, true), (0.5, true), (0.3, false)] {
+            let band = Placed { x: 2.0, y: 0.0, width: 200.0, height: 16.0, shown: false, two_lines: false };
+
+            let got = place_label(band, LabelKind::Frame, (800.0, 600.0), (800.0, 600.0 * factor));
+
+            assert_eq!(got.shown, want, "factor {factor}: {got:?}");
+        }
+    }
+
+    #[test]
+    fn place_label_file_label_still_hides_below_14_px_after_a_vertical_shrink() {
+        let label = Placed { x: 0.0, y: 0.0, width: 80.0, height: 16.0, shown: false, two_lines: false };
+
+        let got = place_label(label, LabelKind::File, (800.0, 600.0), (800.0, 600.0 * 0.8));
+
+        assert!(!got.shown, "{got:?}");
     }
 
     #[test]
