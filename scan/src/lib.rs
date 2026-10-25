@@ -222,23 +222,9 @@ pub fn scan_routed(
     cancel: &AtomicBool,
     opts: &ScanOptions,
     route: Route,
-    mft: impl FnOnce() -> Result<(Tree, ScanStats), ScanError>,
+    mft: impl FnOnce() -> Result<(Tree, ScanStats), ScanError> + Send,
 ) -> Result<(Tree, ScanStats), ScanError> {
-    let _ = (root, progress, cancel, opts, route, mft);
-    todo!("scan_routed")
-}
-
-/// `scan` with tuning knobs. `opts.method` set to one scanner runs only that one, with no
-/// fallback; `opts.threads` runs the scan on its own thread pool of that size.
-pub fn scan_with(
-    root: &Path,
-    progress: Sender<Progress>,
-    cancel: &AtomicBool,
-    opts: &ScanOptions,
-) -> Result<(Tree, ScanStats), ScanError> {
-    // A root that cannot be resolved is not a drive root: the walker reports the error.
-    let whole_volume = std::fs::canonicalize(root).is_ok_and(|p| is_volume_root(&p));
-    let Route { method, fallback_to_walk } = route(whole_volume, opts.method);
+    let Route { method, fallback_to_walk } = route;
     let pool_error = |e: rayon::ThreadPoolBuildError| ScanError::Io(std::io::Error::other(e));
     // With no thread count the walker runs on all CPUs but one at below-normal priority, so the
     // window keeps drawing (P8 start-up stall). The MFT path stays on the global pool.
@@ -251,7 +237,7 @@ pub fn scan_with(
     };
     let run = || match method {
         Method::Walk => walk(),
-        Method::Mft => match mft::scan(root, &progress, cancel, opts.chunk) {
+        Method::Mft => match mft() {
             Err(ScanError::Cancelled) => Err(ScanError::Cancelled),
             Err(_) if fallback_to_walk => walk(),
             done => done,
@@ -265,4 +251,19 @@ pub fn scan_with(
             .map_err(pool_error)?
             .install(run),
     }
+}
+
+/// `scan` with tuning knobs. `opts.method` set to one scanner runs only that one, with no
+/// fallback; `opts.threads` runs the scan on its own thread pool of that size.
+pub fn scan_with(
+    root: &Path,
+    progress: Sender<Progress>,
+    cancel: &AtomicBool,
+    opts: &ScanOptions,
+) -> Result<(Tree, ScanStats), ScanError> {
+    // A root that cannot be resolved is not a drive root: the walker reports the error.
+    let whole_volume = std::fs::canonicalize(root).is_ok_and(|p| is_volume_root(&p));
+    let route = route(whole_volume, opts.method);
+    let for_mft = progress.clone();
+    scan_routed(root, progress, cancel, opts, route, || mft::scan(root, &for_mft, cancel, opts.chunk))
 }
