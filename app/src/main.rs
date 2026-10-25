@@ -428,14 +428,19 @@ fn glow_drawn(notifier: Result<(), SetRenderingNotifierError>) -> bool {
 /// shows, the point is on the zooming picture, so it is found in that picture's own rects.
 fn node_at(ui: &MainWindow, x: f32, y: f32) -> Option<NodeId> {
     let (x, y) = to_physical(ui, x, y);
-    let (x, y) = match zoom_in_frame(ui) {
-        Some(frame) => {
-            let (w, h) = map_px(ui);
-            treemap::unzoom(frame, w, h, x, y)?
-        }
-        None => (x, y),
-    };
+    let moving = SESSION.with_borrow(|s| s.moving);
+    let (x, y) = picture_point(moving, f64::from(ui.get_zoom_t()), map_px(ui), x, y)?;
     with_loaded(|l| tree_view::hit_test(&l.rects, x, y)).flatten()
+}
+
+/// The point of the shown picture, in its own rects' physical pixels, under the view point (x, y)
+/// of a `view` (w, h) treemap, at time `t` of move `moving`. While a zoom shows, the picture is
+/// drawn at the zoom's frame (`zoom_frame_at`). `None` when that frame has no area.
+fn picture_point(moving: Option<Move>, t: f64, (w, h): (f64, f64), x: f64, y: f64) -> Option<(f64, f64)> {
+    match zoom_frame_at(moving, t) {
+        Some(frame) => treemap::unzoom(frame, w, h, x, y),
+        None => Some((x, y)),
+    }
 }
 
 /// The pointer moved over the treemap to (x, y) in logical pixels. The window gets new hover
@@ -669,8 +674,14 @@ fn stop_move(ui: &MainWindow) {
 /// Where the picture of a zoom in is on the treemap now (physical pixels), or `None` when no zoom
 /// in shows.
 fn zoom_in_frame(ui: &MainWindow) -> Option<Frame> {
-    let m = SESSION.with_borrow(|s| s.moving.filter(|m| m.kind == motion::Kind::In))?;
-    Some(treemap::zoom_at(m.from, m.to, f64::from(ui.get_zoom_t())))
+    zoom_frame_at(SESSION.with_borrow(|s| s.moving), f64::from(ui.get_zoom_t()))
+}
+
+/// Where the picture of zoom `moving` is on the treemap at time `t` of it (physical pixels), or
+/// `None` when no zoom shows.
+fn zoom_frame_at(moving: Option<Move>, t: f64) -> Option<Frame> {
+    let m = moving.filter(|m| m.kind == motion::Kind::In)?;
+    Some(treemap::zoom_at(m.from, m.to, t))
 }
 
 /// The window's form of a crumb from `tree_view::crumbs`: its index is the node it opens, -1 for none.
@@ -1334,8 +1345,10 @@ mod tests {
     use super::{
         Data, FILE_LABEL_MIN_HEIGHT, FILE_LABEL_MIN_WIDTH, FILE_LABEL_TWO_LINES, FileLabel, FrameLabel, Hover, LABEL_CAP, ZoomFrame, ZoomMove, frame_at,
         Loaded, RowModel, SESSION, file_labels, frame_labels, glow_drawn, hover_of, map_labels, note_hover, restart_admin,
-        store_chips,
+        store_chips, Move, picture_point, zoom_frame_at,
     };
+    use crate::motion::Kind;
+    use std::time::Instant;
     use slint::SetRenderingNotifierError;
     use scan::{NodeId, Tree};
     use treemap::Theme;
@@ -1674,6 +1687,48 @@ mod tests {
     fn frame_at_half_time_place_and_opacity_are_seven_eighths_of_the_way() {
         // ease_out(0.5) = 0.875
         assert_eq!(frame_at(&shrink(), 0.5), zf(87.5, 43.75, 275.0, 206.25, 0.125));
+    }
+
+    // ---- clicks during a zoom ----
+    /// The treemap view in physical pixels.
+    const VIEW: (f64, f64) = (400.0, 400.0);
+
+    /// Tile 1 at (0, 0, 100, 100) and tile 2 at (100, 0, 300, 400) of a picture of `VIEW`.
+    fn two_tiles() -> Vec<Rect> {
+        vec![
+            Rect { node: NodeId(1), x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+            Rect { node: NodeId(2), x: 100.0, y: 0.0, w: 300.0, h: 400.0 },
+        ]
+    }
+
+    /// The zoom out of the picture from the frame where tile 1 fills the view, (0, 0, 1600, 1600),
+    /// to the whole view.
+    fn zoom_out_of_tile_1() -> Move {
+        let from = treemap::zoom_frame(&two_tiles()[0], VIEW.0, VIEW.1).unwrap();
+        Move { kind: Kind::Out, from, to: (0.0, 0.0, VIEW.0, VIEW.1), running: true, started: Instant::now(), frames: 0 }
+    }
+
+    /// The tile of `two_tiles` that a click at view point (x, y) hits at time `t` of `moving`.
+    fn tile_under(moving: Option<Move>, t: f64, x: f64, y: f64) -> Option<NodeId> {
+        let (px, py) = picture_point(moving, t, VIEW, x, y)?;
+        crate::tree_view::hit_test(&two_tiles(), px, py)
+    }
+
+    #[test]
+    fn zoom_frame_at_start_of_a_zoom_out_is_its_from_frame() {
+        assert_eq!(zoom_frame_at(Some(zoom_out_of_tile_1()), 0.0), Some((0.0, 0.0, 1600.0, 1600.0)));
+    }
+
+    #[test]
+    fn picture_point_click_at_the_start_of_a_zoom_out_hits_the_tile_that_fills_the_view() {
+        // (200, 200) is in tile 2 of the full map, but tile 1 fills the view at t = 0.
+        assert_eq!(tile_under(Some(zoom_out_of_tile_1()), 0.0, 200.0, 200.0), Some(NodeId(1)));
+    }
+
+    #[test]
+    fn picture_point_click_half_way_through_a_zoom_out_hits_the_tile_drawn_there() {
+        // ease_out(0.5) = 0.875: the frame is (0, 0, 550, 550), so tile 1 is drawn at (0, 0, 137.5, 137.5).
+        assert_eq!(tile_under(Some(zoom_out_of_tile_1()), 0.5, 120.0, 120.0), Some(NodeId(1)));
     }
 
     // ---- glow or border ----
