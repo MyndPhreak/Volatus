@@ -9,8 +9,9 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $UpgradeCode = '{FB5B570F-DD29-49B8-A6AE-35855278CAE6}'
-# The x64 id of WixUtilExtension's CloseApplication step (captured from the built MSI).
-$CloseAction = 'WixCloseApplications_x64'
+# The id of WixUtilExtension's CloseApplication step as wix3141rtm writes it in this x64 MSI: no
+# platform suffix (captured from the built MSI's CustomAction table).
+$CloseAction = 'WixCloseApplications'
 $Exe = '[#VolatusExe]'
 $MenuKeys = [ordered]@{
   'Software\Classes\Directory\shell\Volatus'            = '%1'
@@ -100,12 +101,29 @@ $initialize = SequenceOf 'InstallInitialize'
 $remove = SequenceOf 'RemoveExistingProducts'
 $install = SequenceOf 'InstallFiles'
 Check ($close -lt $validate -and $validate -lt $initialize -and $initialize -lt $remove -and $remove -lt $install) "sequence: $CloseAction $close < InstallValidate $validate < InstallInitialize $initialize < RemoveExistingProducts $remove < InstallFiles $install"
-$deferred = Rows "SELECT ``Action`` FROM ``InstallExecuteSequence`` WHERE ``Action`` = '${CloseAction}Deferred' OR ``Action`` = 'WixCloseApplicationsDeferred_x64' OR ``Action`` = 'WixCloseApplicationsDeferred'"
-Check ($deferred.Count -eq 0) 'no deferred close step in InstallExecuteSequence'
+# WixUtilExtension always adds the CustomAction row WixCloseApplicationsDeferred; the close step
+# runs it only for RebootPrompt, Elevated* or TerminateProcess (Attributes below), never from a
+# sequence. Run that early, it would fail the install.
+$deferred = Rows "SELECT ``Action`` FROM ``InstallExecuteSequence`` WHERE ``Action`` = '${CloseAction}Deferred'"
+Check ($deferred.Count -eq 0) "no ${CloseAction}Deferred in InstallExecuteSequence"
 $apps = Rows 'SELECT `Target`, `Attributes`, `Timeout` FROM `WixCloseApplication`'
 # Attributes 1 = CloseMessage only: no RebootPrompt (2), no Elevated* (4, 16), EndSession (8),
 # TerminateProcess (32) or PromptToContinue (64).
 Check ($apps.Count -eq 1 -and $apps[0][0] -eq 'volatus.exe' -and $apps[0][1] -eq '1') "WixCloseApplication: volatus.exe, Attributes 1 (found $($apps[0][1]))"
+
+# Nothing runs volatus.exe: the custom actions are WiX's own, and Launch Volatus is WixShellExec
+# from the last page only.
+$actionRows = Rows 'SELECT `Action` FROM `CustomAction`'
+$actions = ($actionRows | ForEach-Object { $_[0] } | Sort-Object) -join ', '
+$known = 'LaunchVolatus, WixCheckRebootRequired, WixCloseApplications, WixCloseApplicationsDeferred, WixUIPrintEula'
+Check ($actions -eq $known) "CustomAction: $actions"
+$launch = Rows "SELECT ``Type``, ``Source``, ``Target`` FROM ``CustomAction`` WHERE ``Action`` = 'LaunchVolatus'"
+Check ($launch[0][1] -eq 'WixCA' -and $launch[0][2] -eq 'WixShellExec') 'LaunchVolatus = WixCA WixShellExec'
+Check ((Rows "SELECT ``Action`` FROM ``InstallExecuteSequence`` WHERE ``Action`` = 'LaunchVolatus'").Count -eq 0) 'LaunchVolatus is in no sequence'
+Check ((Property 'WixShellExecTarget') -eq $Exe) "WixShellExecTarget = $Exe"
+$finish = Rows "SELECT ``Condition`` FROM ``ControlEvent`` WHERE ``Dialog_`` = 'ExitDialog' AND ``Control_`` = 'Finish' AND ``Event`` = 'DoAction' AND ``Argument`` = 'LaunchVolatus'"
+Check ($finish.Count -eq 1 -and $finish[0][0] -eq 'WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND NOT Installed') 'ExitDialog Finish runs LaunchVolatus only when ticked, on a first install or upgrade'
+Check ($null -eq (Property 'WIXUI_EXITDIALOGOPTIONALCHECKBOX')) 'Launch Volatus is unticked by default'
 
 # The Explorer menu: HKLM only, under the three Volatus keys, with the contract's values.
 $registry = Rows 'SELECT `Root`, `Key`, `Name`, `Value`, `Component_` FROM `Registry`'
@@ -124,5 +142,7 @@ $missing = @($want | Where-Object { $found -notcontains $_ })
 Check ($registry.Count -eq 12 -and $missing.Count -eq 0) "Registry: the 12 menu rows (3 keys x label, Icon, command, create/delete)$(if ($missing) { "; missing $($missing -join ', ')" })"
 $features = Rows "SELECT ``Feature_Parent``, ``Level`` FROM ``Feature`` WHERE ``Feature`` = 'ExplorerMenu'"
 Check ($features.Count -eq 1 -and $features[0][0] -eq 'Main' -and $features[0][1] -eq '1') 'Feature ExplorerMenu: child of Main, Level 1'
+Check ((Property 'EXPLORERMENU') -eq '1') 'EXPLORERMENU = 1 (menu checkbox ticked by default)'
+Check ((Property 'SecureCustomProperties') -split ';' -contains 'EXPLORERMENU') 'EXPLORERMENU is a secure property'
 
 Write-Host "check-msi: $Msi passed."

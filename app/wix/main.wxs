@@ -11,10 +11,12 @@
   upgrade (a new ProductCode, the fixed UpgradeCode below) that replaces the installed version in
   place; downgrades are refused. Uninstall removes everything this file installs.
 
-  The installer never runs volatus.exe to do its work. app/tests/wix.rs checks this file;
+  The installer never runs volatus.exe to do its work. Before anything is replaced or removed, a
+  running Volatus is asked to close (WM_CLOSE); a copy that stays open gets Windows' Files in Use
+  dialog. No forced kill and no reboot prompt. app/tests/wix.rs checks this file;
   .github/scripts/check-msi.ps1 checks the built MSI's tables.
 -->
-<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi" xmlns:util="http://schemas.microsoft.com/wix/UtilExtension">
   <Product
       Id="*"
       Name="Volatus"
@@ -140,6 +142,24 @@
     <Property Id="ARPHELPLINK" Value="https://github.com/MyndPhreak/Volatus/issues"/>
     <Property Id="ARPNOMODIFY" Value="1"/>
 
+    <!-- A running Volatus is sent WM_CLOSE and given 5 s (the default Timeout) to exit.
+         RebootPrompt="no": its default (yes) makes the step schedule a deferred action at run
+         time, which fails this early (WiX CloseApps.cpp), and Volatus never needs a reboot. An
+         elevated copy can't receive WM_CLOSE from setup (UIPI); Files in Use names it instead. -->
+    <util:CloseApplication Id="CloseVolatus" Target="volatus.exe" CloseMessage="yes" RebootPrompt="no"/>
+    <InstallExecuteSequence>
+      <!-- WixUtilExtension puts it before InstallFiles, after RemoveExistingProducts has already
+           met the locked exe. Before InstallValidate, the files are free when Windows checks
+           them. The id has no platform suffix in this x64 MSI (captured from the built MSI). -->
+      <Custom Action="WixCloseApplications" Before="InstallValidate"/>
+    </InstallExecuteSequence>
+
+    <!-- "Launch Volatus" on the last page, unticked: WixShellExec from setup's own window, so
+         Volatus starts as the user who started setup (not elevated after a double-click). -->
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch Volatus"/>
+    <Property Id="WixShellExecTarget" Value="[#VolatusExe]"/>
+    <CustomAction Id="LaunchVolatus" BinaryKey="WixCA" DllEntry="WixShellExec" Impersonate="yes"/>
+
     <WixVariable Id="WixUILicenseRtf" Value="$(sys.SOURCEFILEDIR)License.rtf"/>
 
     <UI Id="VolatusUI">
@@ -207,6 +227,7 @@
       <Publish Dialog="MaintenanceTypeDlg" Control="RemoveButton" Event="NewDialog" Value="VerifyReadyDlg">1</Publish>
       <Publish Dialog="MaintenanceTypeDlg" Control="Back" Event="NewDialog" Value="MaintenanceWelcomeDlg">1</Publish>
 
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchVolatus" Order="1">WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND NOT Installed</Publish>
       <Publish Dialog="ExitDialog" Control="Finish" Event="EndDialog" Value="Return" Order="999">1</Publish>
     </UI>
     <UIRef Id="WixUI_Common"/>

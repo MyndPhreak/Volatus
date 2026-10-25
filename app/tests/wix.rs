@@ -490,11 +490,12 @@ fn a_running_copy_is_asked_to_close_before_files_are_checked() {
         assert!(attr(&close, forced).is_none(), "no {forced}");
     }
     // WixUtilExtension schedules it before InstallFiles, after RemoveExistingProducts has already
-    // met the locked exe; this moves it. The id is the x64 one (captured from the built MSI).
+    // met the locked exe; this moves it. The id as wix3141rtm's light writes it in this x64 MSI,
+    // with no platform suffix (captured from the built MSI's CustomAction table).
     let sequence = one(&doc, "InstallExecuteSequence");
     let customs: Vec<Node> = sequence.children().filter(|n| is(n, "Custom")).collect();
-    let moved: Vec<&Node> = customs.iter().filter(|c| attr(c, "Action") == Some("WixCloseApplications_x64")).collect();
-    assert_eq!(moved.len(), 1, "WixCloseApplications_x64 is scheduled once");
+    let moved: Vec<&Node> = customs.iter().filter(|c| attr(c, "Action") == Some("WixCloseApplications")).collect();
+    assert_eq!(moved.len(), 1, "WixCloseApplications is scheduled once");
     assert_eq!(attr(moved[0], "Before"), Some("InstallValidate"));
     assert!(attr(moved[0], "After").is_none() && attr(moved[0], "Sequence").is_none());
     assert_eq!(condition(moved[0]), "", "on every install, upgrade, repair and uninstall");
