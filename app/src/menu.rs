@@ -243,6 +243,17 @@ impl Follow {
     }
 }
 
+/// Runs the picked shell item, then gives the checks that follow it (`follow`, made at the pick).
+/// The disk is read again first (`disk`): when the path is gone since the menu opened, `invoke`
+/// does not run (the shell would ask to confirm, then show "Item Not Found" until it is closed:
+/// spike S7) and the checks tell what happened. Else `invoke` runs the item and gives its
+/// HRESULT: a cancel by the user (`user_cancelled`) changed nothing and needs no checks (`None`);
+/// any other result, an error too, gets the checks: the disk decides.
+pub fn after_pick(follow: Follow, disk: impl Fn(&Path) -> Disk, invoke: impl FnOnce() -> i32) -> Option<Follow> {
+    let _ = (follow, disk, invoke);
+    unimplemented!("after_pick")
+}
+
 /// The folder a command prompt opens in for the item at `path`: a folder itself, a file's folder.
 pub fn terminal_folder(path: &Path, is_dir: bool) -> PathBuf {
     if is_dir { path.to_path_buf() } else { path.parent().unwrap_or(path).to_path_buf() }
@@ -705,6 +716,46 @@ mod tests {
         let f = follow(true);
 
         assert_eq!((f.node, f.edits, f.path, f.delete, f.before), (NodeId(1), 0, PathBuf::from("C:\\x"), true, Disk::File(5)));
+    }
+
+    // ---- after_pick ----
+    /// Runs `after_pick` for `follow(delete)` with the disk `now` and an item that gives `hr`.
+    /// Gives the checks and whether the item ran.
+    fn pick(delete: bool, now: Disk, hr: i32) -> (Option<Follow>, bool) {
+        let ran = std::cell::Cell::new(false);
+        let got = after_pick(follow(delete), |_| now.clone(), || {
+            ran.set(true);
+            hr
+        });
+        (got, ran.get())
+    }
+
+    #[test]
+    fn after_pick_runs_the_item_and_follows_it() {
+        let (got, ran) = pick(true, Disk::File(5), 0);
+
+        assert_eq!((got.map(|f| (f.node, f.delete)), ran), (Some((NodeId(1), true)), true));
+    }
+
+    #[test]
+    fn after_pick_of_a_path_gone_since_the_menu_does_not_run_the_item_and_still_follows_it() {
+        let (got, ran) = pick(true, Disk::Gone, 0);
+
+        assert_eq!((got.is_some(), ran), (true, false));
+    }
+
+    #[test]
+    fn after_pick_cancelled_by_the_user_has_no_checks() {
+        let (got, ran) = pick(true, Disk::File(5), 0x8027_0000_u32 as i32);
+
+        assert_eq!((got.is_none(), ran), (true, true));
+    }
+
+    #[test]
+    fn after_pick_of_an_item_that_failed_still_has_the_checks() {
+        let (got, ran) = pick(false, Disk::File(5), 0x8000_4005_u32 as i32);
+
+        assert_eq!((got.is_some(), ran), (true, true));
     }
 
     // ---- terminal_folder ----

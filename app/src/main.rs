@@ -957,6 +957,27 @@ fn rescan_target() -> Option<String> {
     SESSION.with_borrow(|s| matches!(s.scan.state(), ScanState::Done(_)).then(|| relaunch_path(false, &s.scan_root)))
 }
 
+/// What `check_follow` found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FollowStep {
+    /// The item was deleted: remove this node from the map (`removed`).
+    Remove(NodeId),
+    /// The scan is outdated now (`Session::outdated`): the top bar offers Rescan.
+    Outdated,
+    /// Check again after this time.
+    Again(Duration),
+    /// No check is left.
+    Done,
+}
+
+/// One check of the pending checks after a menu action (`Session::follow`), with the disk read by
+/// `disk`. A decision, or the last check, ends them; so does a scan that was replaced or changed
+/// since the menu (its node id would be stale).
+fn check_follow(disk: impl Fn(&std::path::Path) -> menu::Disk) -> FollowStep {
+    let _ = disk;
+    unimplemented!("check_follow")
+}
+
 /// Replaces the shown scan with a new one.
 fn install(ui: &MainWindow, data: Arc<Data>) {
     let root = data.tree.root();
@@ -1829,7 +1850,7 @@ mod tests {
         Move, picture_point, zoom_frame_at, take_launch_path, forget_scan, gate_hover, left_map,
         shows_start_at_launch, relaunch_path, LabelKind, LogicalBox, Placed, place_label, stretch,
         apply_args, FOOTER_CHIPS, Stored, chips_of, drop_types, store_totals, remove_node, Removal, apply_removal,
-        Source, target_of, hit_at, run_action, rescan_shown, rescan_target, Request, menu_request,
+        Source, target_of, hit_at, run_action, rescan_shown, rescan_target, Request, menu_request, FollowStep, check_follow,
     };
     use crate::menu::{self, Cmd, Disk};
     use treemap::filetype::{TypeTotal, type_totals};
@@ -3239,6 +3260,86 @@ mod tests {
         SESSION.with_borrow_mut(|s| s.scan_root = std::path::PathBuf::from("D:\\Data"));
 
         assert_eq!(rescan_target(), None);
+    }
+
+    // ---- the context menu: the checks after an action ----
+    /// A finished scan on screen (`loaded_with_rows`) with checks pending for D_EXE (`pending`,
+    /// or the delete of it).
+    fn show_pending(delete: bool) {
+        show_rows();
+        let f = menu::Follow::new(D_EXE, 0, std::path::PathBuf::from("root\\d.exe"), delete, Disk::File(30));
+        SESSION.with_borrow_mut(|s| s.follow = Some(f));
+    }
+
+    fn follow_and_outdated() -> (bool, bool) {
+        SESSION.with_borrow(|s| (s.follow.is_some(), s.outdated))
+    }
+
+    #[test]
+    fn check_follow_with_no_checks_is_done() {
+        show_rows();
+
+        assert_eq!(check_follow(|_| Disk::Gone), FollowStep::Done);
+    }
+
+    #[test]
+    fn check_follow_of_a_delete_whose_item_is_gone_removes_it_and_ends() {
+        show_pending(true);
+
+        let got = check_follow(|_| Disk::Gone);
+
+        assert_eq!((got, follow_and_outdated()), (FollowStep::Remove(D_EXE), (false, false)));
+    }
+
+    #[test]
+    fn check_follow_of_an_item_that_changed_marks_the_scan_outdated_and_ends() {
+        show_pending(false);
+
+        let got = check_follow(|_| Disk::File(31));
+
+        assert_eq!((got, follow_and_outdated()), (FollowStep::Outdated, (false, true)));
+    }
+
+    #[test]
+    fn check_follow_of_an_item_that_did_not_change_checks_again_later() {
+        show_pending(false);
+
+        let got = check_follow(|_| Disk::File(30));
+
+        assert_eq!((got, follow_and_outdated()), (FollowStep::Again(std::time::Duration::from_millis(500)), (true, false)));
+    }
+
+    #[test]
+    fn check_follow_reads_the_disk_at_the_path_of_the_checks() {
+        show_pending(true);
+        let read = RefCell::new(None);
+
+        check_follow(|p| {
+            *read.borrow_mut() = Some(p.to_path_buf());
+            Disk::File(30)
+        });
+
+        assert_eq!(read.into_inner(), Some(std::path::PathBuf::from("root\\d.exe")));
+    }
+
+    #[test]
+    fn check_follow_after_a_removal_since_the_menu_ends_without_a_decision() {
+        show_pending(true);
+        super::with_loaded(|l| remove_node(l, B_PDF));
+
+        let got = check_follow(|_| Disk::Gone);
+
+        assert_eq!((got, follow_and_outdated()), (FollowStep::Done, (false, false)));
+    }
+
+    #[test]
+    fn check_follow_with_no_scan_shown_ends_without_a_decision() {
+        show_pending(true);
+        SESSION.with_borrow_mut(|s| s.loaded = None);
+
+        let got = check_follow(|_| Disk::Gone);
+
+        assert_eq!((got, follow_and_outdated()), (FollowStep::Done, (false, false)));
     }
 
     // ---- the context menu: Volatus items ----
