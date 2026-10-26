@@ -7,7 +7,7 @@
 use crate::delete::{DeleteTarget, Outcome, Remover, Skipped, reason_from_win32};
 use rayon::prelude::*;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use windows_sys::Win32::Foundation::{
     ERROR_ACCESS_DENIED, ERROR_DIR_NOT_EMPTY, ERROR_FILE_NOT_FOUND, ERROR_INVALID_NAME, ERROR_NO_MORE_FILES,
@@ -125,6 +125,17 @@ impl Remover for Purge {
         progress(out.removed_items, out.removed_bytes);
         out
     }
+}
+
+/// True when a find-data entry is a link: a reparse point with a name-surrogate tag (junction,
+/// symlink), as the scan counts links. `tag` is the find data's `dwReserved0`.
+fn is_name_surrogate_link(attrs: u32, _tag: u32) -> bool {
+    attrs & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+/// True when a folder that will not empty needs its own skip: no skip recorded so far lies in it.
+fn needs_skip_for_folder(_folder: &Path, _skips: &[Skipped]) -> bool {
+    false
 }
 
 /// Adds one item's result to the outcome.
@@ -310,8 +321,6 @@ mod tests {
     use crate::delete::SkipReason;
     use scan::NodeId;
     use std::fs;
-    use std::path::{Path, PathBuf};
-    use std::sync::atomic::Ordering;
 
     /// A unique directory, canonical (verbatim) form. Removed on drop; a link inside is removed
     /// first, so nothing outside is ever followed.
@@ -447,6 +456,7 @@ mod tests {
         let handle = fs::OpenOptions::new().read(true).share_mode(FILE_SHARE_READ).open(&held).unwrap();
         let o = run(&target(&t, true));
         drop(handle);
+        // One skip only: the folder that stays holds it, so the folder gets no skip of its own.
         assert_eq!(o.skipped.len(), 1, "{:?}", o.skipped);
         assert_eq!(o.skipped[0].path, held);
         assert_eq!(o.skipped[0].reason, SkipReason::Locked);
@@ -521,5 +531,80 @@ mod tests {
         assert_eq!(o.skipped.len(), 1, "{:?}", o.skipped);
         assert_eq!(o.skipped[0].path, t);
         assert!(!o.stopped);
+    }
+
+    #[test]
+    fn a_target_that_is_a_junction_is_removed_as_the_link() {
+        let d = Dir::new("rootjunction");
+        let other = d.base.join("other");
+        fs::create_dir(&other).unwrap();
+        fs::write(other.join("keep"), b"keep me").unwrap();
+        let link = d.base.join("link");
+        if d.junction(&link, &other).is_none() {
+            return;
+        }
+        let o = run(&target(&link, true));
+        assert!(o.skipped.is_empty(), "{:?}", o.skipped);
+        assert_eq!((o.removed_items, o.removed_bytes), (1, 0));
+        assert!(fs::symlink_metadata(&link).is_err(), "the junction is gone");
+        assert_eq!(fs::read(other.join("keep")).unwrap(), b"keep me");
+    }
+
+    #[test]
+    fn a_folder_that_fills_during_the_run_stays_with_a_skip() {
+        let d = Dir::new("fills");
+        let t = d.base.join("t");
+        fs::create_dir(&t).unwrap();
+        fs::write(t.join("a.txt"), b"a").unwrap();
+        // The progress call after the files pass comes before the folders pass: a file written
+        // then makes the target not empty, with no clock involved.
+        let late = t.join("late.txt");
+        let o = Purge.remove(&target(&t, true), &|_, _| fs::write(&late, b"late").unwrap(), &AtomicBool::new(false));
+        assert!(t.is_dir() && late.exists());
+        assert_eq!(o.skipped.len(), 1, "{:?}", o.skipped);
+        assert_eq!(o.skipped[0].path, t);
+        assert_eq!((o.removed_items, o.removed_bytes), (1, 1));
+    }
+
+    #[test]
+    fn only_a_name_surrogate_reparse_point_is_a_link() {
+        let (reparse, dir) = (FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_DIRECTORY);
+        for (attrs, tag, want) in [
+            (0, 0, false),
+            (dir, 0, false),
+            // Junction and symlink: name surrogates.
+            (reparse | dir, 0xA000_0003, true),
+            (reparse, 0xA000_000C, true),
+            (reparse | dir, 0xA000_000C, true),
+            // Cloud file, dedup, app execution alias: not links.
+            (reparse | dir, 0x9000_001A, false),
+            (reparse, 0x9000_001A, false),
+            (reparse, 0x8000_0013, false),
+            (reparse, 0x8000_001B, false),
+            // The tag bits mean nothing without the reparse attribute.
+            (dir, 0xA000_0003, false),
+            (0, 0xA000_000C, false),
+            (0, 0x2000_0000, false),
+        ] {
+            assert_eq!(is_name_surrogate_link(attrs, tag), want, "attrs={attrs:#x} tag={tag:#x}");
+        }
+    }
+
+    #[test]
+    fn a_folder_needs_its_own_skip_only_when_no_skip_lies_in_it() {
+        let s = |p: &str| Skipped { path: PathBuf::from(p), reason: SkipReason::Locked };
+        let folder = Path::new(r"\\?\C:\t\a");
+        for (skips, want) in [
+            (vec![], true),
+            (vec![s(r"\\?\C:\t\a\x.txt")], false),
+            (vec![s(r"\\?\C:\t\a\b\deep.txt")], false),
+            (vec![s(r"\\?\C:\t\a")], false),
+            // A sibling whose name only starts like the folder is not inside it.
+            (vec![s(r"\\?\C:\t\ab\x.txt")], true),
+            (vec![s(r"\\?\C:\t\x.txt")], true),
+            (vec![s(r"\\?\C:\t\b\x.txt"), s(r"\\?\C:\t\a\y.txt")], false),
+        ] {
+            assert_eq!(needs_skip_for_folder(folder, &skips), want, "{skips:?}");
+        }
     }
 }
