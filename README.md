@@ -6,6 +6,7 @@ Volatus shows what uses the space on a Windows drive. It scans a drive or a fold
 - **Clear.** Nested folder frames carry their names. File tiles are colored by file type.
 - **Context menu.** Right-click a file or folder for the Windows menu, with Explore Folder, Command Prompt Here and Copy Path. Delete updates the map with no rescan.
 - **Windows 11 look.** Mica backdrop, light and dark themes that follow Windows.
+- **Your settings.** A gear opens a flyout to choose the theme, the size unit and which parts of the window show. See [docs/USAGE.md](docs/USAGE.md#settings).
 
 Volatus is written in Rust with the Slint UI toolkit. It is built and tested on Windows 11. Windows 10 is not tested.
 

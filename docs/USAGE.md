@@ -35,6 +35,9 @@ Press Tab to move to the next control, and Shift+Tab to move back.
 | Treemap | Enter | Open the selected folder, or the folder of the selected file |
 | Treemap | Backspace | Go up one folder |
 | File tree, treemap, crumbs | Menu key or Shift+F10 | Open the context menu of the selected item |
+| Settings gear | Enter or Space | Open or close the settings flyout |
+| Settings flyout | Esc | Close the flyout |
+| Settings flyout | Enter or Space | Choose the item, or turn the switch on or off |
 
 ## Context menu
 - Right-click a tile, a frame, a tree row or a crumb. Or select the item and press the Menu key or Shift+F10. Shift+right-click adds the extended
@@ -48,6 +51,32 @@ Press Tab to move to the next control, and Shift+Tab to move back.
 - "Files changed after this scan." shows in the top bar when another action removes or changes an item. The sizes can be wrong. Select "Rescan" to
   scan the same folder again.
 - Limit: a hard-linked file counts once. Delete one name, and the whole counted size leaves.
+
+## Settings
+- The gear is at the top-right of the window. It is on the start screen and on the results screen.
+- Click the gear to open the settings flyout. The flyout opens on the right side. The map stays
+  visible. Press Esc or click the gear again to close the flyout.
+- **Theme**: "Follow Windows", "Light" or "Dark". "Follow Windows" uses the Windows theme and
+  changes when the Windows theme changes. The other two choices keep their scheme.
+- **Units**: "Dynamic", "Byte", "KB", "MB", "GB" or "TB". Every size in the window uses this unit.
+  A step is 1024. "Dynamic" picks the unit that fits each size. A fixed unit shows a size below
+  0.05 of that unit as "< 0.1 KB", "< 0.1 MB", and so on (with the unit that you chose).
+- **Show**: a switch for each part of the window. All parts show by default.
+  - "Header": the scan title and the summary text in the top bar. The buttons stay.
+  - "Folder tree": the file tree on the left. The treemap then uses its space.
+  - "File types strip": the bar of file types in the footer.
+  - "File type chips": the file type chips in the footer. The footer is gone when both the strip
+    and the chips are hidden.
+  - "Tile labels": the names on the tiles and the folder frames. The name of the tile under the
+    pointer still shows. The tooltips stay.
+- A choice takes effect at once. Volatus saves each change in `%APPDATA%\Volatus\settings.json`
+  and reads this file at start.
+- If Volatus cannot read the file cleanly, it keeps the file as `settings.json.bad` in the same
+  folder. Volatus then uses the default settings for the fields that it cannot read. If the whole
+  file is not valid, all fields use the default settings. The next change replaces
+  `settings.json`.
+- If Volatus cannot keep a copy of the file, it does not save any setting. Your choices still
+  apply to the window until you close it. The flyout shows "Settings could not be saved."
 
 ## Administrator rights
 - Without administrator rights, Volatus reads the folders one by one. This is slower.
