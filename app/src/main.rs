@@ -162,6 +162,9 @@ impl Model for RowModel {
 /// What the tree and treemap show for the current scan.
 struct Loaded {
     data: Arc<Data>,
+    /// A number no other shown scan in this run has (`next_serial`). Tells two scans apart where
+    /// the scan generation does not (`ScanControl::reset` keeps it) and a pointer could repeat.
+    serial: u64,
     model: Rc<RowModel>,
     view: ViewState,
     selected: Option<NodeId>,
@@ -589,7 +592,9 @@ fn show_state(ui: &MainWindow) {
     ui.set_banner_is_error(matches!(state, ScanState::Error(_)));
     let offer = SESSION.with_borrow(|s| offer_for(&state, s.resolved_root.as_deref(), elevate::is_admin()));
     let line = SESSION.with_borrow(|s| timing_for_state(&state, s.run.as_ref().and_then(TimingRun::line)));
-    let (threads, notices) = SESSION.with_borrow(|s| (s.flags.threads, s.notices.clone()));
+    let (threads, notices) = SESSION.with_borrow(|s| {
+        (s.flags.threads, s.notices.iter().chain(&s.delete.notice).cloned().collect::<Vec<_>>())
+    });
     let banner = with_options(banner_text(&state, offer, current_unit()), &state, threads, &notices);
     ui.set_banner(append_timing(banner, line.as_deref()).into());
     ui.set_show_elevate(offer);
@@ -698,12 +703,16 @@ fn spawn_layout(ui: &MainWindow, LayoutJob { data, root, generation, seq, size: 
             SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(&px, w, h)
         });
         let labels = map_labels(&data.tree, &rects, chrome, f64::from(scale), theme, unit);
+        // Let go of the data before the UI thread runs, so a delete waiting for it can apply.
+        drop(data);
         // Err means the event loop has stopped: nothing left to update.
         let _ = slint::invoke_from_event_loop(move || {
+            let Some(ui) = weak.upgrade() else { return };
             let current = SESSION.with_borrow(|s| (s.scan.generation(), s.layout_seq));
-            if let Some(ui) = weak.upgrade().filter(|_| current == (generation, seq)) {
+            if current == (generation, seq) {
                 land(&ui, Layout { root, rects, image, labels, size: (w as f32 / scale, h as f32 / scale) });
             }
+            scan_apply::data_released(&ui);
         });
     });
 }
@@ -857,6 +866,8 @@ fn forget_scan(show: impl FnOnce(Option<NodeId>) -> bool) -> tip::TipAction {
         s.fade_next = false;
         s.outdated = false;
         s.follow = None;
+        // A dialog, a job result or a removal of the dropped scan never touches another one.
+        scan_apply::scan_changed(s);
     });
     left_map(show)
 }
@@ -1408,6 +1419,12 @@ fn rescan(ui: &MainWindow) {
     }
 }
 
+/// A new number for a shown scan, never given before in this run.
+fn next_serial() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Replaces the shown scan with a new one.
 fn install(ui: &MainWindow, data: Arc<Data>) {
     let root = data.tree.root();
@@ -1417,6 +1434,7 @@ fn install(ui: &MainWindow, data: Arc<Data>) {
     SESSION.with_borrow_mut(|s| {
         s.loaded = Some(Loaded {
             data: data.clone(),
+            serial: next_serial(),
             model,
             view: ViewState::new(root),
             selected: Some(root),
@@ -1560,7 +1578,10 @@ fn count_types(ui: &MainWindow, data: Arc<Data>) {
         // Err means the event loop has stopped: nothing left to update.
         let _ = slint::invoke_from_event_loop(move || {
             let Some(ui) = weak.upgrade() else { return };
-            match store_totals(generation, &data, edits, totals) {
+            let stored = store_totals(generation, &data, edits, totals);
+            // Let go of the data, so a delete waiting for it can apply.
+            drop(data);
+            match stored {
                 Stored::Kept => sync_types(&ui),
                 Stored::Recount => {
                     if let Some(now) = with_loaded(|l| l.data.clone()) {
@@ -1569,6 +1590,7 @@ fn count_types(ui: &MainWindow, data: Arc<Data>) {
                 }
                 Stored::Late => {}
             }
+            scan_apply::data_released(&ui);
         });
     });
 }
@@ -2902,6 +2924,7 @@ mod tests {
         });
         Loaded {
             data: data.clone(),
+            serial: super::next_serial(),
             model,
             view: ViewState::new(root),
             selected: None,

@@ -472,7 +472,7 @@ pub(crate) mod tests {
                 broken: Vec::new(),
             }
         }
-        fn link(mut self, from: &str, to: &str) -> Fake {
+        pub(crate) fn link(mut self, from: &str, to: &str) -> Fake {
             self.links.push((norm(Path::new(from)), norm(Path::new(to))));
             self
         }

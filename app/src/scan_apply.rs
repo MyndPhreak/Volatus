@@ -4,78 +4,286 @@
 //! layout and file-type workers. A delete changes it in place, so `remove_from` first takes the
 //! `RowModel`'s weak link back (`RowModel::release`), then asks `Arc::get_mut` for the only reference.
 //! It gets one only when no worker holds a clone, so no other thread can read the tree while it
-//! changes. When a worker still holds one, nothing changes and the model gets its link back:
-//! `apply_removed` tries again on a later turn of the event loop, a bounded number of times, then
-//! leaves the tree as it is and offers a rescan. It never blocks the UI thread.
+//! changes. When a worker still holds one, nothing changes and the model gets its link back. The
+//! removal then waits as a `Pending` in the session: each worker calls `data_released` when it
+//! lets go of its clone, and a timer tries again too. After `APPLY_TRIES` timer tries the tree
+//! stays, the banner and the dialog offer a rescan. Nothing blocks the UI thread.
 //!
-//! The same module keeps the delete dialog's state and the job it runs (`DeleteSession`): the
-//! dialog text and the state machine are in `delete_flow`, the Slint dialog comes in Task 7b.
+//! Every delete is tied to the scan it was opened on (`Origin`: the scan generation and the
+//! identity of its data). A dialog, a job or a pending removal of another scan never touches the
+//! shown tree; a new scan closes the dialog (`scan_changed`).
+//!
+//! The dialog text and the state machine are in `delete_flow`; the Slint dialog comes in Task 7b.
 
 use super::{
     Data, Loaded, MainWindow, SESSION, Session, count_types, crumb, drop_hover, refresh_drives, relayout, select,
-    stop_move, sync_rows, sync_selection, with_loaded,
+    show_state, stop_move, sync_rows, sync_selection, with_loaded,
 };
-use crate::delete::{self, DeleteMode, RealFs, Remover};
+use crate::delete::{self, DeleteMode, DeleteTarget, RealFs, Refusal, Remover};
 use crate::delete_flow::{self, DeleteMsg, DialogEvent, DialogState, TreeAction};
+use crate::model::ScanState;
 use crate::purge::Purge;
 use crate::recycle::Recycle;
 use crate::tree_view;
 use scan::{Detached, NodeId, Tree};
 use slint::{ComponentHandle, ModelRc, Timer, VecModel};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-/// Most later tries of `apply_removed` while a worker holds the scan's data, and the wait before
-/// each: 3 s in all. Chosen, not measured: a layout of the shown folder or the file-type count of
-/// the whole scan holds the data for that long only on a very large scan.
+/// Most timer tries of a pending removal while a worker holds the scan's data, and the wait
+/// before each: 10 s in all. Chosen, not measured. A worker that lets go of its clone applies the
+/// removal at once (`data_released`), so the timer only covers a missed release.
 const APPLY_TRIES: u32 = 100;
-const APPLY_RETRY: Duration = Duration::from_millis(30);
+const APPLY_RETRY: Duration = Duration::from_millis(100);
 
-/// The delete dialog and the run it started. UI thread only.
+/// The banner text when a removal could not be applied (ASD-STE100).
+pub(crate) const STALE_LIST_NOTICE: &str = "Volatus could not update the list after the delete. Scan again to see the changes.";
+
+/// The scan a dialog, a job or a pending removal belongs to: the scan generation and the serial
+/// number of the shown data (`Loaded::serial`). `ScanControl::reset` keeps the generation, so the
+/// generation alone does not tell two scans apart; a data pointer is not used, as a freed
+/// address can come back for the next scan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Origin {
+    generation: u64,
+    data: u64,
+}
+
+/// The scan the window shows now, or `None` when none is loaded.
+fn origin_of(s: &Session) -> Option<Origin> {
+    s.loaded.as_ref().map(|l| Origin { generation: s.scan.generation(), data: l.serial })
+}
+
+/// The delete dialog, the run it started, and a removal that waits for the data. UI thread only.
 pub(crate) struct DeleteSession {
     pub(crate) state: DialogState,
+    /// The scan the dialog was opened on.
+    opened: Option<Origin>,
     job: Option<Job>,
+    pending: Option<Pending>,
+    /// Shown on the banner when a removal could not be applied. Cleared by a new scan.
+    pub(crate) notice: Option<String>,
 }
 
 impl Default for DeleteSession {
     fn default() -> Self {
-        DeleteSession { state: DialogState::Closed, job: None }
+        DeleteSession { state: DialogState::Closed, opened: None, job: None, pending: None, notice: None }
     }
 }
 
 /// A running delete: the scan it was started on, the node it removes and its Stop flag.
 struct Job {
-    generation: u64,
+    origin: Origin,
     node: NodeId,
     stop: Arc<AtomicBool>,
 }
 
-/// The dialog for Delete (`shift` false) or Shift+Delete on the selection: `delete_flow::open_for`
-/// with the real file system and the scan root AS TYPED (the policy resolves it itself).
-pub(crate) fn open_delete(s: &Session, shift: bool) -> DialogState {
-    let Some(l) = s.loaded.as_ref() else { return DialogState::Closed };
-    delete_flow::open_for(
-        &l.data.tree,
-        &l.data.counts,
-        l.selected,
-        s.scan.state(),
-        &s.scan_root,
-        shift,
-        |root, target, is_dir| delete::check_target(root, target, is_dir, &RealFs),
-        delete_flow::is_link,
-    )
+/// A removal from the tree that waits until no worker holds the data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Pending {
+    origin: Origin,
+    node: NodeId,
+    tries_left: u32,
+    /// It comes from a `Missing` refusal at Open, not from a finished delete.
+    from_missing: bool,
 }
 
-/// Delete or Shift+Delete: opens the dialog for the selection when no dialog is open.
-#[cfg_attr(not(test), expect(dead_code, reason = "called by the dialog and the keys in Task 7b"))]
-#[cfg_attr(test, allow(dead_code, reason = "called by the dialog and the keys in Task 7b"))]
-pub(crate) fn request_delete(shift: bool) {
-    SESSION.with_borrow_mut(|s| {
-        if matches!(s.delete.state, DialogState::Closed) {
-            s.delete.state = open_delete(s, shift);
+/// A confirm is allowed only on the scan the dialog was opened on, while no scan runs.
+pub(crate) fn may_confirm(opened: Option<Origin>, now: Option<Origin>, scan: &ScanState) -> bool {
+    let _ = (opened, now, scan);
+    true
+}
+
+/// The tree action a finished delete keeps: the run's own only when the message is of this job
+/// (`msg_generation`) and the window still shows the job's scan; else `Nothing`, as a rescan or
+/// a new scan already shows the disk as it is.
+pub(crate) fn finished_action(job: Origin, msg_generation: u64, now: Option<Origin>, action: TreeAction) -> TreeAction {
+    let _ = (job, msg_generation, now);
+    action
+}
+
+/// A new scan starts or the shown scan is dropped: the dialog closes unless a delete runs (its
+/// result is then dropped by its origin), and a pending removal and the notice go.
+pub(crate) fn scan_changed(s: &mut Session) {
+    let _ = s;
+}
+
+/// Opens the dialog on the selection when none is open. `check` is the policy, `is_link` the link
+/// probe, `gone` the strict "not found" check. A `Missing` refusal whose item `gone` confirms
+/// is removed from the tree too: `true` when such a removal now waits (`apply_pending` does it).
+pub(crate) fn open_in(
+    s: &mut Session,
+    shift: bool,
+    check: impl FnOnce(&Path, &Path, bool) -> Result<PathBuf, Refusal>,
+    is_link: impl FnOnce(&Path) -> bool,
+    gone: impl FnOnce(&Path) -> bool,
+) -> bool {
+    if !matches!(s.delete.state, DialogState::Closed) {
+        return false;
+    }
+    let Some(origin) = origin_of(s) else { return false };
+    let Some(l) = s.loaded.as_ref() else { return false };
+    let (tree, counts) = (&l.data.tree, &l.data.counts);
+    let checked = delete_flow::open_check(tree, counts, l.selected, s.scan.state(), &s.scan_root, check, is_link);
+    let Some((node, target)) = checked else { return false };
+    let path = tree.path(node);
+    s.delete.opened = Some(origin);
+    match target {
+        Err(r) => {
+            let (text, detach) = delete_flow::refusal_for(r, || gone(&path));
+            s.delete.state = DialogState::Refused { text };
+            if detach {
+                s.delete.pending = Some(Pending { origin, node, tries_left: APPLY_TRIES, from_missing: true });
+            }
+            detach
         }
-    });
+        Ok(info) => {
+            s.delete.state = delete_flow::next(DialogState::Closed, DialogEvent::Open { shift, target: Ok(info) });
+            false
+        }
+    }
+}
+
+/// What `begin_confirm` starts.
+pub(crate) struct Start {
+    mode: DeleteMode,
+    target: DeleteTarget,
+    generation: u64,
+    stop: Arc<AtomicBool>,
+}
+
+/// The action button: checks again, then makes the job. `None`, and no job, outside `Confirm`,
+/// while another delete runs, while a scan runs, or when the window no longer shows the scan the
+/// dialog was opened on. The second `check` (just before the delete) must give the same resolved
+/// path as at Open; else the dialog shows why (`delete_flow::recheck`) and nothing starts.
+pub(crate) fn begin_confirm(s: &mut Session, check: impl FnOnce(&Path, &Path, bool) -> Result<PathBuf, Refusal>) -> Option<Start> {
+    let DialogState::Confirm { mode, target } = &s.delete.state else { return None };
+    let now = origin_of(s);
+    if s.delete.job.is_some() || !may_confirm(s.delete.opened, now, s.scan.state()) {
+        return None;
+    }
+    let (mode, target, origin) = (*mode, target.target.clone(), now?);
+    let path = s.loaded.as_ref()?.data.tree.path(target.node);
+    if let Err(text) = delete_flow::recheck(&target.path, check(&s.scan_root, &path, target.is_dir)) {
+        step(s, DialogEvent::Refuse { text });
+        return None;
+    }
+    let stop = Arc::new(AtomicBool::new(false));
+    s.delete.job = Some(Job { origin, node: target.node, stop: stop.clone() });
+    step(s, DialogEvent::Confirm);
+    Some(Start { mode, target, generation: origin.generation, stop })
+}
+
+/// A message of the running delete. The dialog always gets the progress and the result. The tree
+/// changes only for a result of the scan the window still shows (`finished_action`): then the
+/// removal waits as a `Pending`, and `true` says `apply_pending` must run.
+pub(crate) fn handle_msg(s: &mut Session, msg: DeleteMsg) -> bool {
+    // No job, or a job of another generation: a late message.
+    let Some(job_origin) = s.delete.job.as_ref().map(|j| j.origin).filter(|o| o.generation == msg.generation()) else {
+        return false;
+    };
+    match msg {
+        DeleteMsg::Progress { items, bytes, .. } => {
+            step(s, DialogEvent::Progress { items, bytes });
+            false
+        }
+        DeleteMsg::Finished { generation, outcome, target_gone } => {
+            let Some(job) = s.delete.job.take() else { return false };
+            step(s, DialogEvent::Finished { outcome, target_gone });
+            let now = origin_of(s);
+            let DialogState::Done { tree_action, .. } = &mut s.delete.state else { return false };
+            *tree_action = finished_action(job_origin, generation, now, *tree_action);
+            let detach = *tree_action == TreeAction::Detach;
+            if detach {
+                s.delete.pending = Some(Pending { origin: job.origin, node: job.node, tries_left: APPLY_TRIES, from_missing: false });
+            }
+            detach
+        }
+    }
+}
+
+/// What one try of a pending removal did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PendingStep {
+    /// No removal waits.
+    Idle,
+    /// The tree changed: redraw (`refresh_after_remove`).
+    Applied,
+    /// A worker still holds the data: try again later.
+    Busy,
+    /// It was for another scan, or the node cannot be removed: it is gone, nothing changed.
+    Dropped,
+    /// The last timer try failed: the tree stays, the banner and the dialog offer a rescan.
+    GaveUp,
+}
+
+/// One try of the pending removal. `timer` tries count against `APPLY_TRIES`; a try after a
+/// worker let go of its clone does not. `layout_seq` goes up only when the tree changes, so a
+/// busy try never drops a layout.
+pub(crate) fn step_pending(s: &mut Session, timer: bool) -> PendingStep {
+    let _ = timer;
+    if s.delete.pending.is_some() {
+        return PendingStep::Idle;
+    }
+    let Some(p) = s.delete.pending else { return PendingStep::Idle };
+    if origin_of(s) != Some(p.origin) {
+        s.delete.pending = None;
+        return PendingStep::Dropped;
+    }
+    let Some(l) = s.loaded.as_mut() else { return PendingStep::Idle };
+    match remove_from(l, p.node) {
+        Ok(Some(_)) => {
+            s.delete.pending = None;
+            // A layout a worker posts from here on is of the old tree: it is dropped.
+            s.layout_seq += 1;
+            mark_list(s, p, true);
+            PendingStep::Applied
+        }
+        Ok(None) => {
+            s.delete.pending = None;
+            mark_list(s, p, false);
+            PendingStep::Dropped
+        }
+        Err(Busy) if !timer => PendingStep::Busy,
+        Err(Busy) if p.tries_left > 1 => {
+            s.delete.pending = Some(Pending { tries_left: p.tries_left - 1, ..p });
+            PendingStep::Busy
+        }
+        Err(Busy) => {
+            s.delete.pending = None;
+            s.delete.notice = Some(STALE_LIST_NOTICE.to_string());
+            mark_list(s, p, false);
+            PendingStep::GaveUp
+        }
+    }
+}
+
+/// The dialog says what happened to the list: `Detached` once the item left it, the rescan
+/// offer when it could not leave it.
+fn mark_list(s: &mut Session, p: Pending, removed: bool) {
+    match &mut s.delete.state {
+        DialogState::Done { tree_action, .. } if !p.from_missing && *tree_action == TreeAction::Detach => {
+            *tree_action = if removed { TreeAction::Detached } else { TreeAction::KeepAndOfferRescan };
+        }
+        DialogState::Refused { text } if p.from_missing && text.as_str() == delete_flow::GONE_PENDING => {
+            *text = (if removed { delete_flow::GONE_REMOVED } else { delete_flow::GONE_KEPT }).to_string();
+        }
+        _ => {}
+    }
+}
+
+/// The dialog for Delete (`shift` false) or Shift+Delete on the selection, with the real file
+/// system and the scan root AS TYPED (the policy resolves it itself). An item gone from the disk
+/// leaves the tree.
+#[cfg_attr(not(test), expect(dead_code, reason = "called by the dialog and the keys in Task 7b"))]
+#[cfg_attr(test, allow(dead_code, reason = "needs a window; its decision is open_in"))]
+pub(crate) fn request_delete(ui: &MainWindow, shift: bool) {
+    let check = |root: &Path, target: &Path, is_dir: bool| delete::check_target(root, target, is_dir, &RealFs);
+    if SESSION.with_borrow_mut(|s| open_in(s, shift, check, delete_flow::is_link, delete_flow::target_gone)) {
+        apply_pending(ui);
+    }
 }
 
 /// Feeds `event` to the dialog state machine.
@@ -86,21 +294,23 @@ fn step(s: &mut Session, event: DialogEvent) {
 
 /// The link that changes between the Recycle Bin and the permanent delete.
 #[cfg_attr(not(test), expect(dead_code, reason = "called by the dialog in Task 7b"))]
-#[cfg_attr(test, allow(dead_code, reason = "called by the dialog in Task 7b"))]
 pub(crate) fn switch_delete_mode() {
     SESSION.with_borrow_mut(|s| step(s, DialogEvent::SwitchMode));
 }
 
 /// Cancel, Esc or Close. Does nothing while a delete runs.
 #[cfg_attr(not(test), expect(dead_code, reason = "called by the dialog in Task 7b"))]
-#[cfg_attr(test, allow(dead_code, reason = "called by the dialog in Task 7b"))]
 pub(crate) fn close_delete() {
-    SESSION.with_borrow_mut(|s| step(s, DialogEvent::Close));
+    SESSION.with_borrow_mut(|s| {
+        step(s, DialogEvent::Close);
+        if matches!(s.delete.state, DialogState::Closed) {
+            s.delete.opened = None;
+        }
+    });
 }
 
 /// Stop: the permanent delete ends after the item in progress. The Recycle Bin has no Stop.
 #[cfg_attr(not(test), expect(dead_code, reason = "called by the dialog in Task 7b"))]
-#[cfg_attr(test, allow(dead_code, reason = "called by the dialog in Task 7b"))]
 pub(crate) fn stop_delete() {
     SESSION.with_borrow_mut(|s| {
         step(s, DialogEvent::Stop);
@@ -118,24 +328,16 @@ fn remover_for(mode: DeleteMode, owner: Option<isize>) -> Arc<dyn Remover> {
     }
 }
 
-/// The action button of the confirm dialog: starts the delete of the checked target on a worker
-/// thread, tagged with the scan generation. Does nothing outside `Confirm`, while a scan runs, or
-/// while another delete runs. `owner` is the window handle for the Recycle Bin's shell windows.
+/// The action button of the confirm dialog: `begin_confirm` with the real policy, then the delete
+/// on a worker thread, tagged with the scan generation. `owner` is the window handle for the
+/// Recycle Bin's shell windows.
 #[cfg_attr(not(test), expect(dead_code, reason = "called by the dialog in Task 7b"))]
-#[cfg_attr(test, allow(dead_code, reason = "called by the dialog in Task 7b"))]
+#[cfg_attr(test, allow(dead_code, reason = "needs a window; its decisions are begin_confirm and handle_msg"))]
 pub(crate) fn confirm_delete(ui: &MainWindow, owner: Option<isize>) {
-    let start = SESSION.with_borrow_mut(|s| {
-        let DialogState::Confirm { mode, target } = &s.delete.state else { return None };
-        if !delete_flow::can_start(s.scan.state()) || s.delete.job.is_some() {
-            return None;
-        }
-        let (mode, target) = (*mode, target.target.clone());
-        let (generation, stop) = (s.scan.generation(), Arc::new(AtomicBool::new(false)));
-        s.delete.job = Some(Job { generation, node: target.node, stop: stop.clone() });
-        step(s, DialogEvent::Confirm);
-        Some((mode, target, generation, stop))
-    });
-    let Some((mode, target, generation, stop)) = start else { return };
+    let check = |root: &Path, target: &Path, is_dir: bool| delete::check_target(root, target, is_dir, &RealFs);
+    let Some(Start { mode, target, generation, stop }) = SESSION.with_borrow_mut(|s| begin_confirm(s, check)) else {
+        return;
+    };
     let weak = ui.as_weak();
     let post = move |msg: DeleteMsg| {
         let weak = weak.clone();
@@ -154,77 +356,47 @@ pub(crate) fn confirm_delete(ui: &MainWindow, owner: Option<isize>) {
     }
 }
 
-/// A message of the running delete. The dialog always gets the progress and the result; the tree
-/// changes only when the result is for the scan the window still shows (a rescan or a new scan
-/// that started meanwhile already shows the disk as it is).
+/// `handle_msg` on the session, then the removal when it says so.
+#[cfg_attr(test, allow(dead_code, reason = "needs a window; its decisions are handle_msg and step_pending"))]
 fn on_delete_msg(ui: &MainWindow, msg: DeleteMsg) {
-    let detach = SESSION.with_borrow_mut(|s| {
-        // No job, or a job of another generation: a late message.
-        let generation = s.delete.job.as_ref().map(|j| j.generation).filter(|g| *g == msg.generation())?;
-        match msg {
-            DeleteMsg::Progress { items, bytes, .. } => {
-                step(s, DialogEvent::Progress { items, bytes });
-                None
-            }
-            DeleteMsg::Finished { outcome, target_gone, .. } => {
-                let job = s.delete.job.take()?;
-                step(s, DialogEvent::Finished { outcome, target_gone });
-                if !(s.scan.is_current(generation) && s.loaded.is_some()) {
-                    set_tree_action(s, TreeAction::Nothing);
-                    return None;
-                }
-                matches!(s.delete.state, DialogState::Done { tree_action: TreeAction::Detach, .. }).then_some(job.node)
-            }
-        }
-    });
-    if let Some(node) = detach {
-        apply_removed(ui, node);
+    if SESSION.with_borrow_mut(|s| handle_msg(s, msg)) {
+        apply_pending(ui);
     }
 }
 
-/// Changes the tree action of a finished dialog.
-fn set_tree_action(s: &mut Session, action: TreeAction) {
-    if let DialogState::Done { tree_action, .. } = &mut s.delete.state {
-        *tree_action = action;
+/// Tries the pending removal now; while a worker holds the data, a timer tries again.
+#[cfg_attr(test, allow(dead_code, reason = "needs a window; its decision is step_pending"))]
+fn apply_pending(ui: &MainWindow) {
+    match SESSION.with_borrow_mut(|s| step_pending(s, false)) {
+        PendingStep::Applied => refresh_after_remove(ui),
+        PendingStep::Busy => retry_later(ui),
+        PendingStep::Idle | PendingStep::Dropped | PendingStep::GaveUp => {}
     }
 }
 
-/// The item is gone from the disk: removes `node` from the shown scan and redraws the tree, the
-/// treemap and the footer (`remove_from`, then `refresh_after_remove`). While a worker holds the
-/// data it tries again later (`APPLY_TRIES`); after the last try the tree stays and the dialog
-/// offers a rescan. A newer scan that started meanwhile ends the tries.
-pub(crate) fn apply_removed(ui: &MainWindow, node: NodeId) {
-    let generation = SESSION.with_borrow(|s| s.scan.generation());
-    try_remove(ui, node, generation, APPLY_TRIES);
+/// One timer try of the pending removal, after `APPLY_RETRY`, then the next while it is busy.
+#[cfg_attr(test, allow(dead_code, reason = "needs a window; its decision is step_pending"))]
+fn retry_later(ui: &MainWindow) {
+    let weak = ui.as_weak();
+    Timer::single_shot(APPLY_RETRY, move || {
+        let Some(ui) = weak.upgrade() else { return };
+        match SESSION.with_borrow_mut(|s| step_pending(s, true)) {
+            PendingStep::Applied => refresh_after_remove(&ui),
+            PendingStep::Busy => retry_later(&ui),
+            PendingStep::GaveUp => {
+                eprintln!("{STALE_LIST_NOTICE}");
+                show_state(&ui);
+            }
+            PendingStep::Idle | PendingStep::Dropped => {}
+        }
+    });
 }
 
-fn try_remove(ui: &MainWindow, node: NodeId, generation: u64, tries_left: u32) {
-    let result = SESSION.with_borrow_mut(|s| {
-        if !s.scan.is_current(generation) {
-            return Ok(None);
-        }
-        // A layout that a worker posts from here on is of the old tree: it is dropped. It also
-        // lets go of its clone of the data sooner.
-        s.layout_seq += 1;
-        s.loaded.as_mut().map_or(Ok(None), |l| remove_from(l, node))
-    });
-    match result {
-        Ok(Some(_)) => refresh_after_remove(ui),
-        Ok(None) => {}
-        Err(Busy) if tries_left > 0 => {
-            let weak = ui.as_weak();
-            Timer::single_shot(APPLY_RETRY, move || {
-                if let Some(ui) = weak.upgrade() {
-                    try_remove(&ui, node, generation, tries_left - 1);
-                }
-            });
-        }
-        Err(Busy) => {
-            eprintln!("The scan data stayed in use. The tree is not changed; scan again to see the changes.");
-            SESSION.with_borrow_mut(|s| set_tree_action(s, TreeAction::KeepAndOfferRescan));
-            // The tries dropped the layouts that were on their way: draw the map again.
-            relayout(ui);
-        }
+/// A worker let go of its clone of the scan's data: a pending removal may apply now.
+#[cfg_attr(test, allow(dead_code, reason = "needs a window; its decision is step_pending"))]
+pub(crate) fn data_released(ui: &MainWindow) {
+    if SESSION.with_borrow_mut(|s| step_pending(s, false)) == PendingStep::Applied {
+        refresh_after_remove(ui);
     }
 }
 
@@ -232,6 +404,7 @@ fn try_remove(ui: &MainWindow, node: NodeId, generation: u64, tries_left: u32) {
 /// layout starts (it bumps `layout_seq`), the crumbs and rows are rebuilt, the selection shows,
 /// the footer totals are counted again from the whole scan and the drive list (free space) is
 /// read again.
+#[cfg_attr(test, allow(dead_code, reason = "needs a window"))]
 fn refresh_after_remove(ui: &MainWindow) {
     SESSION.with_borrow_mut(|s| {
         s.held = None;
@@ -270,7 +443,7 @@ pub(crate) fn in_subtree(tree: &Tree, n: NodeId, root: NodeId) -> bool {
 /// keeps. `Err(Busy)`, and nothing changed, while a worker holds the `Data`. `Ok(None)`, and
 /// nothing changed, for the root, an id outside the tree, or a node already removed.
 pub(crate) fn remove_from(l: &mut Loaded, node: NodeId) -> Result<Option<Detached>, Busy> {
-    let Loaded { data, model, view, selected, view_root, rects, shown_root, totals, edits } = l;
+    let Loaded { data, model, view, selected, view_root, rects, shown_root, totals, edits, .. } = l;
     // The model's weak link goes first, so `get_mut` can see the data is not shared.
     model.release();
     let result = match Arc::get_mut(data) {
@@ -363,7 +536,7 @@ mod tests {
     fn loaded(data: Arc<Data>) -> Loaded {
         let root = data.tree.root();
         let model = Rc::new(RowModel::new(data.clone()));
-        Loaded { data, model, view: ViewState::new(root), selected: None, view_root: root, rects: Vec::new(), shown_root: None, totals: None, edits: 0 }
+        Loaded { data, serial: crate::next_serial(), model, view: ViewState::new(root), selected: None, view_root: root, rects: Vec::new(), shown_root: None, totals: None, edits: 0 }
     }
 
     fn rect(node: NodeId) -> Rect {
@@ -498,5 +671,437 @@ mod tests {
         assert!(model.row_data(0).is_none());
         model.attach(&d);
         assert_eq!(model.row_data(0).map(|r| r.name.to_string()), Some("root".into()));
+    }
+
+    // ---- the guards of a delete against a changed or newer scan ----
+
+    use crate::delete::Outcome;
+    use crate::model::{Event, Summary};
+
+    fn summary() -> Summary {
+        Summary {
+            method: scan::Method::Walk,
+            files: 3,
+            dirs: 3,
+            skipped: 0,
+            elapsed: Duration::ZERO,
+            phases: Default::default(),
+            total: 160,
+        }
+    }
+
+    /// A finished scan of `data` on screen, `node` selected, no dialog.
+    fn show(data: Arc<Data>, node: &str) {
+        SESSION.with_borrow_mut(|s| {
+            if matches!(s.scan.state(), ScanState::Done(_)) {
+                assert!(s.scan.reset());
+            }
+            let (g, _) = s.scan.start().expect("no scan runs");
+            assert!(s.scan.apply(g, Event::Finished(summary())));
+            let selected = find(&data.tree, node);
+            let mut l = loaded(data);
+            l.selected = Some(selected);
+            s.loaded = Some(l);
+            s.scan_root = PathBuf::from(r"C:\data");
+            s.delete = DeleteSession::default();
+        });
+    }
+
+    /// The policy, faked: every item is fine and resolves to `\\?\` plus its path.
+    fn ok(_: &Path, t: &Path, _: bool) -> Result<PathBuf, Refusal> {
+        Ok(PathBuf::from(format!(r"\\?\{}", t.display())))
+    }
+
+    fn open(shift: bool) -> bool {
+        SESSION.with_borrow_mut(|s| open_in(s, shift, ok, |_| false, |_| false))
+    }
+
+    fn confirm() -> Option<u64> {
+        SESSION.with_borrow_mut(|s| begin_confirm(s, ok).map(|st| st.generation))
+    }
+
+    fn state() -> DialogState {
+        SESSION.with_borrow(|s| s.delete.state.clone())
+    }
+
+    fn now() -> Origin {
+        SESSION.with_borrow(|s| origin_of(s).expect("a scan is shown"))
+    }
+
+    fn has_job() -> bool {
+        SESSION.with_borrow(|s| s.delete.job.is_some())
+    }
+
+    #[test]
+    fn open_in_stamps_the_scan_it_was_opened_on() {
+        show(data(), "a");
+        assert!(!open(false));
+        assert!(matches!(state(), DialogState::Confirm { mode: DeleteMode::RecycleBin, .. }), "{:?}", state());
+        assert_eq!(SESSION.with_borrow(|s| s.delete.opened), Some(now()));
+    }
+
+    #[test]
+    fn begin_confirm_on_the_same_scan_starts_a_job() {
+        show(data(), "a");
+        open(true);
+        let generation = now().generation;
+        assert_eq!(confirm(), Some(generation));
+        assert!(has_job());
+        assert!(matches!(state(), DialogState::Running { mode: DeleteMode::Permanent, .. }), "{:?}", state());
+    }
+
+    #[test]
+    fn begin_confirm_after_a_new_scan_finished_does_nothing() {
+        show(data(), "a");
+        open(false);
+        // A rescan finished: a new generation and new data. The dialog was not closed.
+        SESSION.with_borrow_mut(|s| {
+            assert!(s.scan.reset());
+            let (g, _) = s.scan.start().unwrap();
+            assert!(s.scan.apply(g, Event::Finished(summary())));
+            s.loaded = Some(loaded(data()));
+        });
+        assert_eq!(confirm(), None);
+        assert!(!has_job());
+    }
+
+    #[test]
+    fn begin_confirm_after_a_reset_that_keeps_the_generation_does_nothing() {
+        show(data(), "a");
+        open(false);
+        let opened = now();
+        SESSION.with_borrow_mut(|s| {
+            assert!(s.scan.reset());
+            s.loaded = None;
+        });
+        assert_eq!(confirm(), None);
+        // The same generation with other data on screen.
+        SESSION.with_borrow_mut(|s| s.loaded = Some(loaded(data())));
+        assert_eq!(now().generation, opened.generation);
+        assert_eq!(confirm(), None);
+        assert!(!has_job());
+    }
+
+    #[test]
+    fn begin_confirm_with_other_data_of_the_same_generation_does_nothing() {
+        show(data(), "a");
+        open(false);
+        SESSION.with_borrow_mut(|s| s.loaded = Some(loaded(data())));
+        assert_eq!(confirm(), None);
+        assert!(!has_job());
+    }
+
+    #[test]
+    fn may_confirm_table() {
+        let a = Origin { generation: 1, data: 10 };
+        let b = Origin { generation: 1, data: 11 };
+        let c = Origin { generation: 2, data: 10 };
+        let idle = ScanState::Idle;
+        let scanning = ScanState::Scanning { files: 0, dirs: 0 };
+        for (opened, now, scan, want) in [
+            (Some(a), Some(a), &idle, true),
+            (Some(a), Some(a), &scanning, false),
+            (Some(a), Some(b), &idle, false),
+            (Some(a), Some(c), &idle, false),
+            (Some(a), None, &idle, false),
+            (None, Some(a), &idle, false),
+            (None, None, &idle, false),
+        ] {
+            assert_eq!(may_confirm(opened, now, scan), want, "{opened:?} {now:?} {scan:?}");
+        }
+    }
+
+    #[test]
+    fn begin_confirm_checks_again_and_refuses_another_path() {
+        show(data(), "a");
+        open(false);
+        let other = SESSION.with_borrow_mut(|s| begin_confirm(s, |_, _, _| Ok(PathBuf::from(r"\\?\C:\elsewhere\a"))).is_some());
+        assert!(!other);
+        assert_eq!(state(), DialogState::Refused { text: delete_flow::CHANGED_TEXT.into() });
+        assert!(!has_job());
+    }
+
+    #[test]
+    fn begin_confirm_checks_again_and_shows_the_refusal() {
+        show(data(), "a");
+        open(false);
+        let started = SESSION.with_borrow_mut(|s| begin_confirm(s, |_, _, _| Err(Refusal::KindChanged)).is_some());
+        assert!(!started);
+        assert_eq!(state(), DialogState::Refused { text: delete::refusal_text(Refusal::KindChanged).into() });
+        assert!(!has_job());
+    }
+
+    #[test]
+    fn begin_confirm_checks_again_with_the_root_as_typed_and_the_node_path() {
+        show(data(), "a");
+        open(false);
+        let seen = std::cell::RefCell::new(None);
+        SESSION.with_borrow_mut(|s| {
+            begin_confirm(s, |root, t, is_dir| {
+                *seen.borrow_mut() = Some((root.to_path_buf(), t.to_path_buf(), is_dir));
+                ok(root, t, is_dir)
+            })
+        });
+        assert_eq!(seen.into_inner(), Some((PathBuf::from(r"C:\data"), PathBuf::from(r"root\a"), true)));
+        assert!(has_job());
+    }
+
+    #[test]
+    fn finished_action_table() {
+        let job = Origin { generation: 4, data: 10 };
+        for action in [TreeAction::Detach, TreeAction::KeepAndOfferRescan, TreeAction::Nothing] {
+            for (msg, now, want) in [
+                (4, Some(job), action),
+                (3, Some(job), TreeAction::Nothing),
+                (4, Some(Origin { generation: 5, data: 10 }), TreeAction::Nothing),
+                (4, Some(Origin { generation: 4, data: 11 }), TreeAction::Nothing),
+                (4, None, TreeAction::Nothing),
+            ] {
+                assert_eq!(finished_action(job, msg, now, action), want, "{action:?} msg {msg} now {now:?}");
+            }
+        }
+    }
+
+    /// A running permanent delete of node `a` of a shown scan. Returns its generation.
+    fn running() -> u64 {
+        show(data(), "a");
+        open(true);
+        confirm().expect("job")
+    }
+
+    fn finished(generation: u64, gone: bool, outcome: Outcome) -> bool {
+        SESSION.with_borrow_mut(|s| handle_msg(s, DeleteMsg::Finished { generation, outcome, target_gone: gone }))
+    }
+
+    fn done_action() -> Option<TreeAction> {
+        match state() {
+            DialogState::Done { tree_action, .. } => Some(tree_action),
+            _ => None,
+        }
+    }
+
+    fn removed() -> Outcome {
+        Outcome { removed_items: 3, removed_bytes: 150, ..Outcome::default() }
+    }
+
+    #[test]
+    fn handle_msg_current_result_with_the_item_gone_waits_to_remove_it() {
+        let g = running();
+        assert!(SESSION.with_borrow_mut(|s| !handle_msg(s, DeleteMsg::Progress { generation: g, items: 1, bytes: 2 })));
+        assert!(matches!(state(), DialogState::Running { progress: delete_flow::RunProgress { items: 1, bytes: 2 }, .. }));
+        assert!(finished(g, true, removed()));
+        assert_eq!(done_action(), Some(TreeAction::Detach));
+        assert!(SESSION.with_borrow(|s| s.delete.pending.is_some() && s.delete.job.is_none()));
+    }
+
+    #[test]
+    fn handle_msg_current_result_with_the_item_still_there_keeps_the_tree() {
+        let g = running();
+        assert!(!finished(g, false, removed()));
+        assert_eq!(done_action(), Some(TreeAction::KeepAndOfferRescan));
+        assert!(SESSION.with_borrow(|s| s.delete.pending.is_none()));
+    }
+
+    #[test]
+    fn handle_msg_result_for_a_scan_no_longer_shown_does_not_touch_the_tree() {
+        // A new scan with new data; the running dialog stays (`scan_changed` keeps a running one).
+        let g = running();
+        SESSION.with_borrow_mut(|s| {
+            assert!(s.scan.reset());
+            let (n, _) = s.scan.start().unwrap();
+            assert!(s.scan.apply(n, Event::Finished(summary())));
+            s.loaded = Some(loaded(data()));
+            scan_changed(s);
+        });
+        assert!(!finished(g, true, removed()));
+        assert_eq!(done_action(), Some(TreeAction::Nothing));
+        assert!(SESSION.with_borrow(|s| s.delete.pending.is_none()));
+    }
+
+    #[test]
+    fn handle_msg_result_for_other_data_of_the_same_generation_does_not_touch_the_tree() {
+        let g = running();
+        SESSION.with_borrow_mut(|s| s.loaded = Some(loaded(data())));
+        assert!(!finished(g, true, removed()));
+        assert_eq!(done_action(), Some(TreeAction::Nothing));
+    }
+
+    #[test]
+    fn handle_msg_result_with_no_scan_shown_does_not_touch_the_tree() {
+        let g = running();
+        SESSION.with_borrow_mut(|s| s.loaded = None);
+        assert!(!finished(g, true, removed()));
+        assert_eq!(done_action(), Some(TreeAction::Nothing));
+    }
+
+    #[test]
+    fn handle_msg_of_another_generation_or_without_a_job_is_dropped() {
+        let g = running();
+        assert!(!finished(g + 1, true, removed()));
+        assert!(matches!(state(), DialogState::Running { .. }), "{:?}", state());
+        assert!(finished(g, true, removed()));
+        // A second Finished: there is no job any more.
+        assert!(!finished(g, true, removed()));
+    }
+
+    fn root_size() -> u64 {
+        SESSION.with_borrow(|s| s.loaded.as_ref().map(|l| l.data.tree.node(l.data.tree.root()).size).unwrap())
+    }
+
+    #[test]
+    fn step_pending_waits_for_the_last_clone_then_applies() {
+        let g = running();
+        let worker = SESSION.with_borrow(|s| s.loaded.as_ref().unwrap().data.clone());
+        assert!(finished(g, true, removed()));
+        let seq = SESSION.with_borrow(|s| s.layout_seq);
+
+        assert_eq!(SESSION.with_borrow_mut(|s| step_pending(s, false)), PendingStep::Busy);
+        assert_eq!(root_size(), 160);
+        // A busy try never drops a layout, and the dialog does not say the list changed.
+        assert_eq!(SESSION.with_borrow(|s| s.layout_seq), seq);
+        assert_eq!(done_action(), Some(TreeAction::Detach));
+
+        drop(worker);
+        assert_eq!(SESSION.with_borrow_mut(|s| step_pending(s, false)), PendingStep::Applied);
+        assert_eq!(root_size(), 10);
+        assert_eq!(SESSION.with_borrow(|s| s.layout_seq), seq + 1);
+        assert_eq!(done_action(), Some(TreeAction::Detached));
+        assert_eq!(SESSION.with_borrow_mut(|s| step_pending(s, false)), PendingStep::Idle);
+    }
+
+    #[test]
+    fn step_pending_is_dropped_by_a_new_scan() {
+        let g = running();
+        let _worker = SESSION.with_borrow(|s| s.loaded.as_ref().unwrap().data.clone());
+        assert!(finished(g, true, removed()));
+        SESSION.with_borrow_mut(scan_changed);
+        assert_eq!(SESSION.with_borrow_mut(|s| step_pending(s, false)), PendingStep::Idle);
+    }
+
+    #[test]
+    fn step_pending_for_data_no_longer_shown_is_dropped() {
+        let g = running();
+        assert!(finished(g, true, removed()));
+        // Other data on screen without `scan_changed`: the origin still tells.
+        SESSION.with_borrow_mut(|s| s.loaded = Some(loaded(data())));
+        assert_eq!(SESSION.with_borrow_mut(|s| step_pending(s, false)), PendingStep::Dropped);
+        assert_eq!(root_size(), 160);
+    }
+
+    #[test]
+    fn step_pending_after_the_last_timer_try_gives_up_and_says_so() {
+        let g = running();
+        let _worker = SESSION.with_borrow(|s| s.loaded.as_ref().unwrap().data.clone());
+        assert!(finished(g, true, removed()));
+        SESSION.with_borrow_mut(|s| s.delete.pending.as_mut().unwrap().tries_left = 2);
+        assert_eq!(SESSION.with_borrow_mut(|s| step_pending(s, true)), PendingStep::Busy);
+        assert_eq!(SESSION.with_borrow_mut(|s| step_pending(s, true)), PendingStep::GaveUp);
+        assert_eq!(done_action(), Some(TreeAction::KeepAndOfferRescan));
+        assert_eq!(SESSION.with_borrow(|s| s.delete.notice.clone()), Some(STALE_LIST_NOTICE.to_string()));
+        assert_eq!(root_size(), 160);
+        // A new scan clears the notice.
+        SESSION.with_borrow_mut(scan_changed);
+        assert_eq!(SESSION.with_borrow(|s| s.delete.notice.clone()), None);
+    }
+
+    #[test]
+    fn scan_changed_closes_the_dialog_unless_a_delete_runs() {
+        show(data(), "a");
+        open(false);
+        SESSION.with_borrow_mut(scan_changed);
+        assert_eq!(state(), DialogState::Closed);
+        assert_eq!(SESSION.with_borrow(|s| s.delete.opened), None);
+
+        running();
+        SESSION.with_borrow_mut(scan_changed);
+        assert!(matches!(state(), DialogState::Running { .. }), "{:?}", state());
+    }
+
+    #[test]
+    fn forget_scan_closes_the_dialog() {
+        show(data(), "a");
+        open(false);
+        crate::forget_scan(|_| false);
+        assert_eq!(state(), DialogState::Closed);
+    }
+
+    fn open_missing(gone: bool) -> bool {
+        SESSION.with_borrow_mut(|s| open_in(s, false, |_, _, _| Err(Refusal::Missing), |_| false, |_| gone))
+    }
+
+    #[test]
+    fn open_in_an_item_gone_from_the_disk_leaves_the_tree() {
+        show(data(), "a");
+        let a = SESSION.with_borrow(|s| find(&s.loaded.as_ref().unwrap().data.tree, "a"));
+        assert!(open_missing(true));
+        assert_eq!(state(), DialogState::Refused { text: delete_flow::GONE_PENDING.into() });
+        assert_eq!(SESSION.with_borrow_mut(|s| step_pending(s, false)), PendingStep::Applied);
+        assert_eq!(root_size(), 10);
+        assert_eq!(state(), DialogState::Refused { text: delete_flow::GONE_REMOVED.into() });
+        // The selection moved off the removed node.
+        assert_ne!(SESSION.with_borrow(|s| s.loaded.as_ref().unwrap().selected), Some(a));
+    }
+
+    #[test]
+    fn open_in_a_missing_item_without_a_clean_not_found_stays() {
+        show(data(), "a");
+        assert!(!open_missing(false));
+        assert_eq!(state(), DialogState::Refused { text: delete::refusal_text(Refusal::Missing).into() });
+        assert_eq!(SESSION.with_borrow_mut(|s| step_pending(s, false)), PendingStep::Idle);
+        assert_eq!(root_size(), 160);
+    }
+
+    #[test]
+    fn open_in_a_gone_item_that_cannot_leave_the_list_says_so() {
+        show(data(), "a");
+        let _worker = SESSION.with_borrow(|s| s.loaded.as_ref().unwrap().data.clone());
+        assert!(open_missing(true));
+        SESSION.with_borrow_mut(|s| s.delete.pending.as_mut().unwrap().tries_left = 1);
+        assert_eq!(SESSION.with_borrow_mut(|s| step_pending(s, true)), PendingStep::GaveUp);
+        assert_eq!(state(), DialogState::Refused { text: delete_flow::GONE_KEPT.into() });
+    }
+
+    #[test]
+    fn open_in_with_a_dialog_open_or_nothing_shown_does_nothing() {
+        show(data(), "a");
+        open(false);
+        assert!(!open_missing(true));
+        assert!(matches!(state(), DialogState::Confirm { .. }));
+        SESSION.with_borrow_mut(|s| {
+            s.delete = DeleteSession::default();
+            s.loaded = None;
+        });
+        assert!(!open(false));
+        assert_eq!(state(), DialogState::Closed);
+    }
+
+    #[test]
+    fn stop_delete_sets_the_flag_of_a_permanent_delete_only() {
+        let flag = || SESSION.with_borrow(|s| s.delete.job.as_ref().map(|j| j.stop.load(Ordering::Relaxed)));
+        running();
+        stop_delete();
+        assert_eq!(flag(), Some(true));
+
+        show(data(), "a");
+        open(false);
+        confirm().unwrap();
+        stop_delete();
+        assert_eq!(flag(), Some(false));
+    }
+
+    #[test]
+    fn switch_and_close_drive_the_dialog() {
+        show(data(), "a");
+        open(false);
+        switch_delete_mode();
+        assert!(matches!(state(), DialogState::Confirm { mode: DeleteMode::Permanent, .. }));
+        close_delete();
+        assert_eq!(state(), DialogState::Closed);
+        assert_eq!(SESSION.with_borrow(|s| s.delete.opened), None);
+    }
+
+    #[test]
+    fn is_link_of_a_plain_folder_is_false() {
+        assert!(!delete_flow::is_link(&std::env::temp_dir()));
     }
 }

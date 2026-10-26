@@ -322,6 +322,14 @@ pub fn skip_text(r: SkipReason) -> Option<&'static str> {
     }
 }
 
+/// True for a skip where the Recycle Bin did not take the item and nothing on the disk changed:
+/// the shell never got the path (`PATH_REFUSED`), the sink refused the item before any delete
+/// (`NOT_RECYCLABLE`), or the bin said the item is too large.
+pub fn left_in_place(r: SkipReason) -> bool {
+    let _ = (r, PATH_REFUSED, NOT_RECYCLABLE, DE_FILE_TOO_LARGE, HR_RECYCLE_SIZE_TOO_BIG);
+    false
+}
+
 /// COM on this thread for one operation: `CoInitializeEx` (apartment-threaded), balanced by
 /// `CoUninitialize` on drop only when this guard initialised it. A thread already in the other
 /// mode (`RPC_E_CHANGED_MODE`) keeps its COM and is not uninitialised.

@@ -42,8 +42,11 @@ pub struct RunProgress {
 /// What a finished delete does to the open scan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TreeAction {
-    /// The item is gone from the disk: it leaves the tree.
+    /// The item is gone from the disk: it leaves the tree. Until it has left it (the scan data
+    /// can be in use by a worker), the list still shows it.
     Detach,
+    /// The item is gone from the disk and has left the list.
+    Detached,
     /// The item is still on the disk and the run changed it: the tree stays, a rescan is offered.
     KeepAndOfferRescan,
     /// Nothing changed on the disk.
@@ -71,6 +74,8 @@ pub enum DialogEvent {
     /// The link that changes between the Recycle Bin and the permanent delete.
     SwitchMode,
     Confirm,
+    /// The check just before the delete refused the item. `text` says why.
+    Refuse { text: String },
     Progress { items: u64, bytes: u64 },
     /// `target_gone`: a check of the resolved path after the run found nothing there.
     Finished { outcome: Outcome, target_gone: bool },
@@ -123,11 +128,15 @@ fn other(mode: DeleteMode) -> DeleteMode {
 /// | still there, skips or removals  | `KeepAndOfferRescan` |
 /// | still there, nothing removed    | `Nothing`            |
 ///
-/// The mode does not change the action: a Recycle Bin move that left the item in its place is
-/// still a changed disk to look at again.
-pub fn tree_action(outcome: &Outcome, _mode: DeleteMode, target_gone: bool) -> TreeAction {
+/// One exception: a Recycle Bin run that removed nothing, where every skip is one the bin
+/// refused before anything changed (`recycle::left_in_place`), is `Nothing`. A rescan would show
+/// the same disk.
+pub fn tree_action(outcome: &Outcome, mode: DeleteMode, target_gone: bool) -> TreeAction {
+    let refused_by_bin = mode == DeleteMode::RecycleBin && crate::recycle::left_in_place(SkipReason::Locked);
     if target_gone {
         TreeAction::Detach
+    } else if refused_by_bin {
+        TreeAction::Nothing
     } else if !outcome.skipped.is_empty() || outcome.removed_items > 0 {
         TreeAction::KeepAndOfferRescan
     } else {
@@ -267,32 +276,58 @@ pub fn admin_hint(o: &Outcome) -> Option<&'static str> {
         .then_some("Restart as administrator")
 }
 
-/// The dialog for Delete (`shift` false) or Shift+Delete on `selected`. `Closed` when nothing is
-/// selected, the id is not in the tree, or a scan runs. Else `check(scan_root, path, is_dir)`
-/// decides: `Refused` with its text, or `Confirm` with the resolved path stored for the delete.
-/// `scan_root` is the root AS TYPED: the policy resolves it itself. `is_link(resolved)` is asked
-/// for a file item only (the scan records a link as a file).
-#[expect(clippy::too_many_arguments, reason = "the scan's parts plus the two seams the tests replace")]
-pub fn open_for(
+/// The refusal text when the check just before the delete finds another resolved path.
+pub const CHANGED_TEXT: &str = "This item changed. Open the dialog again.";
+/// The refusal text for an item gone from the disk, while it waits to leave the list.
+pub const GONE_PENDING: &str = "This item is already gone. Volatus removes it from the list when the scan data is free.";
+/// The refusal text for an item gone from the disk, after it left the list.
+pub const GONE_REMOVED: &str = "This item is already gone. Volatus removed it from the list.";
+/// The refusal text for an item gone from the disk that could not leave the list.
+pub const GONE_KEPT: &str = "This item is already gone. Scan again to update the list.";
+
+/// The check just before the delete: `Ok` only when it gives the same resolved path as the check
+/// at Open (`opened`). Else the text for the dialog: the refusal's, or `CHANGED_TEXT`.
+pub fn recheck(opened: &Path, again: Result<PathBuf, Refusal>) -> Result<(), String> {
+    let _ = (opened, again);
+    Ok(())
+}
+
+/// The text for a refusal at Open, and whether the item leaves the tree. Only a `Missing` item
+/// that `gone` (a strict "not found" check) confirms leaves it; `gone` is asked for `Missing` only.
+pub fn refusal_for(r: Refusal, gone: impl FnOnce() -> bool) -> (String, bool) {
+    let _ = gone;
+    (delete::refusal_text(r).to_string(), false)
+}
+
+/// What the result says about the list, for a tree action (ASD-STE100).
+#[cfg_attr(not(test), expect(dead_code, reason = "shown by the dialog in Task 7b"))]
+pub fn list_line(action: TreeAction) -> Option<&'static str> {
+    let _ = action;
+    None
+}
+
+/// The checked target for Delete or Shift+Delete on `selected`, with its node; `None` (no dialog)
+/// when nothing is selected, the id is not in the tree, or a scan runs. Else
+/// `check(scan_root, path, is_dir)` decides: a refusal, or the target with the resolved path
+/// stored for the delete. `scan_root` is the root AS TYPED: the policy resolves it itself.
+/// `is_link(resolved)` is asked for a file item only (the scan records a link as a file).
+pub fn open_check(
     tree: &Tree,
     counts: &[u64],
     selected: Option<NodeId>,
     scan: &ScanState,
     scan_root: &Path,
-    shift: bool,
     check: impl FnOnce(&Path, &Path, bool) -> Result<PathBuf, Refusal>,
     is_link: impl FnOnce(&Path) -> bool,
-) -> DialogState {
+) -> Option<(NodeId, Result<TargetInfo, Refusal>)> {
     // An id from another tree (a stale row) is not looked up.
-    let Some(node) = selected.filter(|n| can_start(scan) && (n.0 as usize) < counts.len()) else {
-        return DialogState::Closed;
-    };
+    let node = selected.filter(|n| can_start(scan) && (n.0 as usize) < counts.len())?;
     let is_dir = tree.node(node).is_dir;
     let target = check(scan_root, &tree.path(node), is_dir).map(|resolved| {
         let link = !is_dir && is_link(&resolved);
         target_info(tree, counts, node, resolved, link)
     });
-    next(DialogState::Closed, DialogEvent::Open { shift, target })
+    Some((node, target))
 }
 
 /// The dialog's view of `node` with its resolved path.
@@ -774,6 +809,28 @@ mod tests {
 
     // ---- open_for ----
 
+    /// The dialog for Delete (`shift` false) or Shift+Delete on `selected`. `Closed` when nothing is
+    /// selected, the id is not in the tree, or a scan runs. Else `check(scan_root, path, is_dir)`
+    /// decides: `Refused` with its text, or `Confirm` with the resolved path stored for the delete.
+    /// `scan_root` is the root AS TYPED: the policy resolves it itself. `is_link(resolved)` is asked
+    /// for a file item only (the scan records a link as a file).
+    #[expect(clippy::too_many_arguments, reason = "the scan's parts plus the two seams the tests replace")]
+    fn open_for(
+        tree: &Tree,
+        counts: &[u64],
+        selected: Option<NodeId>,
+        scan: &ScanState,
+        scan_root: &Path,
+        shift: bool,
+        check: impl FnOnce(&Path, &Path, bool) -> Result<PathBuf, Refusal>,
+        is_link: impl FnOnce(&Path) -> bool,
+    ) -> DialogState {
+        match open_check(tree, counts, selected, scan, scan_root, check, is_link) {
+            None => DialogState::Closed,
+            Some((_, target)) => next(DialogState::Closed, DialogEvent::Open { shift, target }),
+        }
+    }
+
     fn fake() -> Fake {
         Fake::with(&[(r"C:\data\big", true), (r"C:\data\lnk", false), (r"C:\data\big\a.bin", false)])
     }
@@ -802,13 +859,13 @@ mod tests {
         (state, seen.into_inner())
     }
 
-    fn done_scan() -> ScanState {
+    fn no_scan_running() -> ScanState {
         ScanState::Idle
     }
 
     #[test]
     fn open_for_a_folder_confirms_with_the_resolved_path() {
-        let (state, root) = open(Some("big"), &done_scan(), r"C:\data", false, false);
+        let (state, root) = open(Some("big"), &no_scan_running(), r"C:\data", false, false);
         let DialogState::Confirm { mode, target } = state else { panic!("{state:?}") };
         assert_eq!(mode, RecycleBin);
         assert_eq!(target.target.path, PathBuf::from(r"c:\data\big"));
@@ -819,43 +876,43 @@ mod tests {
 
     #[test]
     fn open_for_with_shift_is_the_permanent_delete() {
-        let (state, _) = open(Some("big"), &done_scan(), r"C:\data", true, false);
+        let (state, _) = open(Some("big"), &no_scan_running(), r"C:\data", true, false);
         assert!(matches!(state, DialogState::Confirm { mode: Permanent, .. }), "{state:?}");
     }
 
     #[test]
     fn open_for_a_link_names_it_as_a_link() {
-        let (state, _) = open(Some("lnk"), &done_scan(), r"C:\data", false, true);
+        let (state, _) = open(Some("lnk"), &no_scan_running(), r"C:\data", false, true);
         let DialogState::Confirm { target, .. } = state else { panic!("{state:?}") };
         assert!(target.is_link && target.target.is_link);
     }
 
     #[test]
     fn open_for_a_folder_does_not_ask_if_it_is_a_link() {
-        let (state, _) = open(Some("big"), &done_scan(), r"C:\data", false, true);
+        let (state, _) = open(Some("big"), &no_scan_running(), r"C:\data", false, true);
         let DialogState::Confirm { target, .. } = state else { panic!("{state:?}") };
         assert!(!target.is_link);
     }
 
     #[test]
     fn open_for_the_scan_root_is_refused() {
-        let (state, _) = open(Some(r"C:\data"), &done_scan(), r"C:\data", false, false);
+        let (state, _) = open(Some(r"C:\data"), &no_scan_running(), r"C:\data", false, false);
         assert_eq!(state, DialogState::Refused { text: delete::refusal_text(Refusal::NotUnderRoot).into() });
     }
 
     #[test]
     fn open_for_an_item_gone_from_the_disk_is_refused_as_missing() {
-        let (state, _) = open(Some("b.bin"), &done_scan(), r"C:\data", false, false);
+        let (state, _) = open(Some("b.bin"), &no_scan_running(), r"C:\data", false, false);
         assert_eq!(state, DialogState::Refused { text: delete::refusal_text(Refusal::Missing).into() });
     }
 
     #[test]
     fn open_for_nothing_selected_or_while_scanning_is_closed() {
-        assert_eq!(open(None, &done_scan(), r"C:\data", false, false), (DialogState::Closed, None));
+        assert_eq!(open(None, &no_scan_running(), r"C:\data", false, false), (DialogState::Closed, None));
         let scanning = ScanState::Scanning { files: 1, dirs: 1 };
         assert_eq!(open(Some("big"), &scanning, r"C:\data", false, false), (DialogState::Closed, None));
         // A real open proves the closed results above are not a stub's.
-        assert!(matches!(open(Some("big"), &done_scan(), r"C:\data", false, false).0, DialogState::Confirm { .. }));
+        assert!(matches!(open(Some("big"), &no_scan_running(), r"C:\data", false, false).0, DialogState::Confirm { .. }));
     }
 
     #[test]
@@ -1012,6 +1069,105 @@ mod tests {
         let msgs: Vec<DeleteMsg> = rx.try_iter().collect();
         assert_eq!(msgs.len(), 1, "{msgs:?}");
         assert!(matches!(&msgs[0], DeleteMsg::Finished { generation: 3, outcome, .. } if *outcome == failed_outcome(&t)));
+    }
+
+    // ---- the second check, the gone item, the bin refusal ----
+
+    #[test]
+    fn next_refuse_from_confirm_only() {
+        let refuse = DialogEvent::Refuse { text: CHANGED_TEXT.into() };
+        for mode in [RecycleBin, Permanent] {
+            assert_eq!(next(confirm(mode), refuse.clone()), DialogState::Refused { text: CHANGED_TEXT.into() });
+        }
+        for from in [DialogState::Closed, running(Permanent, false), done_state(RecycleBin)] {
+            assert_eq!(next(from.clone(), refuse.clone()), from);
+        }
+    }
+
+    #[test]
+    fn recheck_same_path_is_ok_and_anything_else_says_why() {
+        let opened = Path::new(r"c:\data\big");
+        assert_eq!(recheck(opened, Ok(PathBuf::from(r"c:\data\big"))), Ok(()));
+        assert_eq!(recheck(opened, Ok(PathBuf::from(r"c:\data\other"))), Err(CHANGED_TEXT.to_string()));
+        assert_eq!(recheck(opened, Err(Refusal::Missing)), Err(delete::refusal_text(Refusal::Missing).to_string()));
+    }
+
+    #[test]
+    fn recheck_with_the_probe_fake() {
+        let e = env();
+        let check = |fs: &Fake| check_target_in(Path::new(r"C:\data"), Path::new(r"C:\data\big"), true, fs, &e);
+        let opened = check(&fake()).unwrap();
+        // The same disk: the same path.
+        assert_eq!(recheck(&opened, check(&fake())), Ok(()));
+        // The folder went away after Open.
+        let gone = Fake::with(&[(r"C:\data\lnk", false)]);
+        assert_eq!(recheck(&opened, check(&gone)), Err(delete::refusal_text(Refusal::Missing).to_string()));
+        // A file now has the folder's name.
+        let file = Fake::with(&[(r"C:\data\big", false)]);
+        assert_eq!(recheck(&opened, check(&file)), Err(delete::refusal_text(Refusal::KindChanged).to_string()));
+        // The name now resolves to another place (a link in the parent).
+        let moved = Fake::with(&[(r"C:\elsewhere\big", true)]).link(r"C:\data", r"C:\elsewhere");
+        assert_eq!(recheck(&opened, check(&moved)), Err(CHANGED_TEXT.to_string()));
+    }
+
+    #[test]
+    fn refusal_for_a_gone_item_removes_it_only_after_a_clean_not_found() {
+        assert_eq!(refusal_for(Refusal::Missing, || true), (GONE_PENDING.to_string(), true));
+        assert_eq!(refusal_for(Refusal::Missing, || false), (delete::refusal_text(Refusal::Missing).to_string(), false));
+        let asked = std::cell::Cell::new(false);
+        let got = refusal_for(Refusal::ProtectedFolder, || {
+            asked.set(true);
+            true
+        });
+        assert_eq!(got, (delete::refusal_text(Refusal::ProtectedFolder).to_string(), false));
+        assert!(!asked.get(), "gone is asked for Missing only");
+    }
+
+    #[test]
+    fn gone_texts_are_plain_and_differ() {
+        for t in [GONE_PENDING, GONE_REMOVED, GONE_KEPT, CHANGED_TEXT] {
+            assert!(t.ends_with('.'), "{t}");
+        }
+        assert!(GONE_REMOVED.contains("removed it from the list"));
+        assert!(GONE_KEPT.contains("Scan again"));
+    }
+
+    #[test]
+    fn list_line_by_tree_action() {
+        assert_eq!(list_line(TreeAction::Detached), Some("Volatus removed the item from the list."));
+        assert!(list_line(TreeAction::Detach).unwrap().contains("still shows"));
+        assert!(list_line(TreeAction::KeepAndOfferRescan).unwrap().contains("Scan again"));
+        assert_eq!(list_line(TreeAction::Nothing), None);
+    }
+
+    #[test]
+    fn tree_action_a_bin_refusal_that_changed_nothing_is_nothing() {
+        use crate::recycle::{NOT_IN_BIN, NOT_RECYCLABLE, PATH_REFUSED};
+        let with = |skips: &[SkipReason], removed| Outcome {
+            removed_items: removed,
+            skipped: skips.iter().map(|r| skip(r"\\?\C:\data\big", *r)).collect(),
+            ..Outcome::default()
+        };
+        let refused = with(&[SkipReason::Other(NOT_RECYCLABLE)], 0);
+        assert_eq!(tree_action(&refused, RecycleBin, false), TreeAction::Nothing);
+        assert_eq!(tree_action(&with(&[SkipReason::Other(PATH_REFUSED)], 0), RecycleBin, false), TreeAction::Nothing);
+        // Gone after all: it leaves the tree.
+        assert_eq!(tree_action(&refused, RecycleBin, true), TreeAction::Detach);
+        // A skip that does not prove nothing changed keeps the rescan offer.
+        assert_eq!(tree_action(&with(&[SkipReason::Other(NOT_IN_BIN)], 0), RecycleBin, false), TreeAction::KeepAndOfferRescan);
+        assert_eq!(tree_action(&with(&[SkipReason::Locked], 0), RecycleBin, false), TreeAction::KeepAndOfferRescan);
+        // The permanent delete has no bin refusals.
+        assert_eq!(tree_action(&refused, Permanent, false), TreeAction::KeepAndOfferRescan);
+    }
+
+    #[test]
+    fn open_check_gives_the_node_with_its_target() {
+        let (tree, counts) = tree();
+        let big = find(&tree, "big");
+        let got = open_check(&tree, &counts, Some(big), &ScanState::Idle, Path::new(r"C:\data"), |_, _, _| Err(Refusal::Missing), |_| false);
+        assert_eq!(got, Some((big, Err(Refusal::Missing))));
+        let none = open_check(&tree, &counts, None, &ScanState::Idle, Path::new(r"C:\data"), |_, _, _| Err(Refusal::Missing), |_| false);
+        assert_eq!(none, None);
     }
 
     #[test]
