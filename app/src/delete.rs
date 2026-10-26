@@ -24,6 +24,8 @@ pub enum Refusal {
     Missing,
     KindChanged,
     ScanRunning,
+    /// The root or the item could not be resolved to a real path, or the environment is unknown.
+    Unresolved,
 }
 
 /// The item the user chose, with the scan's numbers for it.
@@ -42,6 +44,8 @@ pub struct DeleteTarget {
 pub trait Probe {
     fn exists(&self, p: &Path) -> bool;
     fn is_dir(&self, p: &Path) -> bool;
+    /// The real path of `p` (links, `..` and trailing dots resolved), or `None` if unknown.
+    fn resolve(&self, p: &Path) -> Option<PathBuf>;
 }
 
 /// The real file system. A link is not followed: it counts as a file, as in the scan.
@@ -53,6 +57,9 @@ impl Probe for RealFs {
     }
     fn is_dir(&self, p: &Path) -> bool {
         std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_dir())
+    }
+    fn resolve(&self, p: &Path) -> Option<PathBuf> {
+        std::fs::canonicalize(p).ok()
     }
 }
 
@@ -67,31 +74,38 @@ pub struct Env {
 }
 
 impl Env {
-    /// Reads the process environment. A missing system variable falls back to its usual path, so
-    /// the list never loses an entry silently. `user_profile` has no usual path; an empty one is
-    /// left out of the list.
-    pub fn from_process() -> Env {
-        let var = |name: &str, fallback: &str| {
-            std::env::var(name).ok().filter(|v| !v.is_empty()).unwrap_or_else(|| fallback.to_string())
-        };
-        Env {
-            windir: var("SystemRoot", r"C:\Windows"),
-            program_files: var("ProgramFiles", r"C:\Program Files"),
-            program_files_x86: var("ProgramFiles(x86)", r"C:\Program Files (x86)"),
-            program_data: var("ProgramData", r"C:\ProgramData"),
-            user_profile: var("USERPROFILE", ""),
-        }
+    pub fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Option<Env> {
+        let _ = get;
+        None
+    }
+
+    pub fn from_process() -> Option<Env> {
+        None
     }
 }
 
-/// The folders that may not be deleted as the item itself: `Windows` first (it also protects
-/// everything inside it), then the four whose children are allowed. Empty values are left out.
-pub fn protected_folders(env: &Env) -> Vec<PathBuf> {
-    [&env.windir, &env.program_files, &env.program_files_x86, &env.program_data, &env.user_profile]
-        .into_iter()
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .collect()
+/// How a protected entry applies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scope {
+    /// The folder and everything inside it.
+    Subtree,
+    /// The folder itself only.
+    Exact,
+}
+
+pub fn protected_folders(env: &Env) -> Vec<(PathBuf, Scope)> {
+    let mut v = vec![(PathBuf::from(&env.windir), Scope::Subtree)];
+    for p in [&env.program_files, &env.program_files_x86, &env.program_data, &env.user_profile] {
+        if !p.is_empty() {
+            v.push((PathBuf::from(p), Scope::Exact));
+        }
+    }
+    v
+}
+
+pub fn refusal_text(r: Refusal) -> &'static str {
+    let _ = r;
+    ""
 }
 
 /// Lowercase, `\\?\` stripped, `/` as `\`, trailing separators trimmed. The form paths compare in.
@@ -110,7 +124,10 @@ fn within(child: &str, parent: &str) -> bool {
 /// `NotUnderRoot`, `DriveRoot`, `NotUnderRoot` (the root itself), `ProtectedFolder`, `Missing`,
 /// `KindChanged`. Reads the real environment for the protected list.
 pub fn check_target(root: &Path, target: &Path, is_dir: bool, fs: &dyn Probe) -> Result<(), Refusal> {
-    check_target_in(root, target, is_dir, fs, &Env::from_process())
+    match Env::from_process() {
+        Some(env) => check_target_in(root, target, is_dir, fs, &env),
+        None => Err(Refusal::Unresolved),
+    }
 }
 
 /// `check_target` with the environment given, so tests never read the real one.
@@ -134,7 +151,7 @@ pub fn check_target_in(
         return Err(Refusal::NotUnderRoot);
     }
     // `protected_folders` lists `Windows` first: it guards everything inside; the rest, only itself.
-    let list: Vec<String> = protected_folders(env).iter().map(|p| norm(p)).collect();
+    let list: Vec<String> = protected_folders(env).iter().map(|p| norm(&p.0)).collect();
     let hit = list.iter().enumerate().any(|(i, p)| if i == 0 { within(&t, p) } else { t == *p });
     if hit {
         return Err(Refusal::ProtectedFolder);
@@ -229,21 +246,69 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    /// A map-backed file system: key is the `norm` form, value is `is_dir`.
-    struct Fake(HashMap<String, bool>);
+    /// A map-backed file system. `items`: `norm` path -> `is_dir`. `links`: a path (and what is
+    /// under it) that resolves to another path. `broken`: paths `resolve` cannot answer for.
+    /// `resolve` also does `..` and trailing dots, as `canonicalize` does.
+    struct Fake {
+        items: HashMap<String, bool>,
+        links: Vec<(String, String)>,
+        broken: Vec<String>,
+    }
 
     impl Fake {
         fn with(items: &[(&str, bool)]) -> Fake {
-            Fake(items.iter().map(|(p, d)| (norm(Path::new(p)), *d)).collect())
+            Fake {
+                items: items.iter().map(|(p, d)| (norm(Path::new(p)), *d)).collect(),
+                links: Vec::new(),
+                broken: Vec::new(),
+            }
+        }
+        fn link(mut self, from: &str, to: &str) -> Fake {
+            self.links.push((norm(Path::new(from)), norm(Path::new(to))));
+            self
+        }
+        fn broken(mut self, p: &str) -> Fake {
+            self.broken.push(norm(Path::new(p)));
+            self
         }
     }
 
     impl Probe for Fake {
         fn exists(&self, p: &Path) -> bool {
-            self.0.contains_key(&norm(p))
+            self.items.contains_key(&norm(p))
         }
         fn is_dir(&self, p: &Path) -> bool {
-            self.0.get(&norm(p)).copied().unwrap_or(false)
+            self.items.get(&norm(p)).copied().unwrap_or(false)
+        }
+        fn resolve(&self, p: &Path) -> Option<PathBuf> {
+            let mut parts: Vec<&str> = Vec::new();
+            let n = p.to_string_lossy().to_lowercase().replace('/', "\\");
+            let n = n.strip_prefix(r"\\?\").unwrap_or(&n).to_string();
+            for c in n.split('\\') {
+                match c {
+                    "" | "." => {}
+                    ".." => {
+                        if parts.len() > 1 {
+                            parts.pop();
+                        }
+                    }
+                    c => parts.push(c.trim_end_matches(['.', ' '])),
+                }
+            }
+            let mut out = parts.join("\\");
+            if !out.contains('\\') {
+                out.push('\\');
+            }
+            let key = out.trim_end_matches('\\').to_string();
+            if self.broken.iter().any(|b| within(&key, b)) {
+                return None;
+            }
+            for (from, to) in &self.links {
+                if let Some(rest) = key.strip_prefix(from.as_str()).filter(|r| r.is_empty() || r.starts_with('\\')) {
+                    return Some(PathBuf::from(format!("{to}{rest}")));
+                }
+            }
+            Some(PathBuf::from(out))
         }
     }
 
@@ -334,8 +399,7 @@ mod tests {
     }
 
     #[test]
-    fn protected_list_holds_on_every_volume_root_scan() {
-        // The user profile is refused even when the scan started at the profile's parent.
+    fn user_profile_is_refused_when_the_scan_starts_above_it() {
         let fs = all_dirs(&[]);
         assert_eq!(check(r"C:\Users", r"C:\Users\dev", &fs), Err(Refusal::ProtectedFolder));
     }
@@ -392,13 +456,150 @@ mod tests {
     }
 
     #[test]
-    fn protected_folders_come_from_the_env_and_skip_empty_values() {
+    fn protected_folders_come_from_the_env_with_a_scope_and_skip_empty_values() {
         let mut e = env();
         e.user_profile = String::new();
         let list = protected_folders(&e);
         assert_eq!(list.len(), 4);
-        assert_eq!(list[0], PathBuf::from(r"C:\Windows"));
-        assert_eq!(protected_folders(&env()).len(), 5);
+        assert!(list.contains(&(PathBuf::from(r"C:\Windows"), Scope::Subtree)));
+        assert!(list.contains(&(PathBuf::from(r"C:\ProgramData"), Scope::Exact)));
+        let all = protected_folders(&env());
+        assert_eq!(all.len(), 5);
+        assert!(all.contains(&(PathBuf::from(r"C:\Users\dev"), Scope::Exact)));
+        assert_eq!(all.iter().filter(|(_, sc)| *sc == Scope::Subtree).count(), 1);
+    }
+
+    #[test]
+    fn other_volumes_have_the_same_protected_folders() {
+        let fs = all_dirs(&[r"D:\Program Files\X", r"D:\Windows.old"]);
+        for p in [
+            r"D:\Windows",
+            r"D:\Windows\x",
+            r"d:\WINDOWS\System32",
+            r"D:\Program Files",
+            r"D:\Program Files (x86)",
+            r"D:\ProgramData",
+        ] {
+            assert_eq!(check(r"D:\", p, &fs), Err(Refusal::ProtectedFolder), "{p}");
+        }
+        assert_eq!(check(r"D:\", r"D:\Program Files\X", &fs), Ok(()));
+        assert_eq!(check(r"D:\", r"D:\Windows.old", &fs), Ok(()));
+    }
+
+    #[test]
+    fn a_root_with_dot_dot_is_resolved_before_the_checks() {
+        let fs = all_dirs(&[]);
+        assert_eq!(check(r"C:\x\..", r"C:\x\..\Windows\System32", &fs), Err(Refusal::ProtectedFolder));
+    }
+
+    #[test]
+    fn a_root_with_a_trailing_dot_is_resolved_before_the_checks() {
+        let fs = all_dirs(&[]);
+        assert_eq!(check(r"C:\Windows.", r"C:\Windows.\System32", &fs), Err(Refusal::ProtectedFolder));
+    }
+
+    #[test]
+    fn a_root_that_is_a_junction_into_windows_is_refused() {
+        let fs = all_dirs(&[r"C:\Link\x"]).link(r"C:\Link", r"C:\Windows");
+        assert_eq!(check(r"C:\Link", r"C:\Link\x", &fs), Err(Refusal::ProtectedFolder));
+    }
+
+    #[test]
+    fn a_link_item_is_not_followed() {
+        // The link points into Windows, but the item is the link itself: only its parent resolves.
+        let fs = Fake::with(&[(r"C:\data\lnk", false)]).link(r"C:\data\lnk", r"C:\Windows");
+        let got = check_target_in(Path::new(r"C:\data"), Path::new(r"C:\data\lnk"), false, &fs, &env());
+        assert_eq!(got, Ok(()));
+    }
+
+    #[test]
+    fn an_unresolved_root_is_unresolved() {
+        let fs = all_dirs(&[r"C:\data\x"]).broken(r"C:\gone");
+        assert_eq!(check(r"C:\gone", r"C:\data\x", &fs), Err(Refusal::Unresolved));
+    }
+
+    #[test]
+    fn an_unresolved_item_parent_is_unresolved() {
+        let fs = all_dirs(&[r"C:\data\sub\x"]).broken(r"C:\data\sub");
+        assert_eq!(check(r"C:\data", r"C:\data\sub\x", &fs), Err(Refusal::Unresolved));
+    }
+
+    #[test]
+    fn unresolved_root_and_item_together_is_unresolved() {
+        let fs = all_dirs(&[]).broken(r"C:\");
+        assert_eq!(check(r"C:\data", r"C:\data\x", &fs), Err(Refusal::Unresolved));
+    }
+
+    fn lookup(pairs: &[(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
+        let pairs = pairs.to_vec();
+        move |k| pairs.iter().find(|(n, _)| *n == k).map(|(_, v)| v.to_string())
+    }
+
+    const FULL: [(&str, &str); 5] = [
+        ("SystemRoot", r"C:\Windows"),
+        ("ProgramFiles", r"C:\Program Files"),
+        ("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+        ("ProgramData", r"C:\ProgramData"),
+        ("USERPROFILE", r"C:\Users\dev"),
+    ];
+
+    #[test]
+    fn from_lookup_reads_every_value() {
+        let e = Env::from_lookup(lookup(&FULL)).expect("env");
+        assert_eq!(e.windir, r"C:\Windows");
+        assert_eq!(e.program_files, r"C:\Program Files");
+        assert_eq!(e.program_files_x86, r"C:\Program Files (x86)");
+        assert_eq!(e.program_data, r"C:\ProgramData");
+        assert_eq!(e.user_profile, r"C:\Users\dev");
+    }
+
+    #[test]
+    fn from_lookup_without_the_user_profile_is_none() {
+        let mut pairs = FULL.to_vec();
+        pairs.retain(|(k, _)| *k != "USERPROFILE");
+        assert!(Env::from_lookup(lookup(&pairs)).is_none());
+        pairs.push(("USERPROFILE", ""));
+        assert!(Env::from_lookup(lookup(&pairs)).is_none());
+    }
+
+    #[test]
+    fn from_lookup_without_windir_is_none() {
+        let mut pairs = FULL.to_vec();
+        pairs.retain(|(k, _)| *k != "SystemRoot");
+        assert!(Env::from_lookup(lookup(&pairs)).is_none());
+        pairs.push(("SystemRoot", ""));
+        assert!(Env::from_lookup(lookup(&pairs)).is_none());
+    }
+
+    #[test]
+    fn from_lookup_prefers_program_w6432_for_program_files() {
+        let mut pairs = FULL.to_vec();
+        pairs.retain(|(k, _)| *k != "ProgramFiles");
+        pairs.push(("ProgramFiles", r"C:\Program Files (x86)"));
+        pairs.push(("ProgramW6432", r"C:\Program Files"));
+        let e = Env::from_lookup(lookup(&pairs)).expect("env");
+        assert_eq!(e.program_files, r"C:\Program Files");
+    }
+
+    #[test]
+    fn refusal_text_covers_every_refusal() {
+        let all = [
+            Refusal::NotUnderRoot,
+            Refusal::ProtectedFolder,
+            Refusal::DriveRoot,
+            Refusal::Missing,
+            Refusal::KindChanged,
+            Refusal::ScanRunning,
+            Refusal::Unresolved,
+        ];
+        let mut texts: Vec<&str> = all.iter().map(|r| refusal_text(*r)).collect();
+        for t in &texts {
+            assert!(t.ends_with('.'), "{t:?}");
+        }
+        texts.sort();
+        texts.dedup();
+        assert_eq!(texts.len(), all.len(), "texts must differ");
+        assert!(refusal_text(Refusal::Unresolved).contains("real path"));
     }
 
     #[test]
@@ -451,7 +652,7 @@ mod tests {
         let o = Outcome { removed_items: 1, removed_bytes: 5000, ..Outcome::default() };
         let lines = summary_lines(DeleteMode::RecycleBin, &o);
         assert_eq!(lines[0], "Moved 1 item to the Recycle Bin.");
-        assert!(has(&lines, "Disk space is freed only when you empty the Recycle Bin."), "{lines:?}");
+        assert!(has(&lines, "Windows frees the disk space only when you empty the Recycle Bin."), "{lines:?}");
     }
 
     #[test]
@@ -477,7 +678,7 @@ mod tests {
     fn summary_stopped() {
         let o = Outcome { removed_items: 4, stopped: true, ..Outcome::default() };
         let lines = summary_lines(DeleteMode::Permanent, &o);
-        assert!(has(&lines, "You stopped the delete."), "{lines:?}");
+        assert!(has(&lines, "You stopped the operation."), "{lines:?}");
         assert!(has(&lines, "Items that Volatus removed stay removed."), "{lines:?}");
     }
 
