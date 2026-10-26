@@ -22,7 +22,7 @@ use std::cell::{Cell, RefCell};
 use std::path::{Component, Path, PathBuf};
 use windows::Win32::Foundation::{E_ABORT, E_FAIL, E_INVALIDARG, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{ClientToScreen, ScreenToClient};
-use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoTaskMemFree};
+use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoTaskMemFree, CoUninitialize};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, GetKeyState, SetFocus, VIRTUAL_KEY};
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::Shell::{
@@ -302,8 +302,17 @@ pub fn act(cmd: Cmd, path: &Path, is_dir: bool) -> Result<(), String> {
 /// Explore Folder (`act`) for the item at `path` on a new thread with its own COM (STA), so a file
 /// manager that blocks `SHOpenFolderAndSelectItems` does not block the window. `done` gets the
 /// result on that thread. Returns at once.
-pub fn explore_on_worker(_path: PathBuf, _is_dir: bool, _done: impl FnOnce(Result<(), String>) + Send + 'static) {
-    unimplemented!("explore_on_worker")
+pub fn explore_on_worker(path: PathBuf, is_dir: bool, done: impl FnOnce(Result<(), String>) + Send + 'static) {
+    std::thread::spawn(move || {
+        // `act` starts COM on this thread (`com_ready`) and parses `path` here: an id list is not sent.
+        let result = act(Cmd::ExploreFolder, &path, is_dir);
+        if COM.get() == Some(true) {
+            // SAFETY: pairs the `CoInitializeEx` of `com_ready` on this thread, which ends here; the
+            // id list was freed when `act` returned.
+            unsafe { CoUninitialize() };
+        }
+        done(result);
+    });
 }
 
 /// `ShellExecuteExW` of `info`, shown as a normal window.
@@ -317,6 +326,7 @@ fn execute(mut info: SHELLEXECUTEINFOW) -> windows::core::Result<()> {
 /// The result of `SHOpenFolderAndSelectItems` as Explore Folder reads it. `E_ABORT` is opened: with
 /// another file manager as the handler of folders (OneCommander on the owner's machine, CM-P4 live
 /// check), the folder opens in it and the call gives `E_ABORT`, as it cannot select the file there.
+/// This can hide a real failure that also gives `E_ABORT`: then no note shows although nothing opened.
 fn opened(result: windows::core::Result<()>) -> windows::core::Result<()> {
     match result {
         Err(e) if e.code() == E_ABORT => Ok(()),

@@ -948,7 +948,19 @@ fn open_menu(ui: &MainWindow, src: Source, hit: Option<NodeId>, at: menu::At) {
         (menu::Picked::Volatus(menu::Cmd::Rescan), _) => rescan(ui),
         (menu::Picked::Volatus(menu::Cmd::ShowFolder), _) => open_node(ui, request.node),
         (menu::Picked::Volatus(cmd), menu::Prepared::Ready { path, .. }) => {
-            let act = |cmd, p: &std::path::Path| shell::act(cmd, p, request.is_dir).inspect_err(|e| eprintln!("{e}"));
+            let act = |cmd, p: &std::path::Path| match cmd {
+                // On a worker (another file manager can block it); its note comes through the event loop.
+                menu::Cmd::ExploreFolder => {
+                    let weak = ui.as_weak();
+                    shell::explore_on_worker(p.to_path_buf(), request.is_dir, move |result| {
+                        if let Some(note) = action_note(cmd, result.inspect_err(|e| eprintln!("{e}")).is_err()) {
+                            let _ = weak.upgrade_in_event_loop(move |ui| ui.set_elevate_note(note.into()));
+                        }
+                    });
+                    Ok(())
+                }
+                _ => shell::act(cmd, p, request.is_dir).inspect_err(|e| eprintln!("{e}")),
+            };
             if let Some(note) = run_action(cmd, &path, request.is_dir, act) {
                 ui.set_elevate_note(note.into());
             }
@@ -980,26 +992,32 @@ fn hit_at(rects: &[Rect], moving: Option<Move>, t: f64, view: (f64, f64), x: f64
 
 /// Runs a Volatus menu item through `act` and gives the note to show when it fails. `act` gets the
 /// command and the path to use (a command prompt gets `menu::terminal_folder`). Show this folder
-/// and Rescan are not actions of the shell: no call, no note.
+/// and Rescan are not actions of the shell: no call, no note. An `act` that runs on a worker (Explore
+/// Folder) gives `Ok` at once and shows its note itself (`action_note`).
 fn run_action(
     cmd: menu::Cmd,
     path: &std::path::Path,
     is_dir: bool,
     act: impl FnOnce(menu::Cmd, &std::path::Path) -> Result<(), String>,
 ) -> Option<String> {
-    let (used, note) = match cmd {
-        menu::Cmd::ExploreFolder => (Cow::Borrowed(path), "Volatus cannot open the folder."),
-        menu::Cmd::CommandPrompt => (Cow::Owned(menu::terminal_folder(path, is_dir)), "Volatus cannot open a command prompt."),
-        menu::Cmd::CopyPath => (Cow::Borrowed(path), "Volatus cannot copy the path."),
+    let used = match cmd {
+        menu::Cmd::ExploreFolder | menu::Cmd::CopyPath => Cow::Borrowed(path),
+        menu::Cmd::CommandPrompt => Cow::Owned(menu::terminal_folder(path, is_dir)),
         menu::Cmd::ShowFolder | menu::Cmd::Rescan => return None,
     };
-    act(cmd, &used).err().map(|_| note.to_string())
+    action_note(cmd, act(cmd, &used).is_err()).map(str::to_string)
 }
 
 /// The note to show after the Volatus menu item `cmd` ran: its own note when it `failed`, else
 /// none. Show this folder and Rescan have none.
-fn action_note(_cmd: menu::Cmd, _failed: bool) -> Option<&'static str> {
-    unimplemented!("action_note")
+fn action_note(cmd: menu::Cmd, failed: bool) -> Option<&'static str> {
+    let note = match cmd {
+        menu::Cmd::ExploreFolder => "Volatus cannot open the folder.",
+        menu::Cmd::CommandPrompt => "Volatus cannot open a command prompt.",
+        menu::Cmd::CopyPath => "Volatus cannot copy the path.",
+        menu::Cmd::ShowFolder | menu::Cmd::Rescan => return None,
+    };
+    failed.then_some(note)
 }
 
 /// True when the top bar offers Rescan: a finished scan found changed on disk.
