@@ -1,7 +1,7 @@
 //! Tree and treemap view logic: file counts, row flattening, sorting, expansion, selection
 //! helpers and treemap hit-testing. Plain functions, no Slint types, so it is unit tested.
 
-use crate::model::display_name;
+use crate::model::{Unit, display_name};
 use scan::{NodeId, Tree};
 use std::cmp::Ordering;
 use std::collections::HashSet;
@@ -235,14 +235,14 @@ pub fn map_note(tree: &Tree, root: NodeId, rects: &[Rect], has_area: bool) -> &'
 
 /// The label of folder `node` on its frame: (name with a trailing `\`, size), as
 /// `("Local\\", "306.0 GB")`.
-pub fn frame_label(tree: &Tree, node: NodeId) -> (String, String) {
-    (format!("{}\\", display_name(tree.name(node))), crate::model::format_size(tree.node(node).size, crate::model::Unit::Dynamic))
+pub fn frame_label(tree: &Tree, node: NodeId, _unit: Unit) -> (String, String) {
+    (format!("{}\\", display_name(tree.name(node))), crate::model::format_size(tree.node(node).size, Unit::Dynamic))
 }
 
 /// The label of file `node` on its tile: (name, size), as `("pagefile.sys", "64.0 GB")`. The
 /// name is kept unchanged; the window cuts it with "…" when it does not fit.
-pub fn file_label(tree: &Tree, node: NodeId) -> (String, String) {
-    (display_name(tree.name(node)).into_owned(), crate::model::format_size(tree.node(node).size, crate::model::Unit::Dynamic))
+pub fn file_label(tree: &Tree, node: NodeId, _unit: Unit) -> (String, String) {
+    (display_name(tree.name(node)).into_owned(), crate::model::format_size(tree.node(node).size, Unit::Dynamic))
 }
 
 /// Text of the crumb that stands for the folders `crumbs` leaves out.
@@ -279,7 +279,7 @@ pub fn crumbs(tree: &Tree, view_root: NodeId) -> Vec<(Option<NodeId>, String)> {
 /// file) or the number of files under it (a folder), as `("C:\\Windows\\a.dll", "12.0 MB. DLL
 /// file.")` or `("C:\\Users", "306.0 GB. 1,234 files.")`. Every name of the path goes through
 /// `display_name`; the file type comes from the stored name, so a hidden character cannot change it.
-pub fn tooltip_lines(tree: &Tree, counts: &[u64], node: NodeId) -> (String, String) {
+pub fn tooltip_lines(tree: &Tree, counts: &[u64], node: NodeId, _unit: Unit) -> (String, String) {
     let n = tree.node(node);
     let what = if n.is_dir {
         let files = counts[node.0 as usize];
@@ -291,7 +291,7 @@ pub fn tooltip_lines(tree: &Tree, counts: &[u64], node: NodeId) -> (String, Stri
         }
     };
     let path = display_name(&tree.path(node).to_string_lossy()).into_owned();
-    (path, format!("{}. {what}", crate::model::format_size(n.size, crate::model::Unit::Dynamic)))
+    (path, format!("{}. {what}", crate::model::format_size(n.size, Unit::Dynamic)))
 }
 
 /// Where a tooltip `size` long starts on one axis of a map `extent` long, for the pointer at
@@ -325,8 +325,8 @@ pub fn row_spoken(name: &str, size: &str, percent: &str, files: u64) -> String {
 
 /// The value of the treemap for a screen reader: the name and size of `node`, the selected node,
 /// as `"kernel32.dll, 12.0 MB"`. The name goes through `display_name`.
-pub fn map_value(tree: &Tree, node: NodeId) -> String {
-    format!("{}, {}", display_name(tree.name(node)), crate::model::format_size(tree.node(node).size, crate::model::Unit::Dynamic))
+pub fn map_value(tree: &Tree, node: NodeId, _unit: Unit) -> String {
+    format!("{}, {}", display_name(tree.name(node)), crate::model::format_size(tree.node(node).size, Unit::Dynamic))
 }
 
 /// Order of two siblings: the chosen column, flipped if descending, then name, then id.
@@ -1018,19 +1018,25 @@ mod tests {
     #[test]
     fn frame_label_folder_is_name_with_backslash_and_size() {
         let (t, local) = one_folder("Local", 306 * (1 << 30));
-        assert_eq!(frame_label(&t, local), ("Local\\".to_string(), "306.0 GB".to_string()));
+        assert_eq!(frame_label(&t, local, Unit::Dynamic), ("Local\\".to_string(), "306.0 GB".to_string()));
+    }
+
+    #[test]
+    fn frame_label_uses_the_unit() {
+        let (t, local) = one_folder("Local", 306 * (1 << 30));
+        assert_eq!(frame_label(&t, local, Unit::Mb).1, "313,344.0 MB");
     }
 
     #[test]
     fn frame_label_unicode_name_is_kept_unchanged() {
         let (t, folder) = one_folder("Données 日本語 ✓", 2048);
-        assert_eq!(frame_label(&t, folder), ("Données 日本語 ✓\\".to_string(), "2.0 KB".to_string()));
+        assert_eq!(frame_label(&t, folder, Unit::Dynamic), ("Données 日本語 ✓\\".to_string(), "2.0 KB".to_string()));
     }
 
     #[test]
     fn frame_label_name_with_a_right_to_left_override_shows_a_placeholder() {
         let (t, folder) = one_folder("invoice\u{202E}fdp", 1);
-        assert_eq!(frame_label(&t, folder).0, "invoice\u{FFFD}fdp\\");
+        assert_eq!(frame_label(&t, folder, Unit::Dynamic).0, "invoice\u{FFFD}fdp\\");
     }
 
     // ---- file_label ----
@@ -1043,34 +1049,40 @@ mod tests {
     }
 
     #[test]
+    fn file_label_uses_the_unit() {
+        let (t, file) = one_file("pagefile.sys", 64 * (1 << 30));
+        assert_eq!(file_label(&t, file, Unit::Mb).1, "65,536.0 MB");
+    }
+
+    #[test]
     fn file_label_file_is_name_and_size() {
         let (t, file) = one_file("pagefile.sys", 64 * (1 << 30));
-        assert_eq!(file_label(&t, file), ("pagefile.sys".to_string(), "64.0 GB".to_string()));
+        assert_eq!(file_label(&t, file, Unit::Dynamic), ("pagefile.sys".to_string(), "64.0 GB".to_string()));
     }
 
     #[test]
     fn file_label_unicode_name_is_kept_unchanged() {
         let (t, file) = one_file("Données 日本語 ✓.txt", 2048);
-        assert_eq!(file_label(&t, file), ("Données 日本語 ✓.txt".to_string(), "2.0 KB".to_string()));
+        assert_eq!(file_label(&t, file, Unit::Dynamic), ("Données 日本語 ✓.txt".to_string(), "2.0 KB".to_string()));
     }
 
     #[test]
     fn file_label_200_character_name_is_kept_whole() {
         let name = format!("{}.bin", "x".repeat(196));
         let (t, file) = one_file(&name, 5);
-        assert_eq!(file_label(&t, file), (name, "5 B".to_string()));
+        assert_eq!(file_label(&t, file, Unit::Dynamic), (name, "5 B".to_string()));
     }
 
     #[test]
     fn file_label_zero_byte_file_shows_zero_bytes() {
         let (t, file) = one_file("empty.log", 0);
-        assert_eq!(file_label(&t, file), ("empty.log".to_string(), "0 B".to_string()));
+        assert_eq!(file_label(&t, file, Unit::Dynamic), ("empty.log".to_string(), "0 B".to_string()));
     }
 
     #[test]
     fn file_label_name_with_a_right_to_left_override_shows_a_placeholder() {
         let (t, file) = one_file("invoice\u{202E}fdp.exe", 1);
-        assert_eq!(file_label(&t, file).0, "invoice\u{FFFD}fdp.exe");
+        assert_eq!(file_label(&t, file, Unit::Dynamic).0, "invoice\u{FFFD}fdp.exe");
     }
 
     // ---- crumbs ----
@@ -1256,7 +1268,7 @@ mod tests {
     fn tip(path: &[&str]) -> (String, String) {
         let t = tip_tree();
         let node = path.iter().fold(t.root(), |n, name| find(&t, n, name));
-        tooltip_lines(&t, &file_counts(&t), node)
+        tooltip_lines(&t, &file_counts(&t), node, Unit::Dynamic)
     }
 
     fn lines(title: &str, detail: &str) -> (String, String) {
@@ -1269,6 +1281,13 @@ mod tests {
             tip(&["Windows", "System32", "kernel32.dll"]),
             lines("C:\\Windows\\System32\\kernel32.dll", "12.0 MB. DLL file.")
         );
+    }
+
+    #[test]
+    fn tooltip_lines_use_the_unit() {
+        let t = tip_tree();
+        let node = find(&t, find(&t, find(&t, t.root(), "Windows"), "System32"), "kernel32.dll");
+        assert_eq!(tooltip_lines(&t, &file_counts(&t), node, Unit::Kb).1, "12,288.0 KB. DLL file.");
     }
 
     #[test]
@@ -1317,7 +1336,7 @@ mod tests {
         let windows = find(&t, t.root(), "Windows");
         let mut counts = file_counts(&t);
         counts[windows.0 as usize] = 1_234_567;
-        assert_eq!(tooltip_lines(&t, &counts, windows).1, "12.0 MB. 1,234,567 files.");
+        assert_eq!(tooltip_lines(&t, &counts, windows, Unit::Dynamic).1, "12.0 MB. 1,234,567 files.");
     }
 
     #[test]
@@ -1331,7 +1350,7 @@ mod tests {
         let e =|id: u64, parent: u64, name: &str, is_dir: bool| RawEntry { id, parent, name: name.into(), size: 1, allocated: 1, is_dir };
         let t = rollup(0, vec![e(0, 0, "C:\\", true), e(1, 0, &long, false)]).unwrap().tree;
         let node = find(&t, t.root(), &long);
-        assert_eq!(tooltip_lines(&t, &file_counts(&t), node).0, format!("C:\\{long}"));
+        assert_eq!(tooltip_lines(&t, &file_counts(&t), node, Unit::Dynamic).0, format!("C:\\{long}"));
     }
 
     #[test]
@@ -1343,13 +1362,13 @@ mod tests {
     fn tooltip_lines_control_character_in_a_folder_of_the_path_shows_a_placeholder() {
         let (t, folders) = chain("C:\\", &["d\u{202E}x"]);
         let file = find(&t, folders[1], "f");
-        assert_eq!(tooltip_lines(&t, &file_counts(&t), file).0, "C:\\d\u{FFFD}x\\f");
+        assert_eq!(tooltip_lines(&t, &file_counts(&t), file, Unit::Dynamic).0, "C:\\d\u{FFFD}x\\f");
     }
 
     #[test]
     fn tooltip_lines_control_character_in_the_scan_root_shows_a_placeholder() {
         let (t, _) = chain("D:\\x\u{202E}y", &[]);
-        assert_eq!(tooltip_lines(&t, &file_counts(&t), t.root()).0, "D:\\x\u{FFFD}y");
+        assert_eq!(tooltip_lines(&t, &file_counts(&t), t.root(), Unit::Dynamic).0, "D:\\x\u{FFFD}y");
     }
 
     // ---- tip_position ----
@@ -1438,12 +1457,19 @@ mod tests {
     fn value(path: &[&str]) -> String {
         let t = tip_tree();
         let node = path.iter().fold(t.root(), |n, name| find(&t, n, name));
-        map_value(&t, node)
+        map_value(&t, node, Unit::Dynamic)
     }
 
     #[test]
     fn map_value_file_gives_its_name_and_size() {
         assert_eq!(value(&["Windows", "System32", "kernel32.dll"]), "kernel32.dll, 12.0 MB");
+    }
+
+    #[test]
+    fn map_value_uses_the_unit() {
+        let t = tip_tree();
+        let node = find(&t, find(&t, find(&t, t.root(), "Windows"), "System32"), "kernel32.dll");
+        assert_eq!(map_value(&t, node, Unit::Kb), "kernel32.dll, 12,288.0 KB");
     }
 
     #[test]

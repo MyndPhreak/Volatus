@@ -196,7 +196,7 @@ impl DriveApi for Win32Drives {
 }
 
 /// The buttons for `drives`, sorted by letter.
-pub fn drive_buttons(drives: &[DriveInfo]) -> Vec<DriveButton> {
+pub fn drive_buttons(drives: &[DriveInfo], _unit: Unit) -> Vec<DriveButton> {
     let mut sorted: Vec<&DriveInfo> = drives.iter().collect();
     sorted.sort_by_key(|d| d.letter);
     sorted
@@ -451,7 +451,7 @@ mod tests {
     }
 
     fn one(d: DriveInfo) -> DriveButton {
-        let mut v = drive_buttons(&[d]);
+        let mut v = drive_buttons(&[d], Unit::Dynamic);
         assert_eq!(v.len(), 1);
         v.remove(0)
     }
@@ -489,6 +489,13 @@ mod tests {
     }
 
     #[test]
+    fn drive_detail_uses_the_unit_for_free_and_total() {
+        let tb = 1024u64.pow(4);
+        let v = drive_buttons(&[info('C', "", DriveKind::Fixed, Some((2 * tb, tb)))], Unit::Byte);
+        assert_eq!(v[0].detail, "1,099,511,627,776 B free of 2,199,023,255,552 B");
+    }
+
+    #[test]
     fn drive_buttons_unknown_size_says_so_and_has_no_bar() {
         let b = one(info('C', "", DriveKind::Fixed, None));
         assert_eq!((b.detail.as_str(), b.used, b.size_known), ("Size unknown.", 0.0, false));
@@ -522,6 +529,7 @@ mod tests {
     fn drive_buttons_sorts_by_letter() {
         let v = drive_buttons(
             &[info('E', "", DriveKind::Removable, None), info('C', "", DriveKind::Fixed, None), info('D', "", DriveKind::Fixed, None)],
+            Unit::Dynamic,
         );
         let roots: Vec<&str> = v.iter().map(|b| b.root.as_str()).collect();
         assert_eq!(roots, ["C:\\", "D:\\", "E:\\"]);
@@ -529,6 +537,6 @@ mod tests {
 
     #[test]
     fn drive_buttons_no_drives_gives_no_buttons() {
-        assert!(drive_buttons(&[]).is_empty());
+        assert!(drive_buttons(&[], Unit::Dynamic).is_empty());
     }
 }

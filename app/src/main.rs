@@ -25,7 +25,7 @@ mod tree_view;
 
 use browse::BrowseState;
 use model::{
-    Event, ScanControl, ScanState, Summary, TimingRun, append_timing, banner_text, scan_error_message, with_options, format_size,
+    Event, ScanControl, ScanState, Summary, TimingRun, Unit, append_timing, banner_text, scan_error_message, with_options, format_size,
     group_digits, offer_for, shows_start, timing_for_state,
 };
 use nav::{Dir, TreeMove};
@@ -288,7 +288,7 @@ fn show_state(ui: &MainWindow) {
     let offer = SESSION.with_borrow(|s| offer_for(&state, s.resolved_root.as_deref(), elevate::is_admin()));
     let line = SESSION.with_borrow(|s| timing_for_state(&state, s.run.as_ref().and_then(TimingRun::line)));
     let (threads, notices) = SESSION.with_borrow(|s| (s.flags.threads, s.notices.clone()));
-    let banner = with_options(banner_text(&state, offer), &state, threads, &notices);
+    let banner = with_options(banner_text(&state, offer, current_unit()), &state, threads, &notices);
     ui.set_banner(append_timing(banner, line.as_deref()).into());
     ui.set_show_elevate(offer);
     ui.set_outdated(SESSION.with_borrow(|s| rescan_shown(&state, s.outdated)));
@@ -319,7 +319,8 @@ fn sync_rows(ui: &MainWindow) {
 /// The treemap value for a screen reader names the selected node.
 fn sync_selection(ui: &MainWindow) {
     let scale = ui.window().scale_factor() as f64;
-    let value = with_loaded(|l| l.selected.map(|n| tree_view::map_value(&l.data.tree, n))).flatten();
+    let unit = current_unit();
+    let value = with_loaded(|l| l.selected.map(|n| tree_view::map_value(&l.data.tree, n, unit))).flatten();
     ui.set_map_value(value.unwrap_or_default().into());
     let bounds = with_loaded(|l| {
         let shown = tree_view::outline_node(&l.data.tree, &l.rects, l.selected?)?;
@@ -384,6 +385,7 @@ fn spawn_layout(ui: &MainWindow, LayoutJob { data, root, generation, seq, size: 
     let theme = if ui.get_dark() { Theme::Dark } else { Theme::Light };
     let (w, h) = ((lw * scale).round() as u32, (lh * scale).round() as u32);
     let weak = ui.as_weak();
+    let unit = current_unit();
     std::thread::spawn(move || {
         let chrome = Chrome::scaled(f64::from(scale));
         let rects = treemap::layout_framed(&data.tree, root, w, h, chrome);
@@ -391,7 +393,7 @@ fn spawn_layout(ui: &MainWindow, LayoutJob { data, root, generation, seq, size: 
             let px = treemap::render_framed(&data.tree, &rects, w, h, chrome, theme);
             SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(&px, w, h)
         });
-        let labels = map_labels(&data.tree, &rects, chrome, f64::from(scale), theme);
+        let labels = map_labels(&data.tree, &rects, chrome, f64::from(scale), theme, unit);
         // Err means the event loop has stopped: nothing left to update.
         let _ = slint::invoke_from_event_loop(move || {
             let current = SESSION.with_borrow(|s| (s.scan.generation(), s.layout_seq));
@@ -403,12 +405,12 @@ fn spawn_layout(ui: &MainWindow, LayoutJob { data, root, generation, seq, size: 
 }
 
 /// The labels of the frames in `rects` (physical pixels) for the window, in logical pixels.
-fn frame_labels(tree: &Tree, rects: &[Rect], chrome: Chrome, scale: f64) -> Vec<FrameLabel> {
+fn frame_labels(tree: &Tree, rects: &[Rect], chrome: Chrome, scale: f64, unit: Unit) -> Vec<FrameLabel> {
     let px = |v: f64| (v / scale) as f32;
     treemap::label_spots(tree, rects, chrome, LABEL_MIN_WIDTH * scale, LABEL_CAP)
         .iter()
         .map(|r| {
-            let (name, size) = tree_view::frame_label(tree, r.node);
+            let (name, size) = tree_view::frame_label(tree, r.node, unit);
             FrameLabel { x: px(r.x), y: px(r.y), width: px(r.w), height: px(r.h), name: name.into(), size: size.into() }
         })
         .collect()
@@ -416,13 +418,13 @@ fn frame_labels(tree: &Tree, rects: &[Rect], chrome: Chrome, scale: f64) -> Vec<
 
 /// The labels of the file tiles in `rects` (physical pixels) for the window, in logical pixels:
 /// at most `cap`, the largest tiles first, with the text colour of each tile in `theme`.
-fn file_labels(tree: &Tree, rects: &[Rect], scale: f64, theme: Theme, cap: usize) -> Vec<FileLabel> {
+fn file_labels(tree: &Tree, rects: &[Rect], scale: f64, theme: Theme, cap: usize, unit: Unit) -> Vec<FileLabel> {
     let px = |v: f64| (v / scale) as f32;
     let (min_w, min_h) = treemap::file_label_min(scale);
     treemap::file_label_spots(tree, rects, min_w, min_h, cap)
         .iter()
         .map(|r| {
-            let (name, size) = tree_view::file_label(tree, r.node);
+            let (name, size) = tree_view::file_label(tree, r.node, unit);
             let [red, green, blue] = treemap::filetype::ink(treemap::filetype::colour(treemap::filetype::category_of(&name), theme));
             FileLabel {
                 x: px(r.x),
@@ -440,9 +442,9 @@ fn file_labels(tree: &Tree, rects: &[Rect], scale: f64, theme: Theme, cap: usize
 
 /// All labels of the map under the one `LABEL_CAP`: the frames first, then the file tiles in the
 /// room the frames leave.
-fn map_labels(tree: &Tree, rects: &[Rect], chrome: Chrome, scale: f64, theme: Theme) -> (Vec<FrameLabel>, Vec<FileLabel>) {
-    let frames = frame_labels(tree, rects, chrome, scale);
-    let files = file_labels(tree, rects, scale, theme, LABEL_CAP.saturating_sub(frames.len()));
+fn map_labels(tree: &Tree, rects: &[Rect], chrome: Chrome, scale: f64, theme: Theme, unit: Unit) -> (Vec<FrameLabel>, Vec<FileLabel>) {
+    let frames = frame_labels(tree, rects, chrome, scale, unit);
+    let files = file_labels(tree, rects, scale, theme, LABEL_CAP.saturating_sub(frames.len()), unit);
     (frames, files)
 }
 
@@ -459,7 +461,7 @@ fn note_hover(node: Option<NodeId>) -> bool {
 /// What the window shows for hovered `node` in the shown `rects` (physical pixels), in logical
 /// pixels: a file tile lifts in its file-type colour in `theme` and keeps its label when the tile
 /// is big enough for one; a folder frame gets a highlight. Not visible when `node` is not drawn.
-fn hover_of(data: &Data, rects: &[Rect], node: NodeId, scale: f64, theme: Theme) -> Hover {
+fn hover_of(data: &Data, rects: &[Rect], node: NodeId, scale: f64, theme: Theme, unit: Unit) -> Hover {
     let Some((x, y, w, h)) = tree_view::selection_bounds(rects, node) else {
         return Hover::default();
     };
@@ -467,8 +469,8 @@ fn hover_of(data: &Data, rects: &[Rect], node: NodeId, scale: f64, theme: Theme)
     let px = |v: f64| (v / scale) as f32;
     let [red, green, blue] = treemap::filetype::colour(treemap::filetype::category_of(tree.name(node)), theme);
     // The same label rules as on the map, for the tile alone at its own origin (none for a folder).
-    let label = file_labels(tree, &[Rect { node, x: 0.0, y: 0.0, w, h }], scale, theme, 1).pop();
-    let (title, detail) = tree_view::tooltip_lines(tree, &data.counts, node);
+    let label = file_labels(tree, &[Rect { node, x: 0.0, y: 0.0, w, h }], scale, theme, 1, unit).pop();
+    let (title, detail) = tree_view::tooltip_lines(tree, &data.counts, node, unit);
     Hover {
         visible: true,
         x: px(x),
@@ -580,7 +582,8 @@ fn drop_hover(ui: &MainWindow) {
 fn show_hover(ui: &MainWindow, node: Option<NodeId>) -> bool {
     let scale = f64::from(ui.window().scale_factor());
     let theme = if ui.get_dark() { Theme::Dark } else { Theme::Light };
-    let hover = node.and_then(|n| with_loaded(|l| hover_of(&l.data, &l.rects, n, scale, theme))).unwrap_or_default();
+    let unit = current_unit();
+    let hover = node.and_then(|n| with_loaded(|l| hover_of(&l.data, &l.rects, n, scale, theme, unit))).unwrap_or_default();
     let shown = hover.visible;
     ui.set_hover(hover);
     shown
@@ -1315,24 +1318,30 @@ fn chips_of(l: &Loaded) -> Option<Vec<footer::Chip>> {
 /// Pushes the footer chips into the window, in the tile colours of the current theme.
 fn sync_types(ui: &MainWindow) {
     let theme = if ui.get_dark() { Theme::Dark } else { Theme::Light };
+    let unit = current_unit();
     let (counting, chips) = with_loaded(|l| match chips_of(l) {
         None => (true, Vec::new()),
-        Some(chips) => (false, chips.iter().map(|c| type_chip(c, theme)).collect()),
+        Some(chips) => (false, chips.iter().map(|c| type_chip(c, theme, unit)).collect()),
     })
     .unwrap_or_default();
     ui.set_types_counting(counting);
     ui.set_type_chips(ModelRc::new(VecModel::from(chips)));
 }
 
+/// The unit every size in the window shows in. Task 4 replaces this body with the session's setting.
+fn current_unit() -> Unit {
+    Unit::Dynamic
+}
+
 /// The window's form of chip `c`, in its tile colour in `theme`.
-fn type_chip(c: &footer::Chip, theme: Theme) -> TypeChip {
+fn type_chip(c: &footer::Chip, theme: Theme, unit: Unit) -> TypeChip {
     let [r, g, b] = treemap::filetype::colour(c.category, theme);
     TypeChip {
         label: c.label.as_str().into(),
         percent: c.percent.as_str().into(),
         share: c.share,
         color: slint::Color::from_rgb_u8(r, g, b),
-        spoken: footer::spoken(c).into(),
+        spoken: footer::spoken(c, unit).into(),
     }
 }
 
@@ -1454,11 +1463,12 @@ fn refresh_drives(ui: &MainWindow) {
         s.drives_seq
     });
     ui.set_drives_loading(true);
+    let unit = current_unit();
     let weak = ui.as_weak();
     std::thread::spawn(move || {
         let list = drives::list();
         let note = drives::admin_note(&list, elevate::is_admin());
-        let buttons = drives::drive_buttons(&list);
+        let buttons = drives::drive_buttons(&list, unit);
         // Err means the event loop has stopped: nothing left to update.
         let _ = slint::invoke_from_event_loop(move || {
             let Some(ui) = weak.upgrade() else { return };
@@ -1885,7 +1895,7 @@ fn main() {
     }
     // A folder to scan opens on the results screen: the start screen would show for one frame.
     if shows_start_at_launch(args.path.as_deref()) {
-        ui.set_banner(with_options(banner_text(&ScanState::Idle, false), &ScanState::Idle, None, &args.notices).into());
+        ui.set_banner(with_options(banner_text(&ScanState::Idle, false, current_unit()), &ScanState::Idle, None, &args.notices).into());
     } else {
         ui.set_start_screen(false);
     }
@@ -1985,7 +1995,7 @@ fn restart_admin(path: &str, launch: impl FnOnce(&str, cli::Flags) -> Result<(),
 
 #[cfg(test)]
 mod tests {
-    use super::{
+    use super::{Unit,
         Data, FILE_LABEL_TWO_LINES, FileLabel, FrameLabel, Hover, LABEL_CAP, ZoomFrame, ZoomMove, frame_at,
         Loaded, RowModel, SESSION, file_labels, frame_labels, glow_drawn, hover_of, map_labels, note_hover, restart_admin,
         Move, picture_point, zoom_frame_at, take_launch_path, forget_scan, gate_hover, left_map,
@@ -2023,7 +2033,7 @@ mod tests {
         let tree = rollup(0, entries).unwrap().tree;
         let f = tree.children(tree.root()).next().unwrap();
         let rects = [Rect { node: f, x: 0.0, y: 0.0, w, h }];
-        frame_labels(&tree, &rects, Chrome::scaled(scale), scale).iter().map(|l| (l.x, l.y, l.width, l.height)).collect()
+        frame_labels(&tree, &rects, Chrome::scaled(scale), scale, Unit::Dynamic).iter().map(|l| (l.x, l.y, l.width, l.height)).collect()
     }
 
     /// 28 x 24 is the smallest frame with a band; its band is 24 px, the narrowest label.
@@ -2061,7 +2071,7 @@ mod tests {
     /// The file labels of one file "clip0.mp4" of 10 bytes drawn as the physical rect (x, y, w, h).
     fn file_labels_of_one_tile(x: f64, y: f64, w: f64, h: f64, scale: f64, theme: Theme) -> Vec<FileLabel> {
         let (tree, _, files) = flat(0, &[10]);
-        file_labels(&tree, &[Rect { node: files[0], x, y, w, h }], scale, theme, usize::MAX)
+        file_labels(&tree, &[Rect { node: files[0], x, y, w, h }], scale, theme, usize::MAX, Unit::Dynamic)
     }
 
     fn geometry(labels: &[FileLabel]) -> Vec<(f32, f32, f32, f32, bool)> {
@@ -2125,7 +2135,7 @@ mod tests {
     #[test]
     fn file_labels_folder_gets_none() {
         let (tree, dirs, _) = flat(1, &[]);
-        let labels = file_labels(&tree, &[Rect { node: dirs[0], x: 0.0, y: 0.0, w: 400.0, h: 300.0 }], 1.0, Theme::Dark, usize::MAX);
+        let labels = file_labels(&tree, &[Rect { node: dirs[0], x: 0.0, y: 0.0, w: 400.0, h: 300.0 }], 1.0, Theme::Dark, usize::MAX, Unit::Dynamic);
         assert!(labels.is_empty());
     }
 
@@ -2134,7 +2144,7 @@ mod tests {
         let (tree, dirs, fs) = flat(frames, &vec![10; files]);
         let mut rects: Vec<Rect> = dirs.iter().map(|&n| Rect { node: n, x: 0.0, y: 0.0, w: 100.0, h: 50.0 }).collect();
         rects.extend(fs.iter().enumerate().map(|(i, &n)| Rect { node: n, x: 0.0, y: 0.0, w: 50.0 + i as f64, h: 20.0 }));
-        map_labels(&tree, &rects, Chrome::scaled(1.0), 1.0, Theme::Dark)
+        map_labels(&tree, &rects, Chrome::scaled(1.0), 1.0, Theme::Dark, Unit::Dynamic)
     }
 
     #[test]
@@ -2198,7 +2208,7 @@ mod tests {
     fn frame_labels_name_shows_a_placeholder() {
         let (tree, folder, _) = spoofed();
         let rects = [Rect { node: folder, x: 0.0, y: 0.0, w: 200.0, h: 100.0 }];
-        let names: Vec<String> = frame_labels(&tree, &rects, Chrome::scaled(1.0), 1.0).iter().map(|l| l.name.to_string()).collect();
+        let names: Vec<String> = frame_labels(&tree, &rects, Chrome::scaled(1.0), 1.0, Unit::Dynamic).iter().map(|l| l.name.to_string()).collect();
         assert_eq!(names, ["d\u{FFFD}x\\"]);
     }
 
@@ -2206,7 +2216,7 @@ mod tests {
     fn file_labels_name_shows_a_placeholder() {
         let (tree, _, file) = spoofed();
         let rects = [Rect { node: file, x: 0.0, y: 0.0, w: 200.0, h: 100.0 }];
-        let names: Vec<String> = file_labels(&tree, &rects, 1.0, Theme::Dark, usize::MAX).iter().map(|l| l.name.to_string()).collect();
+        let names: Vec<String> = file_labels(&tree, &rects, 1.0, Theme::Dark, usize::MAX, Unit::Dynamic).iter().map(|l| l.name.to_string()).collect();
         assert_eq!(names, ["invoice\u{FFFD}fdp.exe"]);
     }
 
@@ -2214,7 +2224,7 @@ mod tests {
     fn hover_of_label_name_shows_a_placeholder() {
         let (tree, _, file) = spoofed();
         let data = Data { counts: crate::tree_view::file_counts(&tree), tree };
-        let hover = hover_of(&data, &[Rect { node: file, x: 0.0, y: 0.0, w: 200.0, h: 100.0 }], file, 1.0, Theme::Dark);
+        let hover = hover_of(&data, &[Rect { node: file, x: 0.0, y: 0.0, w: 200.0, h: 100.0 }], file, 1.0, Theme::Dark, Unit::Dynamic);
         assert_eq!(hover.label.name.as_str(), "invoice\u{FFFD}fdp.exe");
     }
 
@@ -2246,7 +2256,7 @@ mod tests {
         let (tree, dirs, files) = if folder { flat(1, &[]) } else { flat(0, &[10]) };
         let node = if folder { dirs[0] } else { files[0] };
         let data = Data { counts: crate::tree_view::file_counts(&tree), tree };
-        hover_of(&data, &[Rect { node, x, y, w, h }], node, scale, theme)
+        hover_of(&data, &[Rect { node, x, y, w, h }], node, scale, theme, Unit::Dynamic)
     }
 
     fn place(h: &Hover) -> (bool, f32, f32, f32, f32) {
@@ -2309,7 +2319,7 @@ mod tests {
     fn hover_of_node_not_drawn_is_not_visible() {
         let (tree, _, files) = flat(0, &[10]);
         let data = Data { counts: crate::tree_view::file_counts(&tree), tree };
-        assert!(!hover_of(&data, &[], files[0], 1.0, Theme::Dark).visible);
+        assert!(!hover_of(&data, &[], files[0], 1.0, Theme::Dark, Unit::Dynamic).visible);
     }
 
     // ---- moving picture ----
