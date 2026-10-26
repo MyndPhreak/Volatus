@@ -14,7 +14,7 @@ Download `volatus-X.Y.Z-x86_64.msi` from [Releases](https://github.com/MyndPhrea
 
 - The MSI is not signed. If Windows SmartScreen shows "Windows protected your PC", select **More info**, then **Run anyway**.
 - The installer adds "Scan with Volatus" to the Explorer menu of folders, folder backgrounds and drives. You can clear this option during the installation. On Windows 11, the entry is under **Show more options**.
-- To install with no window, run `msiexec /i volatus-X.Y.Z-x86_64.msi /qn` in a terminal that runs as administrator. Add `EXPLORERMENU=0` to install without the Explorer menu.
+- To install with no window, run `msiexec /i volatus-X.Y.Z-x86_64.msi /qn` in a terminal that runs as administrator. Add `EXPLORERMENU=0` to install without the Explorer menu. An upgrade keeps the menu as it is: `EXPLORERMENU=0` has an effect only on the first installation.
 - To uninstall, select Volatus in **Settings > Apps > Installed apps** (**Apps & features** on Windows 10), then **Uninstall**. This also removes the Explorer menu entries.
 
 ## Use
