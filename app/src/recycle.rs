@@ -7,11 +7,13 @@
 #![cfg_attr(not(test), expect(dead_code, reason = "wired in the UI task"))]
 #![cfg_attr(test, allow(dead_code, reason = "tests do not use every item; wired in the UI task"))]
 
-use crate::delete::{DeleteTarget, Outcome, Remover, SkipReason};
+use crate::delete::{DeleteTarget, Outcome, Remover, SkipReason, Skipped, reason_from_win32};
+use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use windows_sys::Win32::UI::Shell::{
-    FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOCONFIRMMKDIR, FOF_NOERRORUI, FOF_SILENT, FOF_WANTNUKEWARNING,
+    FO_DELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOCONFIRMMKDIR, FOF_NOERRORUI, FOF_SILENT, FOF_WANTNUKEWARNING,
+    SHFILEOPSTRUCTW, SHFileOperationW,
 };
 
 /// The Recycle Bin delete.
@@ -50,8 +52,28 @@ impl Remover for Recycle {
     /// One shell call for the whole target. There is no progress during it: `progress(0, 0)` is
     /// called before it and `progress(1, t.size)` after a success. `stop` is checked only before
     /// the call (Recycle Bin mode has no Stop button); when it is set nothing is done.
-    fn remove(&self, _t: &DeleteTarget, _progress: &dyn Fn(u64, u64), _stop: &AtomicBool) -> Outcome {
-        Outcome::default()
+    fn remove(&self, t: &DeleteTarget, progress: &dyn Fn(u64, u64), stop: &AtomicBool) -> Outcome {
+        let mut out = Outcome::default();
+        if stop.load(Ordering::Relaxed) {
+            out.stopped = true;
+            return out;
+        }
+        let skip = |reason| Skipped { path: t.path.clone(), reason };
+        let Some(from) = shell_path(&t.path) else {
+            out.skipped.push(skip(SkipReason::Other(PATH_REFUSED)));
+            return out;
+        };
+        progress(0, 0);
+        let (code, aborted) = shell_delete(&from);
+        match skip_for_shell_result(code, aborted) {
+            None => {
+                out.removed_items = 1;
+                out.removed_bytes = t.size;
+                progress(1, t.size);
+            }
+            Some(reason) => out.skipped.push(skip(reason)),
+        }
+        out
     }
 }
 
@@ -65,8 +87,42 @@ impl Remover for Recycle {
 /// that is empty, `.` or `..`, ends in a dot or space, holds a control character or one of
 /// `: * ? < > " | /`, is not valid UTF-16, or is a reserved device name. The plain form is the
 /// verbatim text with the `\\?\` taken off and nothing else changed.
-pub(crate) fn shell_path(_verbatim: &Path) -> Option<Vec<u16>> {
-    None
+pub(crate) fn shell_path(verbatim: &Path) -> Option<Vec<u16>> {
+    let (colon, back) = (u16::from(b':'), u16::from(b'\\'));
+    let w: Vec<u16> = verbatim.as_os_str().encode_wide().collect();
+    let prefix: Vec<u16> = r"\\?\".encode_utf16().collect();
+    let plain = w.strip_prefix(prefix.as_slice())?;
+    let [letter, c, b, names @ ..] = plain else { return None };
+    if !(u8::try_from(*letter).is_ok_and(|l| l.is_ascii_alphabetic()) && *c == colon && *b == back) {
+        return None;
+    }
+    if names.is_empty() || plain.len() > MAX_PLAIN || !names.split(|c| *c == back).all(plain_name) {
+        return None;
+    }
+    Some(plain.iter().copied().chain([0, 0]).collect())
+}
+
+/// True when Win32 reads `name` (one path component) as exactly this name. See `shell_path`.
+fn plain_name(name: &[u16]) -> bool {
+    let Ok(s) = String::from_utf16(name) else { return false };
+    !s.is_empty()
+        && s != "."
+        && s != ".."
+        && !s.ends_with(['.', ' '])
+        && !s.chars().any(|c| c < ' ' || r#":*?<>"|/"#.contains(c))
+        && !is_device(&s)
+}
+
+/// A reserved device name: the part before the first dot, trailing spaces dropped, is `con`,
+/// `prn`, `aux`, `nul`, `conin$`, `conout$`, or `com`/`lpt` with one digit (`0`-`9`, `¹²³`).
+/// Any case. Newer Windows reads fewer of these as devices; all are refused here.
+fn is_device(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or_default().trim_end_matches(' ').to_lowercase();
+    let numbered = stem
+        .strip_prefix("com")
+        .or_else(|| stem.strip_prefix("lpt"))
+        .is_some_and(|d| d.chars().count() == 1 && "0123456789¹²³".contains(d));
+    numbered || ["con", "prn", "aux", "nul", "conin$", "conout$"].contains(&stem.as_str())
 }
 
 /// What one shell call means for the target: `None` for a success (0, not aborted), else the
@@ -84,29 +140,61 @@ pub(crate) fn shell_path(_verbatim: &Path) -> Option<Vec<u16>> {
 /// `Other(code)` for the rest, every `DE_*` code included (`DE_FILE_TOO_LARGE` 0x85,
 /// `DE_OPCANCELLED` 0x75, `DE_INVALIDFILES` 0x7C, ...). `skip_text` has the words for the codes
 /// that offer the permanent delete.
-pub(crate) fn skip_for_shell_result(_code: i32, _aborted: bool) -> Option<SkipReason> {
-    None
+pub(crate) fn skip_for_shell_result(code: i32, aborted: bool) -> Option<SkipReason> {
+    match code {
+        0 if !aborted => None,
+        0 => Some(SkipReason::Other(ABORTED)),
+        DE_ACCESSDENIEDSRC => Some(SkipReason::AccessDenied),
+        DE_PATHTOODEEP | DE_FILENAMETOOLONG => Some(SkipReason::TooLong),
+        code => Some(reason_from_win32(code)),
+    }
 }
 
 /// The words for a Recycle Bin skip that offers the permanent delete (ASD-STE100), or `None` for a
 /// reason that has the general text. No automatic fallback: the user chooses.
-pub fn skip_text(_r: SkipReason) -> Option<&'static str> {
-    None
+pub fn skip_text(r: SkipReason) -> Option<&'static str> {
+    match r {
+        SkipReason::Other(PATH_REFUSED | DE_INVALIDFILES) => {
+            Some("The Recycle Bin cannot take this path. You can delete the item permanently.")
+        }
+        SkipReason::Other(DE_FILE_TOO_LARGE) => {
+            Some("The item is too large for the Recycle Bin. You can delete the item permanently.")
+        }
+        SkipReason::Other(ABORTED | DE_OPCANCELLED) => {
+            Some("Windows did not move the item to the Recycle Bin. You can delete the item permanently.")
+        }
+        _ => None,
+    }
 }
 
 /// `SHFileOperationW` `FO_DELETE` with `FLAGS` on `from` (double-NUL terminated, one path).
-/// Returns the call's code and `fAnyOperationsAborted`.
-fn shell_delete(_from: &[u16]) -> (i32, bool) {
-    (-1, true)
+/// Returns the call's code and `fAnyOperationsAborted`. No owner window: the only UI the flags
+/// leave on is the shell's warning before a permanent delete.
+fn shell_delete(from: &[u16]) -> (i32, bool) {
+    assert!(from.ends_with(&[0, 0]) && !from[..from.len() - 2].contains(&0), "pFrom must be one path, double-NUL terminated");
+    let mut op = SHFILEOPSTRUCTW {
+        hwnd: std::ptr::null_mut(),
+        wFunc: FO_DELETE,
+        pFrom: from.as_ptr(),
+        pTo: std::ptr::null(),
+        fFlags: FLAGS as u16,
+        fAnyOperationsAborted: 0,
+        hNameMappings: std::ptr::null_mut(),
+        lpszProgressTitle: std::ptr::null(),
+    };
+    // SAFETY: `op` is the windows-sys definition, fully set. `pFrom` points into `from`, which
+    // holds one path and ends in two NULs and lives across the call; `pTo` and the progress title
+    // are null, which `FO_DELETE` without `FOF_SIMPLEPROGRESS` allows. Without
+    // `FOF_WANTMAPPINGHANDLE` the shell leaves `hNameMappings` unset, so nothing is to be freed.
+    let code = unsafe { SHFileOperationW(&mut op) };
+    (code, op.fAnyOperationsAborted != 0)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::delete::reason_from_win32;
     use scan::NodeId;
     use std::fs;
-    use std::os::windows::ffi::OsStrExt;
     use std::path::PathBuf;
 
     /// A unique directory, canonical (verbatim) form. Removed on drop; a link inside is removed
@@ -412,7 +500,7 @@ mod tests {
                 let Ok(b) = fs::read(e.path()) else { continue };
                 let text = |from: usize| -> String {
                     let w: Vec<u16> =
-                        b.get(from..).unwrap_or_default().chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+                        b.get(from..).unwrap_or_default().as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).collect();
                     String::from_utf16_lossy(&w).trim_end_matches('\0').to_lowercase()
                 };
                 let name = match b.first() {
