@@ -29,6 +29,7 @@ use slint::{
     SharedPixelBuffer, SharedString, Timer, TimerMode, VecModel, Weak,
 };
 use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::{Arc, mpsc};
@@ -872,9 +873,32 @@ fn remove_node(l: &mut Loaded, n: NodeId) -> Option<AfterRemoval> {
     }
     *l.model.data.borrow_mut() = Arc::downgrade(&l.data);
     drop_types(l, &gone);
-    // ponytail: O(rects x depth); fine for the <= 10^5 rects of a layout.
-    l.rects.retain(|rect| l.data.tree.is_attached(rect.node));
-    Some(tree_view::after_removal(&l.data.tree, l.view_root, &r))
+    let tree = &l.data.tree;
+    if l.shown_root.is_some_and(|s| !tree.is_attached(s)) {
+        // Every rect is under the shown folder, which went.
+        l.rects.clear();
+    } else if let Some(at) = l.rects.iter().position(|rect| rect.node == n) {
+        // The layout lists a folder before its descendants and draws a node only inside its drawn
+        // parent (or the shown folder): the drawn part of `n`'s subtree comes after `n`'s rect and
+        // starts inside it. One pass grows the set of dropped nodes; only rects that start inside
+        // `n`'s rect read the tree (about 100 ns each on 5 M nodes), so a small removal does not
+        // read it for every rect. A node with no rect has no drawn descendant: nothing to drop.
+        let Rect { x, y, w, h, .. } = l.rects[at];
+        // One pixel of slack, so rounding never keeps a rect of the subtree; the parent test decides.
+        let inside = |r: &Rect| r.x > x - 1.0 && r.x < x + w + 1.0 && r.y > y - 1.0 && r.y < y + h + 1.0;
+        let (mut dropped, mut index) = (HashSet::new(), 0);
+        l.rects.retain(|rect| {
+            index += 1;
+            let gone = index > at
+                && inside(rect)
+                && (rect.node == n || tree.node(rect.node).parent.is_some_and(|p| dropped.contains(&p)));
+            if gone {
+                dropped.insert(rect.node);
+            }
+            !gone
+        });
+    }
+    Some(tree_view::after_removal(tree, l.view_root, &r))
 }
 
 /// What the window does after a node of the shown scan was deleted on disk (`apply_removal`).
