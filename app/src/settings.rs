@@ -20,18 +20,34 @@ impl ThemeChoice {
     pub const ALL: [ThemeChoice; 3] = [ThemeChoice::System, ThemeChoice::Light, ThemeChoice::Dark];
 
     /// The choice at position `i` in `ALL`; an unknown index is `System`.
-    pub fn from_index(_i: i32) -> ThemeChoice {
-        ThemeChoice::System
+    pub fn from_index(i: i32) -> ThemeChoice {
+        usize::try_from(i).ok().and_then(|i| ThemeChoice::ALL.get(i).copied()).unwrap_or_default()
     }
 
     /// The position of this choice in `ALL`.
     pub fn index(self) -> i32 {
-        0
+        ThemeChoice::ALL.iter().position(|&t| t == self).unwrap_or(0) as i32
     }
 
     /// `None` follows Windows; `Some(dark)` forces the scheme.
     pub fn forced_dark(self) -> Option<bool> {
-        None
+        match self {
+            ThemeChoice::System => None,
+            ThemeChoice::Light => Some(false),
+            ThemeChoice::Dark => Some(true),
+        }
+    }
+
+    fn key(self) -> &'static str {
+        match self {
+            ThemeChoice::System => "system",
+            ThemeChoice::Light => "light",
+            ThemeChoice::Dark => "dark",
+        }
+    }
+
+    fn from_key(s: &str) -> Option<ThemeChoice> {
+        ThemeChoice::ALL.into_iter().find(|t| t.key() == s)
     }
 }
 
@@ -65,21 +81,46 @@ impl Default for Settings {
         Settings {
             theme: ThemeChoice::System,
             unit: Unit::Dynamic,
-            show_header: false,
-            show_tree: false,
-            show_strip: false,
-            show_chips: false,
-            show_labels: false,
+            show_header: true,
+            show_tree: true,
+            show_strip: true,
+            show_chips: true,
+            show_labels: true,
         }
     }
 }
 
 impl Settings {
-    pub fn shown(&self, _p: Part) -> bool {
-        false
+    pub fn shown(&self, p: Part) -> bool {
+        match p {
+            Part::Header => self.show_header,
+            Part::Tree => self.show_tree,
+            Part::Strip => self.show_strip,
+            Part::Chips => self.show_chips,
+            Part::Labels => self.show_labels,
+        }
     }
 
-    pub fn set_shown(&mut self, _p: Part, _on: bool) {}
+    pub fn set_shown(&mut self, p: Part, on: bool) {
+        match p {
+            Part::Header => self.show_header = on,
+            Part::Tree => self.show_tree = on,
+            Part::Strip => self.show_strip = on,
+            Part::Chips => self.show_chips = on,
+            Part::Labels => self.show_labels = on,
+        }
+    }
+}
+
+fn unit_key(u: Unit) -> &'static str {
+    match u {
+        Unit::Dynamic => "dynamic",
+        Unit::Byte => "byte",
+        Unit::Kb => "kb",
+        Unit::Mb => "mb",
+        Unit::Gb => "gb",
+        Unit::Tb => "tb",
+    }
 }
 
 /// How a load went.
@@ -96,27 +137,107 @@ pub enum Loaded {
 }
 
 /// Reads settings text. Pure. A leading UTF-8 BOM is stripped.
-pub fn parse(_text: &str) -> (Settings, Loaded) {
-    (Settings::default(), Loaded::Fresh)
+pub fn parse(text: &str) -> (Settings, Loaded) {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(text) else {
+        return (Settings::default(), Loaded::Damaged);
+    };
+    let mut s = Settings::default();
+    let mut bad: Vec<&'static str> = Vec::new();
+
+    // A missing key keeps the default; a present key of the wrong type or value is listed.
+    match map.get("theme") {
+        None => {}
+        Some(v) => match v.as_str().and_then(ThemeChoice::from_key) {
+            Some(t) => s.theme = t,
+            None => bad.push("theme"),
+        },
+    }
+    match map.get("unit") {
+        None => {}
+        Some(v) => match v.as_str().and_then(|k| Unit::ALL.into_iter().find(|&u| unit_key(u) == k)) {
+            Some(u) => s.unit = u,
+            None => bad.push("unit"),
+        },
+    }
+    for (key, part) in [
+        ("show_header", Part::Header),
+        ("show_tree", Part::Tree),
+        ("show_strip", Part::Strip),
+        ("show_chips", Part::Chips),
+        ("show_labels", Part::Labels),
+    ] {
+        match map.get(key) {
+            None => {}
+            Some(v) => match v.as_bool() {
+                Some(on) => s.set_shown(part, on),
+                None => bad.push(key),
+            },
+        }
+    }
+
+    let loaded = if bad.is_empty() { Loaded::Ok } else { Loaded::Partial(bad) };
+    (s, loaded)
 }
 
-pub fn to_json(_s: &Settings) -> String {
-    String::new()
+pub fn to_json(s: &Settings) -> String {
+    let v = serde_json::json!({
+        "theme": s.theme.key(),
+        "unit": unit_key(s.unit),
+        "show_header": s.show_header,
+        "show_tree": s.show_tree,
+        "show_strip": s.show_strip,
+        "show_chips": s.show_chips,
+        "show_labels": s.show_labels,
+    });
+    serde_json::to_string_pretty(&v).unwrap_or_default()
 }
 
-/// Reads the file. On `Partial` and `Damaged` the file is first copied to `<name>.bad`.
-pub fn load(_path: &Path) -> (Settings, Loaded) {
-    (Settings::default(), Loaded::Fresh)
+/// `<path>` with `suffix` added to the file name: `settings.json` -> `settings.json.bad`.
+fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(suffix);
+    PathBuf::from(name)
 }
 
-/// Writes `<name>.tmp` beside the file, then renames it over the file.
-pub fn save(_path: &Path, _s: &Settings) -> std::io::Result<()> {
-    Ok(())
+/// Reads the file. On `Partial` and `Damaged` the file is first copied to `<name>.bad`, so a
+/// later save cannot destroy what the user wrote. The copy is best effort: if it fails, the
+/// settings still load (defaults for what was wrong).
+pub fn load(path: &Path) -> (Settings, Loaded) {
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (Settings::default(), Loaded::Fresh),
+        // Present but unreadable (a folder, no access): treat as damaged; there is nothing to copy.
+        Err(_) => return (Settings::default(), Loaded::Damaged),
+    };
+    let (settings, loaded) = match std::str::from_utf8(&bytes) {
+        Ok(text) => parse(text),
+        Err(_) => (Settings::default(), Loaded::Damaged),
+    };
+    if matches!(loaded, Loaded::Partial(_) | Loaded::Damaged) {
+        let _ = std::fs::write(with_suffix(path, ".bad"), &bytes);
+    }
+    (settings, loaded)
+}
+
+/// Writes `<name>.tmp` beside the file, then renames it over the file. On any failure the old
+/// file is left as it was and the temp file is removed.
+pub fn save(path: &Path, s: &Settings) -> std::io::Result<()> {
+    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = with_suffix(path, ".tmp");
+    let result = std::fs::write(&tmp, to_json(s)).and_then(|()| std::fs::rename(&tmp, path));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 /// `%APPDATA%\Volatus\settings.json`; `None` when `APPDATA` is not set.
 pub fn settings_path() -> Option<PathBuf> {
-    None
+    let appdata = std::env::var_os("APPDATA").filter(|v| !v.is_empty())?;
+    Some(PathBuf::from(appdata).join("Volatus").join("settings.json"))
 }
 
 #[cfg(test)]
