@@ -1,0 +1,635 @@
+//! The decisions of the context menu, with no Windows call except the disk read `read_disk`: when
+//! a menu may open, which item it is for, what the disk says about it, which Volatus items it
+//! shows, what an id the shell menu returns means, which flags the shell calls get, and what a
+//! change on disk after an action means for the map. The shell calls themselves are in `shell`
+//! (P4); they use the traits and functions here.
+#![cfg_attr(not(test), expect(dead_code, reason = "the shell menu (P4) uses these decisions"))]
+
+use crate::model::ScanState;
+use scan::{NodeId, Tree};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+/// What the disk holds at a path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Disk {
+    /// Nothing there (or the path cannot name anything on disk, as a name made lossy at scan time).
+    Gone,
+    /// A folder. A junction or directory symlink is not one: the scan stores it as a file.
+    Dir,
+    /// A file, or a junction or symlink, with its size in bytes.
+    File(u64),
+    /// The disk could not say (access denied or another error).
+    Unreadable,
+}
+
+/// `Disk` of the result of `symlink_metadata`. A name-surrogate link (junction, symlink) is a
+/// `File`, as the scan stores it (never followed, size 0); any error but "not found" is `Unreadable`.
+pub fn disk_of(m: std::io::Result<std::fs::Metadata>) -> Disk {
+    let _ = m;
+    todo!("disk_of")
+}
+
+/// `Disk` of `p`, read now. Plain `symlink_metadata`: the path is not followed through a link.
+pub fn read_disk(p: &Path) -> Disk {
+    let _ = p;
+    todo!("read_disk")
+}
+
+/// The item a menu is for, checked against the disk before the shell sees its path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Prepared {
+    /// The path (raw names from the tree, never `display_name`) and what the disk held at it.
+    Ready { path: PathBuf, before: Disk },
+    /// The disk does not match the scan: no shell menu for this item.
+    Changed,
+}
+
+/// The path of node `n` and its disk check. `Ready` only when the disk holds a folder for a
+/// folder node, or a file for a file node; anything else, an error included, is `Changed`.
+pub fn prepare(tree: &Tree, n: NodeId, disk: impl Fn(&Path) -> Disk) -> Prepared {
+    let _ = (tree, n, disk);
+    todo!("prepare")
+}
+
+/// True when a menu may open: a finished scan whose data is loaded.
+pub fn allowed(state: &ScanState, loaded: bool) -> bool {
+    let _ = (state, loaded);
+    todo!("allowed")
+}
+
+/// A Volatus menu item. The value is the menu id.
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cmd {
+    ExploreFolder = 1,
+    CommandPrompt,
+    CopyPath,
+    /// Opens the folder in the map. It does not scan.
+    ShowFolder,
+    Rescan,
+}
+
+/// A line of the Volatus part of the menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Item {
+    Action(Cmd, &'static str),
+    Disabled(&'static str),
+    Separator,
+}
+
+/// The Volatus items for a prepared item. `is_dir`: the node is a folder. `shell_ok`: the shell
+/// menu was built; if not, a disabled line says so.
+pub fn items(p: &Prepared, is_dir: bool, shell_ok: bool) -> Vec<Item> {
+    let _ = (p, is_dir, shell_ok);
+    todo!("items")
+}
+
+/// First menu id of the shell's items.
+pub const SHELL_FIRST: u32 = 0x100;
+/// Last menu id of the shell's items.
+pub const SHELL_LAST: u32 = 0x7FFF;
+
+/// What a menu id means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Picked {
+    /// No pick, or an id that is none of ours (a shell separator has one too).
+    Nothing,
+    Volatus(Cmd),
+    /// A shell item: its offset from `SHELL_FIRST`, as `IContextMenu` wants it.
+    Shell(u32),
+}
+
+/// What `id` (the result of `TrackPopupMenuEx`, 0 for no pick) means. Total.
+pub fn picked(id: u32) -> Picked {
+    let _ = id;
+    todo!("picked")
+}
+
+/// `uFlags` of `QueryContextMenu`: `CMF_NORMAL`, plus `CMF_EXTENDEDVERBS` with Shift. Never
+/// `CMF_CANRENAME`: Volatus does not rename.
+pub fn query_flags(shift: bool) -> u32 {
+    let _ = shift;
+    todo!("query_flags")
+}
+
+/// `fMask` of `CMINVOKECOMMANDINFOEX`: Unicode and a point, plus the keys held at invoke.
+pub fn invoke_mask(shift: bool, ctrl: bool) -> u32 {
+    let _ = (shift, ctrl);
+    todo!("invoke_mask")
+}
+
+/// True only for the canonical verb `delete` of the shell (ASCII case). A verb the shell could not
+/// give (`None`) is not delete: only the disk can then change the map, as "outdated".
+pub fn is_delete(verb: Option<&str>) -> bool {
+    let _ = verb;
+    todo!("is_delete")
+}
+
+/// True for the result of `InvokeCommand` that means the user cancelled (`COPYENGINE_E_USER_CANCELLED`).
+/// The shell's delete returns after the item is gone, so a cancelled one needs no check.
+pub fn user_cancelled(hr: i32) -> bool {
+    let _ = hr;
+    todo!("user_cancelled")
+}
+
+/// What the map does after an action, from the disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    /// Look again later.
+    Wait,
+    /// The item was deleted: remove it from the map.
+    Remove,
+    /// The item changed in another way: show "outdated" and Rescan.
+    Outdated,
+    /// No change.
+    Nothing,
+}
+
+/// The outcome of one check. `delete`: the action was the shell's delete. `before`, `now`: the
+/// disk at the menu and at this check. `last`: no check follows.
+pub fn judge(delete: bool, before: &Disk, now: &Disk, last: bool) -> Outcome {
+    let _ = (delete, before, now, last);
+    todo!("judge")
+}
+
+/// The checks after an action: at once, after 0.5 s and after 2 s. UI thread only; the session
+/// holds at most one, and a new menu, a scan or exit drops it.
+#[derive(Debug, Clone)]
+pub struct Follow {
+    /// The item the menu was for.
+    pub node: NodeId,
+    /// `Loaded::edits` at the menu: a removal since then makes the node id stale.
+    pub edits: u64,
+    pub path: PathBuf,
+    /// The action was the shell's delete.
+    pub delete: bool,
+    /// The disk at the menu.
+    pub before: Disk,
+    stage: u8,
+}
+
+impl Follow {
+    pub fn new(node: NodeId, edits: u64, path: PathBuf, delete: bool, before: Disk) -> Self {
+        let _ = (node, edits, path, delete, before);
+        todo!("Follow::new")
+    }
+
+    /// The next check, with the disk as `now`: its outcome and the time to the check after it.
+    /// `None` for the time when the outcome is a decision or no check is left; after that the
+    /// follow gives `(Nothing, None)`.
+    pub fn step(&mut self, now: &Disk) -> (Outcome, Option<Duration>) {
+        let _ = now;
+        todo!("Follow::step")
+    }
+}
+
+/// The folder a command prompt opens in for the item at `path`: a folder itself, a file's folder.
+pub fn terminal_folder(path: &Path, is_dir: bool) -> PathBuf {
+    let _ = (path, is_dir);
+    todo!("terminal_folder")
+}
+
+/// The screen point, in physical pixels, of the window point `window` in logical pixels, for a
+/// window whose client origin is at `origin` on the screen. Rounds half away from zero.
+pub fn screen_point(window: (f32, f32), scale: f32, origin: (i32, i32)) -> (i32, i32) {
+    let _ = (window, scale, origin);
+    todo!("screen_point")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Summary;
+    use scan::Method;
+    use scan::rollup::{RawEntry, rollup};
+    use std::ffi::OsString;
+    use std::fs;
+    use std::io::ErrorKind;
+    use std::os::windows::ffi::OsStringExt;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::mpsc;
+
+    /// A new empty folder under the system temp folder, removed when dropped. `tag` is unique per test.
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("volatus-menu-test-{}-{tag}", std::process::id()));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn summary() -> Summary {
+        Summary {
+            method: Method::Walk,
+            files: 1,
+            dirs: 1,
+            skipped: 0,
+            elapsed: Duration::ZERO,
+            phases: Default::default(),
+            total: 10,
+        }
+    }
+
+    /// Scans `root` with the walker.
+    fn scanned(root: &Path) -> Tree {
+        let (tx, _rx) = mpsc::channel();
+        scan::scan_with(root, tx, &AtomicBool::new(false), &scan::ScanOptions { method: Some(Method::Walk), ..Default::default() }).unwrap().0
+    }
+
+    /// The node reached from the root by `names`.
+    fn find(tree: &Tree, names: &[&str]) -> NodeId {
+        names.iter().fold(tree.root(), |n, name| tree.children(n).find(|&c| tree.name(c) == *name).unwrap_or_else(|| panic!("no {name}")))
+    }
+
+    // ---- disk_of, read_disk ----
+    #[test]
+    fn disk_of_a_file_is_file_with_its_size() {
+        let dir = TempDir::new("disk-of-file");
+        let f = dir.0.join("f.txt");
+        fs::write(&f, b"hello").unwrap();
+
+        assert_eq!(disk_of(fs::symlink_metadata(&f)), Disk::File(5));
+    }
+
+    #[test]
+    fn disk_of_a_folder_is_dir() {
+        let dir = TempDir::new("disk-of-dir");
+
+        assert_eq!(disk_of(fs::symlink_metadata(&dir.0)), Disk::Dir);
+    }
+
+    #[test]
+    fn disk_of_a_junction_is_file_as_the_scan_stores_it() {
+        let dir = TempDir::new("disk-of-junction");
+        let (target, link) = (dir.0.join("target"), dir.0.join("link"));
+        fs::create_dir(&target).unwrap();
+        let made = std::process::Command::new("cmd").args(["/C", "mklink", "/J"]).arg(&link).arg(&target).output().unwrap();
+        assert!(made.status.success(), "mklink failed: {made:?}");
+
+        assert!(matches!(disk_of(fs::symlink_metadata(&link)), Disk::File(_)));
+    }
+
+    #[test]
+    fn disk_of_not_found_is_gone() {
+        assert_eq!(disk_of(Err(ErrorKind::NotFound.into())), Disk::Gone);
+    }
+
+    #[test]
+    fn disk_of_another_error_is_unreadable() {
+        assert_eq!(disk_of(Err(ErrorKind::PermissionDenied.into())), Disk::Unreadable);
+    }
+
+    #[test]
+    fn read_disk_of_a_missing_path_is_gone() {
+        let dir = TempDir::new("read-disk-missing");
+
+        assert_eq!(read_disk(&dir.0.join("nothing")), Disk::Gone);
+    }
+
+    // ---- allowed ----
+    #[test]
+    fn allowed_is_true_only_for_a_finished_scan_with_data() {
+        let cases = [
+            ("idle", ScanState::Idle, true),
+            ("scanning", ScanState::Scanning { files: 1, dirs: 1 }, true),
+            ("error", ScanState::Error("x".into()), true),
+            ("cancelled", ScanState::Cancelled, true),
+            ("done", ScanState::Done(summary()), true),
+            ("done without data", ScanState::Done(summary()), false),
+        ];
+
+        let got: Vec<(&str, bool)> = cases.iter().map(|(name, state, loaded)| (*name, allowed(state, *loaded))).collect();
+
+        let want = [("idle", false), ("scanning", false), ("error", false), ("cancelled", false), ("done", true), ("done without data", false)];
+        assert_eq!(got, want);
+    }
+
+    // ---- prepare ----
+    /// `C:\scan`{ "d<RLO>x"(1){ g(3) }, "invoice<RLO>fdp.exe"(2) }: names that display_name would change.
+    fn spoofed() -> (Tree, NodeId, NodeId, NodeId) {
+        let e = |id: u64, parent: u64, name: &str, is_dir: bool| RawEntry { id, parent, name: name.into(), size: 10, allocated: 10, is_dir };
+        let entries = vec![e(0, 0, "C:\\scan", true), e(1, 0, "d\u{202E}x", true), e(2, 0, "invoice\u{202E}fdp.exe", false), e(3, 1, "g", false)];
+        let tree = rollup(0, entries).unwrap().tree;
+        let find = |n: &str| tree.children(tree.root()).find(|&c| tree.name(c) == n).unwrap();
+        let (folder, file) = (find("d\u{202E}x"), find("invoice\u{202E}fdp.exe"));
+        let g = tree.children(folder).next().unwrap();
+        (tree, folder, file, g)
+    }
+
+    #[test]
+    fn prepare_path_is_the_scan_root_plus_the_raw_names() {
+        let (tree, _, _, g) = spoofed();
+
+        let got = prepare(&tree, g, |_| Disk::File(10));
+
+        let want = PathBuf::from("C:\\scan").join("d\u{202E}x").join("g");
+        assert_eq!(got, Prepared::Ready { path: want, before: Disk::File(10) });
+    }
+
+    #[test]
+    fn prepare_a_folder_node_with_a_folder_on_disk_is_ready() {
+        let (tree, folder, _, _) = spoofed();
+
+        let got = prepare(&tree, folder, |_| Disk::Dir);
+
+        assert_eq!(got, Prepared::Ready { path: PathBuf::from("C:\\scan").join("d\u{202E}x"), before: Disk::Dir });
+    }
+
+    #[test]
+    fn prepare_a_disk_that_does_not_match_the_node_is_changed() {
+        let (tree, folder, file, _) = spoofed();
+        let cases = [
+            ("file gone", file, Disk::Gone),
+            ("file unreadable", file, Disk::Unreadable),
+            ("file is a folder now", file, Disk::Dir),
+            ("folder is a file now", folder, Disk::File(10)),
+            ("folder gone", folder, Disk::Gone),
+            ("folder unreadable", folder, Disk::Unreadable),
+        ];
+
+        let got: Vec<(&str, Prepared)> = cases.iter().map(|(name, n, disk)| (*name, prepare(&tree, *n, |_| disk.clone()))).collect();
+
+        assert!(got.iter().all(|(_, p)| *p == Prepared::Changed), "{got:?}");
+    }
+
+    #[test]
+    fn prepare_name_with_spaces_unicode_and_shell_characters_is_ready() {
+        let dir = TempDir::new("prepare-odd");
+        let name = "a b ü日本 ; & % , x.txt";
+        fs::create_dir(dir.0.join("sub dir ;&%,")).unwrap();
+        fs::write(dir.0.join("sub dir ;&%,").join(name), b"hello").unwrap();
+        let tree = scanned(&dir.0);
+        let n = find(&tree, &["sub dir ;&%,", name]);
+
+        let got = prepare(&tree, n, read_disk);
+
+        assert_eq!(got, Prepared::Ready { path: dir.0.join("sub dir ;&%,").join(name), before: Disk::File(5) });
+    }
+
+    #[test]
+    fn prepare_path_of_300_characters_is_ready() {
+        let dir = TempDir::new("prepare-long");
+        let (a, b, file) = ("a".repeat(100), "b".repeat(100), format!("{}.txt", "c".repeat(100)));
+        let folder = dir.0.join(&a).join(&b);
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(folder.join(&file), b"hello").unwrap();
+        let tree = scanned(&dir.0);
+        let n = find(&tree, &[&a, &b, &file]);
+
+        let got = prepare(&tree, n, read_disk);
+
+        assert!(tree.path(n).as_os_str().len() > 300);
+        assert_eq!(got, Prepared::Ready { path: folder.join(&file), before: Disk::File(5) });
+    }
+
+    #[test]
+    fn prepare_name_with_an_unpaired_surrogate_is_changed() {
+        let dir = TempDir::new("prepare-surrogate");
+        let name = OsString::from_wide(&[0x61, 0xD800, 0x62]);
+        fs::write(dir.0.join(&name), b"hello").unwrap();
+        let tree = scanned(&dir.0);
+        // The scan made the name lossy: the path it gives names no file.
+        let n = find(&tree, &["a\u{FFFD}b"]);
+
+        let got = prepare(&tree, n, read_disk);
+
+        assert_eq!(got, Prepared::Changed);
+    }
+
+    #[test]
+    fn prepare_file_replaced_by_a_folder_after_the_scan_is_changed() {
+        let dir = TempDir::new("prepare-replaced");
+        fs::write(dir.0.join("x"), b"hello").unwrap();
+        let tree = scanned(&dir.0);
+        fs::remove_file(dir.0.join("x")).unwrap();
+        fs::create_dir(dir.0.join("x")).unwrap();
+
+        let got = prepare(&tree, find(&tree, &["x"]), read_disk);
+
+        assert_eq!(got, Prepared::Changed);
+    }
+
+    // ---- items ----
+    const EXPLORE: Item = Item::Action(Cmd::ExploreFolder, "Explore Folder");
+    const PROMPT: Item = Item::Action(Cmd::CommandPrompt, "Command Prompt Here");
+    const COPY: Item = Item::Action(Cmd::CopyPath, "Copy Path");
+    const SHOW: Item = Item::Action(Cmd::ShowFolder, "Show this folder");
+
+    fn ready(before: Disk) -> Prepared {
+        Prepared::Ready { path: PathBuf::from("C:\\x"), before }
+    }
+
+    #[test]
+    fn items_file_has_explore_prompt_copy_and_a_separator() {
+        assert_eq!(items(&ready(Disk::File(1)), false, true), [EXPLORE, PROMPT, COPY, Item::Separator]);
+    }
+
+    #[test]
+    fn items_folder_adds_show_this_folder() {
+        assert_eq!(items(&ready(Disk::Dir), true, true), [EXPLORE, PROMPT, COPY, SHOW, Item::Separator]);
+    }
+
+    #[test]
+    fn items_changed_is_only_the_changed_line_and_rescan() {
+        let want = [Item::Disabled("This item changed on disk. Rescan."), Item::Action(Cmd::Rescan, "Rescan")];
+
+        assert_eq!([items(&Prepared::Changed, false, false), items(&Prepared::Changed, true, true)], [want, want]);
+    }
+
+    #[test]
+    fn items_shell_failed_adds_the_no_menu_line() {
+        let got = items(&ready(Disk::File(1)), false, false);
+
+        assert_eq!(got, [EXPLORE, PROMPT, COPY, Item::Separator, Item::Disabled("Windows has no menu for this item.")]);
+    }
+
+    // ---- picked ----
+    #[test]
+    fn picked_maps_every_id_range() {
+        let ids = [0, 1, 2, 3, 4, 5, 6, 0xFF, 0x100, 0x7FFC, 0x7FFF, 0x8000, u32::MAX];
+
+        let got: Vec<Picked> = ids.iter().map(|&id| picked(id)).collect();
+
+        let want = [
+            Picked::Nothing,
+            Picked::Volatus(Cmd::ExploreFolder),
+            Picked::Volatus(Cmd::CommandPrompt),
+            Picked::Volatus(Cmd::CopyPath),
+            Picked::Volatus(Cmd::ShowFolder),
+            Picked::Volatus(Cmd::Rescan),
+            Picked::Nothing,
+            Picked::Nothing,
+            Picked::Shell(0),
+            Picked::Shell(0x7EFC),
+            Picked::Shell(0x7EFF),
+            Picked::Nothing,
+            Picked::Nothing,
+        ];
+        assert_eq!(got, want);
+    }
+
+    // ---- flags ----
+    #[test]
+    fn query_flags_without_shift_is_normal() {
+        assert_eq!(query_flags(false), 0);
+    }
+
+    #[test]
+    fn query_flags_with_shift_adds_only_the_extended_verbs() {
+        assert_eq!(query_flags(true), 0x100);
+    }
+
+    #[test]
+    fn query_flags_never_set_can_rename() {
+        assert_eq!([query_flags(false), query_flags(true)].map(|f| f & 0x10), [0, 0]);
+    }
+
+    #[test]
+    fn invoke_mask_covers_the_four_shift_and_ctrl_combinations() {
+        const BASE: u32 = 0x4000 | 0x2000_0000;
+
+        let got = [(false, false), (true, false), (false, true), (true, true)].map(|(shift, ctrl)| invoke_mask(shift, ctrl));
+
+        assert_eq!(got, [BASE, BASE | 0x1000_0000, BASE | 0x4000_0000, BASE | 0x1000_0000 | 0x4000_0000]);
+    }
+
+    // ---- verbs ----
+    #[test]
+    fn is_delete_is_true_only_for_the_verb_delete_in_any_ascii_case() {
+        let verbs = [Some("delete"), Some("Delete"), Some("DELETE"), Some("delete "), Some("deletex"), Some("Löschen"), Some(""), None];
+
+        let got = verbs.map(is_delete);
+
+        assert_eq!(got, [true, true, true, false, false, false, false, false]);
+    }
+
+    #[test]
+    fn is_delete_is_false_for_the_verbs_the_shell_gave_in_the_spike() {
+        // S6: copyaspath, properties and the like; third-party verbs are GUIDs or product names.
+        let verbs = [
+            "open", "Edit", "Print", "openas", "pintohomefile", "pintohome", "PinToStartScreen", "copyaspath", "Windows.ModernShare",
+            "PreviousVersions", "cut", "copy", "link", "properties", "Powershell", "WSL", "opennewprocess",
+            "{1861E28B-A1F0-4EF4-A1FE-4C8CA88E2174}", "PeaZip.ext2main", "SevenZipCompress", "TeraCopy", "ShareX", "Volatus", "WizTree",
+        ];
+
+        assert!(verbs.iter().all(|v| !is_delete(Some(v))));
+    }
+
+    #[test]
+    fn user_cancelled_is_true_only_for_the_cancel_result_of_the_shell() {
+        let results = [0x8027_0000_u32 as i32, 0, 0x8000_4005_u32 as i32, 0x8007_0057_u32 as i32];
+
+        assert_eq!(results.map(user_cancelled), [true, false, false, false]);
+    }
+
+    // ---- judge ----
+    #[test]
+    fn judge_covers_delete_and_other_actions_for_every_disk_now_and_last_check() {
+        let before = Disk::File(5);
+        let nows = [("gone", Disk::Gone), ("same", Disk::File(5)), ("different", Disk::File(6)), ("unreadable", Disk::Unreadable)];
+        use Outcome::{Nothing, Outdated, Remove, Wait};
+        // (delete, now, last) in the order of the loops below.
+        let want = [
+            // delete: gone, same, different, unreadable; not last then last
+            Remove, Remove, Wait, Nothing, Outdated, Outdated, Outdated, Outdated,
+            // other action
+            Outdated, Outdated, Wait, Nothing, Outdated, Outdated, Outdated, Outdated,
+        ];
+
+        let mut got = Vec::new();
+        for delete in [true, false] {
+            for (_, now) in &nows {
+                for last in [false, true] {
+                    got.push(judge(delete, &before, now, last));
+                }
+            }
+        }
+
+        assert_eq!(got, want);
+    }
+
+    // ---- Follow ----
+    fn follow(delete: bool) -> Follow {
+        Follow::new(NodeId(1), 0, PathBuf::from("C:\\x"), delete, Disk::File(5))
+    }
+
+    #[test]
+    fn follow_step_waits_half_a_second_then_a_second_and_a_half_then_ends() {
+        let mut f = follow(false);
+        let same = Disk::File(5);
+
+        let got = [f.step(&same), f.step(&same), f.step(&same)];
+
+        let want = [
+            (Outcome::Wait, Some(Duration::from_millis(500))),
+            (Outcome::Wait, Some(Duration::from_millis(1500))),
+            (Outcome::Nothing, None),
+        ];
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn follow_step_a_decision_has_no_delay_and_stops_the_checks() {
+        let mut f = follow(true);
+
+        let got = [f.step(&Disk::Gone), f.step(&Disk::Gone)];
+
+        assert_eq!(got, [(Outcome::Remove, None), (Outcome::Nothing, None)]);
+    }
+
+    #[test]
+    fn follow_step_an_item_that_changes_between_checks_is_outdated() {
+        let mut f = follow(false);
+
+        let got = [f.step(&Disk::File(5)), f.step(&Disk::File(9))];
+
+        assert_eq!(got, [(Outcome::Wait, Some(Duration::from_millis(500))), (Outcome::Outdated, None)]);
+    }
+
+    // ---- terminal_folder ----
+    #[test]
+    fn terminal_folder_of_a_folder_is_the_folder() {
+        assert_eq!(terminal_folder(Path::new("C:\\a\\b"), true), PathBuf::from("C:\\a\\b"));
+    }
+
+    #[test]
+    fn terminal_folder_of_a_file_is_its_folder() {
+        assert_eq!(terminal_folder(Path::new("C:\\a\\b.txt"), false), PathBuf::from("C:\\a"));
+    }
+
+    #[test]
+    fn terminal_folder_of_a_file_in_a_drive_root_is_the_drive_root() {
+        assert_eq!(terminal_folder(Path::new("C:\\b.txt"), false), PathBuf::from("C:\\"));
+    }
+
+    #[test]
+    fn terminal_folder_of_a_drive_root_is_the_drive_root() {
+        assert_eq!(terminal_folder(Path::new("C:\\"), true), PathBuf::from("C:\\"));
+    }
+
+    // ---- screen_point ----
+    #[test]
+    fn screen_point_scales_the_window_point_and_adds_the_origin() {
+        let got = [1.0, 1.5, 2.0].map(|scale| screen_point((10.0, 20.0), scale, (100, -50)));
+
+        assert_eq!(got, [(110, -30), (115, -20), (120, -10)]);
+    }
+
+    #[test]
+    fn screen_point_rounds_half_away_from_zero() {
+        let got = [screen_point((1.0, 3.0), 1.5, (0, 0)), screen_point((-1.0, -3.0), 1.5, (0, 0))];
+
+        // 1.5 -> 2, 4.5 -> 5; -1.5 -> -2, -4.5 -> -5.
+        assert_eq!(got, [(2, 5), (-2, -5)]);
+    }
+}

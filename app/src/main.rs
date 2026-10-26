@@ -11,6 +11,7 @@ mod cli;
 mod drives;
 mod elevate;
 mod footer;
+mod menu;
 mod model;
 mod motion;
 mod nav;
@@ -186,6 +187,11 @@ struct Session {
     /// Folder given on the command line. Its scan starts once, after the first frame or after
     /// `LAUNCH_FALLBACK`, whichever comes first (`take_launch_path`).
     launch_path: Option<String>,
+    /// The shown scan was found changed on disk after an action (`menu::Follow`): the top bar
+    /// offers Rescan. Cleared with the scan (`forget_scan`).
+    outdated: bool,
+    /// The checks after a menu action that are still to come. At most one; a new menu or scan drops it.
+    follow: Option<menu::Follow>,
 }
 
 /// A finished layout of folder `root`: its rects in physical pixels, its picture and its labels.
@@ -234,6 +240,8 @@ thread_local! {
         out_from: None,
         fade_next: false,
         launch_path: None,
+        outdated: false,
+        follow: None,
     });
     /// Starts one relayout after the window stops changing the treemap size.
     static RESIZE_TIMER: Timer = Timer::default();
@@ -822,6 +830,60 @@ fn select(ui: &MainWindow, node: NodeId) {
             ui.invoke_show_row(row);
         }
     });
+}
+
+/// Where a menu was asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Source {
+    /// A right-click on the treemap; the tile under the pointer is passed separately (`hit_at`).
+    Map,
+    /// A right-click on tree row `i`.
+    Row(i32),
+    /// A right-click on the crumb that opens node `i` (-1: the gap crumb, which opens nothing).
+    Crumb(i32),
+    /// The Menu key or Shift+F10: the selected node.
+    Key,
+}
+
+/// The node a menu is for and whether to select it first. `hit` is the treemap tile under the
+/// pointer (`Source::Map`). `None` for no item or an item that left the tree. A right-click on a
+/// tile or a row selects it, as a left-click does; on a crumb it does not (selecting an ancestor
+/// would move the map), and a key acts on the selection that already exists.
+fn target_of(l: &Loaded, src: Source, hit: Option<NodeId>) -> Option<(NodeId, bool)> {
+    let _ = (l, src, hit);
+    todo!("target_of")
+}
+
+/// The tile of the treemap (`rects`, physical pixels) under the view point (x, y) while `moving`
+/// is at time `t`: what a left-click hits (`picture_point`).
+fn hit_at(rects: &[Rect], moving: Option<Move>, t: f64, view: (f64, f64), x: f64, y: f64) -> Option<NodeId> {
+    let _ = (rects, moving, t, view, x, y);
+    todo!("hit_at")
+}
+
+/// Runs a Volatus menu item through `act` and gives the note to show when it fails. `act` gets the
+/// command and the path to use (a command prompt gets `menu::terminal_folder`). Show this folder
+/// and Rescan are not actions of the shell: no call, no note.
+fn run_action(
+    cmd: menu::Cmd,
+    path: &std::path::Path,
+    is_dir: bool,
+    act: impl FnOnce(menu::Cmd, &std::path::Path) -> Result<(), String>,
+) -> Option<String> {
+    let _ = (cmd, path, is_dir, act);
+    todo!("run_action")
+}
+
+/// True when the top bar offers Rescan: a finished scan found changed on disk.
+fn rescan_shown(state: &ScanState, outdated: bool) -> bool {
+    let _ = (state, outdated);
+    todo!("rescan_shown")
+}
+
+/// The folder a Rescan scans, as typed (`relaunch_path`): the shown scan's root. `None` unless a
+/// scan is finished. The options stay in the session, so the scan runs with the same ones.
+fn rescan_target() -> Option<String> {
+    todo!("rescan_target")
 }
 
 /// Replaces the shown scan with a new one.
@@ -1654,7 +1716,9 @@ mod tests {
         Move, picture_point, zoom_frame_at, take_launch_path, forget_scan, gate_hover, left_map,
         shows_start_at_launch, relaunch_path, LabelKind, LogicalBox, Placed, place_label, stretch,
         apply_args, FOOTER_CHIPS, Stored, chips_of, drop_types, store_totals, remove_node, Removal, apply_removal,
+        Source, target_of, hit_at, run_action, rescan_shown, rescan_target,
     };
+    use crate::menu::{self, Cmd, Disk};
     use treemap::filetype::{TypeTotal, type_totals};
     use crate::tip;
     use crate::motion::Kind;
@@ -2820,5 +2884,237 @@ mod tests {
 
         let left = SESSION.with_borrow(|s| (s.loaded.is_none(), s.held.is_none(), s.out_from, s.fade_next));
         assert_eq!(left, (true, true, None, false));
+    }
+
+    // ---- the context menu: targets ----
+    /// `loaded_typed` with the rows root, docs, c.txt shown (docs collapsed) and a.txt selected.
+    fn loaded_with_rows() -> Loaded {
+        let mut l = loaded_typed();
+        let row = |node, has_children| crate::tree_view::Row { node, depth: 0, expanded: false, has_children };
+        l.model.set_rows(vec![row(NodeId(0), true), row(DOCS, true), row(C_TXT, false)]);
+        l.selected = Some(A_TXT);
+        l
+    }
+
+    #[test]
+    fn target_of_map_tile_is_that_node_and_selects_it() {
+        let l = loaded_with_rows();
+
+        assert_eq!(target_of(&l, Source::Map, Some(C_TXT)), Some((C_TXT, true)));
+    }
+
+    #[test]
+    fn target_of_map_frame_header_is_that_folder_and_selects_it() {
+        let l = loaded_with_rows();
+
+        assert_eq!(target_of(&l, Source::Map, Some(DOCS)), Some((DOCS, true)));
+    }
+
+    #[test]
+    fn target_of_map_with_no_tile_is_none() {
+        assert_eq!(target_of(&loaded_with_rows(), Source::Map, None), None);
+    }
+
+    #[test]
+    fn target_of_row_is_its_node_and_selects_it() {
+        let l = loaded_with_rows();
+
+        assert_eq!(target_of(&l, Source::Row(2), None), Some((C_TXT, true)));
+    }
+
+    #[test]
+    fn target_of_row_that_does_not_exist_is_none() {
+        let l = loaded_with_rows();
+
+        assert_eq!([Source::Row(-1), Source::Row(3), Source::Row(i32::MAX)].map(|src| target_of(&l, src, None)), [None, None, None]);
+    }
+
+    #[test]
+    fn target_of_crumb_is_that_folder_and_does_not_select_it() {
+        let l = loaded_with_rows();
+
+        assert_eq!(target_of(&l, Source::Crumb(DOCS.0 as i32), None), Some((DOCS, false)));
+    }
+
+    #[test]
+    fn target_of_the_gap_crumb_and_a_crumb_past_the_tree_are_none() {
+        let l = loaded_with_rows();
+
+        assert_eq!([Source::Crumb(-1), Source::Crumb(6), Source::Crumb(i32::MAX)].map(|src| target_of(&l, src, None)), [None, None, None]);
+    }
+
+    #[test]
+    fn target_of_crumb_of_a_removed_folder_is_none() {
+        let mut l = loaded_with_rows();
+        remove_node(&mut l, DOCS);
+
+        assert_eq!(target_of(&l, Source::Crumb(DOCS.0 as i32), None), None);
+    }
+
+    #[test]
+    fn target_of_map_tile_removed_since_the_layout_is_none() {
+        let mut l = loaded_with_rows();
+        remove_node(&mut l, A_TXT);
+
+        assert_eq!(target_of(&l, Source::Map, Some(A_TXT)), None);
+    }
+
+    #[test]
+    fn target_of_key_is_the_selected_node_and_does_not_select_it_again() {
+        let l = loaded_with_rows();
+
+        assert_eq!(target_of(&l, Source::Key, None), Some((A_TXT, false)));
+    }
+
+    #[test]
+    fn target_of_key_with_nothing_selected_is_none() {
+        let mut l = loaded_with_rows();
+        l.selected = None;
+
+        assert_eq!(target_of(&l, Source::Key, None), None);
+    }
+
+    #[test]
+    fn target_of_the_same_folder_by_map_row_crumb_and_key_is_the_same_node() {
+        let mut l = loaded_with_rows();
+        l.selected = Some(DOCS);
+
+        let by = [
+            target_of(&l, Source::Map, Some(DOCS)),
+            target_of(&l, Source::Row(1), None),
+            target_of(&l, Source::Crumb(DOCS.0 as i32), None),
+            target_of(&l, Source::Key, None),
+        ];
+
+        assert_eq!(by.map(|t| t.map(|(n, _)| n)), [Some(DOCS); 4]);
+    }
+
+    #[test]
+    fn hit_at_during_a_zoom_out_is_the_tile_a_left_click_hits() {
+        // (200, 200) is in tile 2 of the full map, but tile 1 fills the view at t = 0.
+        assert_eq!(hit_at(&two_tiles(), Some(zoom_out_of_tile_1()), 0.0, VIEW, 200.0, 200.0), Some(NodeId(1)));
+    }
+
+    #[test]
+    fn hit_at_with_no_zoom_is_the_tile_under_the_point() {
+        assert_eq!(hit_at(&two_tiles(), None, 0.0, VIEW, 200.0, 200.0), Some(NodeId(2)));
+    }
+
+    #[test]
+    fn hit_at_outside_every_tile_is_none() {
+        // Tile 1 is (0, 0, 100, 100); tile 2 starts at x = 100: (50, 300) is in neither.
+        assert_eq!(hit_at(&two_tiles(), None, 0.0, VIEW, 50.0, 300.0), None);
+    }
+
+    // ---- the context menu: outdated, Rescan ----
+    #[test]
+    fn rescan_shown_only_for_a_finished_scan_that_is_outdated() {
+        use crate::model::ScanState;
+        let states = [
+            ScanState::Idle,
+            ScanState::Scanning { files: 1, dirs: 1 },
+            ScanState::Error("x".into()),
+            ScanState::Cancelled,
+            ScanState::Done(summary()),
+        ];
+
+        let outdated = states.each_ref().map(|st| rescan_shown(st, true));
+        let current = rescan_shown(&ScanState::Done(summary()), false);
+
+        assert_eq!((outdated, current), ([false, false, false, false, true], false));
+    }
+
+    #[test]
+    fn forget_scan_clears_outdated_and_the_pending_checks() {
+        SESSION.with_borrow_mut(|s| {
+            s.outdated = true;
+            s.follow = Some(menu::Follow::new(NodeId(1), 0, std::path::PathBuf::from("C:\\x"), true, Disk::Dir));
+        });
+        let (_, show) = shown();
+
+        forget_scan(show);
+
+        assert_eq!(SESSION.with_borrow(|s| (s.outdated, s.follow.is_none())), (false, true));
+    }
+
+    #[test]
+    fn rescan_target_of_a_finished_scan_is_its_root_as_typed_and_keeps_the_options() {
+        show_finished_scan(&data());
+        SESSION.with_borrow_mut(|s| {
+            s.scan_root = std::path::PathBuf::from("D:\\Data");
+            s.flags.timing = true;
+        });
+
+        let target = rescan_target();
+
+        assert_eq!((target.as_deref(), SESSION.with_borrow(|s| s.flags.timing)), (Some("D:\\Data"), true));
+    }
+
+    #[test]
+    fn rescan_target_without_a_finished_scan_is_none() {
+        SESSION.with_borrow_mut(|s| s.scan_root = std::path::PathBuf::from("D:\\Data"));
+
+        assert_eq!(rescan_target(), None);
+    }
+
+    // ---- the context menu: Volatus items ----
+    /// Runs `cmd` on C:\a\f.txt (a file, or a folder) with an action that fails with "boom" or works.
+    /// Gives the note and what the action was called with.
+    fn run_cmd(cmd: Cmd, is_dir: bool, fail: bool) -> (Option<String>, Option<(Cmd, std::path::PathBuf)>) {
+        let called = RefCell::new(None);
+        let note = run_action(cmd, std::path::Path::new("C:\\a\\f.txt"), is_dir, |c, p| {
+            *called.borrow_mut() = Some((c, p.to_path_buf()));
+            if fail { Err("boom".into()) } else { Ok(()) }
+        });
+        (note, called.into_inner())
+    }
+
+    #[test]
+    fn run_action_a_failing_action_gives_its_note() {
+        let notes = [Cmd::ExploreFolder, Cmd::CommandPrompt, Cmd::CopyPath].map(|cmd| run_cmd(cmd, false, true).0);
+
+        assert_eq!(
+            notes,
+            [
+                Some("Volatus cannot open the folder.".to_string()),
+                Some("Volatus cannot open a command prompt.".to_string()),
+                Some("Volatus cannot copy the path.".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn run_action_a_working_action_gives_no_note() {
+        let notes = [Cmd::ExploreFolder, Cmd::CommandPrompt, Cmd::CopyPath].map(|cmd| run_cmd(cmd, false, false).0);
+
+        assert_eq!(notes, [None, None, None]);
+    }
+
+    #[test]
+    fn run_action_explore_and_copy_get_the_raw_path() {
+        let paths = [Cmd::ExploreFolder, Cmd::CopyPath].map(|cmd| run_cmd(cmd, false, false).1);
+
+        let raw = std::path::PathBuf::from("C:\\a\\f.txt");
+        assert_eq!(paths, [Some((Cmd::ExploreFolder, raw.clone())), Some((Cmd::CopyPath, raw))]);
+    }
+
+    #[test]
+    fn run_action_command_prompt_gets_the_folder_of_a_file_and_a_folder_itself() {
+        let paths = [run_cmd(Cmd::CommandPrompt, false, false).1, run_cmd(Cmd::CommandPrompt, true, false).1];
+
+        assert_eq!(
+            paths,
+            [
+                Some((Cmd::CommandPrompt, std::path::PathBuf::from("C:\\a"))),
+                Some((Cmd::CommandPrompt, std::path::PathBuf::from("C:\\a\\f.txt"))),
+            ]
+        );
+    }
+
+    #[test]
+    fn run_action_show_folder_and_rescan_are_not_the_actions_of_the_shell() {
+        let got = [Cmd::ShowFolder, Cmd::Rescan].map(|cmd| run_cmd(cmd, true, true));
+
+        assert_eq!(got, [(None, None), (None, None)]);
     }
 }
