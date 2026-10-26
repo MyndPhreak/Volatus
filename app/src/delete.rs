@@ -68,8 +68,8 @@ impl Probe for RealFs {
         std::fs::canonicalize(p).ok()
     }
     /// The whole path is made verbatim (`\\?\`) from its text first: Win32 would drop a trailing
-    /// dot or space in any name, the parent's too, and reach a sibling. A `.` or `..` name gives
-    /// `None`. The parent is resolved and the LITERAL name joined onto it. Any reparse point
+    /// dot or space in any name, the parent's too, and reach a sibling. A `.` or `..` name, or a
+    /// name with a `:`, gives `None`. The parent is resolved and the LITERAL name joined onto it. Any reparse point
     /// (junction, symlink or other) counts as a link and is not followed; only its final name is
     /// made long, so a short name cannot hide a protected link. Any other item is canonicalized,
     /// so an 8.3 short name becomes the long name. An item that is gone keeps the joined path;
@@ -81,6 +81,11 @@ impl Probe for RealFs {
         let (Some(parent), Some(name)) = (p.parent(), p.file_name()) else {
             return std::fs::canonicalize(&p).ok();
         };
+        // The join must only add one plain name; anything else could replace the parent.
+        let mut parts = Path::new(name).components();
+        if !matches!((parts.next(), parts.next()), (Some(std::path::Component::Normal(_)), None)) {
+            return None;
+        }
         let literal = std::fs::canonicalize(parent).ok()?.join(name);
         match std::fs::symlink_metadata(&literal) {
             Ok(m) if m.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 => long_name(&literal),
@@ -94,7 +99,9 @@ impl Probe for RealFs {
 /// The verbatim (`\\?\`) form of an absolute drive path, built from its text alone. Win32 drops a
 /// trailing dot or space from a name and would reach a sibling; a verbatim path keeps the name.
 /// `/` counts as `\` and empty names (`a\\b`, a trailing `\`) are dropped. `None` for any other
-/// kind of path and for a `.` or `..` name: folding those by text could name another item.
+/// kind of path and for a `.` or `..` name: folding those by text could name another item. `None`
+/// too for a name with a `:` (a drive-relative name or a stream): a join would leave the verbatim
+/// form.
 fn verbatim(p: &Path) -> Option<PathBuf> {
     use std::os::windows::ffi::{OsStrExt, OsStringExt};
     let (slash, back, colon, dot) = (u16::from(b'/'), u16::from(b'\\'), u16::from(b':'), u16::from(b'.'));
@@ -108,7 +115,8 @@ fn verbatim(p: &Path) -> Option<PathBuf> {
     let mut out = prefix;
     out.extend([*letter, colon, back]);
     for (i, name) in names.split(|c| *c == back).filter(|n| !n.is_empty()).enumerate() {
-        if name == [dot] || name == [dot, dot] {
+        // A `:` makes a name a drive-relative path (`C:Docs`) or a stream (`ff::$DATA`).
+        if name == [dot] || name == [dot, dot] || name.contains(&colon) {
             return None;
         }
         if i > 0 {
