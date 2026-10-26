@@ -36,8 +36,9 @@ use slint::{
 };
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
+use settings::{Settings, ThemeChoice};
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
@@ -87,6 +88,10 @@ struct RowModel {
     data: RefCell<std::sync::Weak<Data>>,
     rows: RefCell<Vec<Row>>,
     notify: ModelNotify,
+    /// The unit of the size column. Kept here, not read from the session: the list can ask for a
+    /// row while the session is borrowed.
+    #[allow(dead_code)] // Red stub; read from "Implement the settings window".
+    unit: Cell<Unit>,
 }
 
 impl RowModel {
@@ -198,6 +203,63 @@ struct Session {
     outdated: bool,
     /// The checks after a menu action that are still to come. At most one; a new menu or scan drops it.
     follow: Option<menu::Follow>,
+    /// The user's settings, as applied to the window.
+    #[allow(dead_code)] // Red stub; read from "Implement the settings window".
+    settings: Settings,
+    /// Where the settings are saved. `None`: they are never saved (no `APPDATA`, or the file
+    /// could not be kept before a save would replace it, see `adopt_settings`).
+    #[allow(dead_code)] // Red stub; read from "Implement the settings window".
+    settings_path: Option<PathBuf>,
+}
+
+/// The text the flyout shows when the settings are not saved.
+#[allow(dead_code)] // Red stub; used from "Implement the settings window".
+const SAVE_ERROR: &str = "Settings could not be saved.";
+
+/// A part of the window that shows a size, so it is synced again when the unit changes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)] // Red stub; used from "Implement the settings window".
+enum Site {
+    /// The tree rows.
+    Rows,
+    /// The footer chips.
+    Types,
+    /// The treemap value of the selected node for a screen reader.
+    Selection,
+    /// The scan summary on the top bar or the start screen.
+    Banner,
+    /// The labels on the map and the hover tooltip (a new layout makes both again).
+    Map,
+    /// The drive cards of the start screen.
+    Drives,
+}
+
+/// Every part that is synced again after a unit change (`resync_after_unit_change`).
+#[allow(dead_code)] // Red stub; used from "Implement the settings window".
+fn sites_after_unit_change() -> &'static [Site] {
+    &[]
+}
+
+/// Puts the settings loaded from `path` into the session. A file that was not kept
+/// (`Loaded::NotKept`) is never saved over, and no path means nowhere to save: both give the
+/// text for `settings-error` at once. Else the text is "".
+#[allow(dead_code)] // Red stub; used from "Implement the settings window".
+fn adopt_settings(_s: &mut Session, _path: Option<PathBuf>, _loaded: (Settings, settings::Loaded)) -> &'static str {
+    ""
+}
+
+/// Saves the session settings with `save`. Returns the text for `settings-error`: "" when saved,
+/// `SAVE_ERROR` when the save failed or the settings must not be saved. The settings stay as they
+/// are either way.
+#[allow(dead_code)] // Red stub; used from "Implement the settings window".
+fn persist_with(_s: &mut Session, _save: impl FnOnce(&Path, &Settings) -> std::io::Result<()>) -> &'static str {
+    ""
+}
+
+/// The window is dark for `choice` when Windows is dark or not (`system_dark`).
+#[allow(dead_code)] // Red stub; used from "Implement the settings window".
+fn effective_dark(_choice: ThemeChoice, _system_dark: bool) -> bool {
+    false
 }
 
 /// A finished layout of folder `root`: its rects in physical pixels, its picture and its labels.
@@ -248,6 +310,8 @@ thread_local! {
         launch_path: None,
         outdated: false,
         follow: None,
+        settings: Settings::default(),
+        settings_path: None,
     });
     /// Starts one relayout after the window stops changing the treemap size.
     static RESIZE_TIMER: Timer = Timer::default();
@@ -1107,8 +1171,12 @@ fn rescan(ui: &MainWindow) {
 /// Replaces the shown scan with a new one.
 fn install(ui: &MainWindow, data: Arc<Data>) {
     let root = data.tree.root();
-    let model =
-        Rc::new(RowModel { data: RefCell::new(Arc::downgrade(&data)), rows: RefCell::new(Vec::new()), notify: ModelNotify::default() });
+    let model = Rc::new(RowModel {
+        data: RefCell::new(Arc::downgrade(&data)),
+        rows: RefCell::new(Vec::new()),
+        notify: ModelNotify::default(),
+        unit: Cell::new(current_unit()),
+    });
     ui.set_rows(ModelRc::from(model.clone()));
     SESSION.with_borrow_mut(|s| {
         s.loaded = Some(Loaded {
@@ -2196,7 +2264,12 @@ mod tests {
         let (tree, folder, file) = spoofed();
         let data = Arc::new(Data { counts: crate::tree_view::file_counts(&tree), tree });
         let row = |node| crate::tree_view::Row { node, depth: 0, expanded: false, has_children: false };
-        let model = RowModel { data: RefCell::new(Arc::downgrade(&data)), rows: RefCell::new(vec![row(folder), row(file)]), notify: ModelNotify::default() };
+        let model = RowModel {
+            data: RefCell::new(Arc::downgrade(&data)),
+            rows: RefCell::new(vec![row(folder), row(file)]),
+            notify: ModelNotify::default(),
+            unit: std::cell::Cell::new(Unit::Dynamic),
+        };
 
         let names: Vec<String> = (0..2).map(|i| slint::Model::row_data(&model, i).unwrap().name.to_string()).collect();
 
@@ -2565,7 +2638,12 @@ mod tests {
 
     fn loaded(data: &Arc<Data>) -> Loaded {
         let root = data.tree.root();
-        let model = Rc::new(RowModel { data: RefCell::new(Arc::downgrade(data)), rows: RefCell::new(Vec::new()), notify: ModelNotify::default() });
+        let model = Rc::new(RowModel {
+            data: RefCell::new(Arc::downgrade(data)),
+            rows: RefCell::new(Vec::new()),
+            notify: ModelNotify::default(),
+            unit: std::cell::Cell::new(Unit::Dynamic),
+        });
         Loaded {
             data: data.clone(),
             model,
@@ -3606,5 +3684,143 @@ mod tests {
         let got = [Cmd::ShowFolder, Cmd::Rescan].map(|cmd| run_cmd(cmd, true, true));
 
         assert_eq!(got, [(None, None), (None, None)]);
+    }
+
+    // ---- settings ----
+    use super::{
+        SAVE_ERROR, Settings, Site, ThemeChoice, adopt_settings, current_unit, effective_dark, persist_with,
+        sites_after_unit_change,
+    };
+    use crate::settings;
+    use std::cell::Cell;
+    use std::path::{Path, PathBuf};
+
+    fn path() -> PathBuf {
+        PathBuf::from("C:\\Users\\test\\AppData\\Roaming\\Volatus\\settings.json")
+    }
+
+    fn custom() -> Settings {
+        Settings { theme: ThemeChoice::Dark, unit: Unit::Gb, show_tree: false, ..Settings::default() }
+    }
+
+    #[test]
+    fn unit_change_resyncs_every_size_site() {
+        use Site::*;
+        assert_eq!(sites_after_unit_change(), &[Rows, Types, Selection, Banner, Map, Drives]);
+    }
+
+    #[test]
+    fn session_before_loading_is_todays_behaviour() {
+        let (settings, kept) = SESSION.with_borrow(|s| (s.settings.clone(), s.settings_path.clone()));
+        assert_eq!((settings, kept, current_unit()), (Settings::default(), None, Unit::Dynamic));
+    }
+
+    #[test]
+    fn session_starts_with_the_loaded_settings() {
+        let error = SESSION.with_borrow_mut(|s| adopt_settings(s, Some(path()), (custom(), settings::Loaded::Ok)));
+
+        let (settings, kept) = SESSION.with_borrow(|s| (s.settings.clone(), s.settings_path.clone()));
+        assert_eq!((settings, kept, error, current_unit()), (custom(), Some(path()), "", Unit::Gb));
+    }
+
+    #[test]
+    fn a_failed_save_keeps_the_setting_and_reports_it() {
+        SESSION.with_borrow_mut(|s| {
+            adopt_settings(s, Some(path()), (Settings::default(), settings::Loaded::Fresh));
+            s.settings.unit = Unit::Mb;
+        });
+        let calls = Cell::new(0);
+
+        let error = SESSION.with_borrow_mut(|s| {
+            persist_with(s, |_, _| {
+                calls.set(calls.get() + 1);
+                Err(std::io::Error::other("disk full"))
+            })
+        });
+
+        assert_eq!((error, calls.get(), current_unit()), (SAVE_ERROR, 1, Unit::Mb));
+    }
+
+    #[test]
+    fn a_good_save_writes_the_session_settings_to_the_path() {
+        SESSION.with_borrow_mut(|s| adopt_settings(s, Some(path()), (custom(), settings::Loaded::Ok)));
+        let seen = RefCell::new(None);
+
+        let error = SESSION.with_borrow_mut(|s| {
+            persist_with(s, |p: &Path, set: &Settings| {
+                *seen.borrow_mut() = Some((p.to_path_buf(), set.clone()));
+                Ok(())
+            })
+        });
+
+        assert_eq!((error, seen.into_inner()), ("", Some((path(), custom()))));
+    }
+
+    #[test]
+    fn a_file_kept_as_bad_is_saved_over() {
+        let error = SESSION.with_borrow_mut(|s| adopt_settings(s, Some(path()), (Settings::default(), settings::Loaded::Damaged)));
+        let calls = Cell::new(0);
+
+        let saved = SESSION.with_borrow_mut(|s| {
+            persist_with(s, |_, _| {
+                calls.set(calls.get() + 1);
+                Ok(())
+            })
+        });
+
+        assert_eq!((error, saved, calls.get()), ("", "", 1));
+    }
+
+    /// Settings that must not be saved: every save is skipped and reported, and the change stays.
+    fn never_saved(path: Option<PathBuf>, loaded: settings::Loaded) {
+        let error = SESSION.with_borrow_mut(|s| adopt_settings(s, path, (Settings::default(), loaded)));
+        SESSION.with_borrow_mut(|s| s.settings.unit = Unit::Kb);
+        let calls = Cell::new(0);
+
+        let saves: Vec<&str> = (0..2)
+            .map(|_| {
+                SESSION.with_borrow_mut(|s| {
+                    persist_with(s, |_, _| {
+                        calls.set(calls.get() + 1);
+                        Ok(())
+                    })
+                })
+            })
+            .collect();
+
+        assert_eq!((error, saves, calls.get(), current_unit()), (SAVE_ERROR, vec![SAVE_ERROR, SAVE_ERROR], 0, Unit::Kb));
+    }
+
+    #[test]
+    fn a_file_that_was_not_kept_is_never_saved_over() {
+        never_saved(Some(path()), settings::Loaded::NotKept);
+    }
+
+    #[test]
+    fn settings_with_no_path_are_never_saved() {
+        never_saved(None, settings::Loaded::Fresh);
+    }
+
+    #[test]
+    fn effective_dark_light_and_dark_ignore_the_system_and_follow_windows_returns_it() {
+        for system in [false, true] {
+            let got = ThemeChoice::ALL.map(|c| effective_dark(c, system));
+            assert_eq!(got, [system, false, true], "system dark: {system}");
+        }
+    }
+
+    #[test]
+    fn row_model_row_size_uses_the_unit_of_the_model() {
+        let (tree, _, files) = flat(0, &[1_234_567]);
+        let data = Arc::new(Data { counts: crate::tree_view::file_counts(&tree), tree });
+        let row = crate::tree_view::Row { node: files[0], depth: 0, expanded: false, has_children: false };
+        let model = RowModel { data: RefCell::new(Arc::downgrade(&data)), rows: RefCell::new(vec![row]), notify: ModelNotify::default(), unit: Cell::new(Unit::Byte) };
+
+        let byte = slint::Model::row_data(&model, 0).unwrap();
+        model.unit.set(Unit::Kb);
+        let kb = slint::Model::row_data(&model, 0).unwrap();
+
+        assert_eq!((byte.size.as_str(), kb.size.as_str()), ("1,234,567 B", "1,205.6 KB"));
+        assert!(byte.spoken.contains("1,234,567 B"), "{}", byte.spoken);
     }
 }
