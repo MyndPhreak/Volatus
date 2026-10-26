@@ -829,6 +829,133 @@ mod tests {
     }
 
     #[test]
+    fn from_lookup_with_a_relative_windir_or_profile_is_none() {
+        for (key, bad) in [("SystemRoot", r"Windows"), ("USERPROFILE", r"Users\dev"), ("USERPROFILE", "C:dev")] {
+            let mut pairs = FULL.to_vec();
+            pairs.retain(|(k, _)| *k != key);
+            pairs.push((key, bad));
+            assert!(Env::from_lookup(lookup(&pairs)).is_none(), "{key}={bad}");
+        }
+    }
+
+    /// Real file system tests. Every path is under one unique directory in the temp folder that
+    /// the test creates and removes. A case is skipped (and says so) only when the OS refuses to
+    /// create its fixture.
+    mod real {
+        use super::*;
+        use std::fs;
+        use std::os::windows::ffi::OsStrExt;
+
+        /// A unique directory, canonical (verbatim) form. Removed on drop; a junction inside is
+        /// removed first, so nothing outside is ever followed.
+        struct Dir {
+            base: PathBuf,
+            junctions: std::cell::RefCell<Vec<PathBuf>>,
+        }
+
+        impl Dir {
+            fn new(tag: &str) -> Dir {
+                let plain = std::env::temp_dir().join(format!("volatus-delete-{}-{tag}", std::process::id()));
+                let _ = fs::remove_dir_all(&plain);
+                fs::create_dir_all(&plain).expect("temp dir");
+                Dir { base: fs::canonicalize(&plain).expect("canonical"), junctions: Default::default() }
+            }
+            /// `mklink /J`. `None` (skip) if the OS refuses.
+            fn junction(&self, name: &str, to: &Path) -> Option<PathBuf> {
+                let link = self.base.join(name);
+                let plain = |p: &Path| p.to_string_lossy().trim_start_matches(r"\\?\").to_string();
+                let ok = std::process::Command::new("cmd")
+                    .args(["/c", "mklink", "/J", &plain(&link), &plain(to)])
+                    .output()
+                    .is_ok_and(|o| o.status.success());
+                if ok {
+                    self.junctions.borrow_mut().push(link.clone());
+                    Some(link)
+                } else {
+                    eprintln!("skipped: mklink /J was refused");
+                    None
+                }
+            }
+        }
+
+        impl Drop for Dir {
+            fn drop(&mut self) {
+                for j in self.junctions.borrow().iter() {
+                    let _ = fs::remove_dir(j);
+                }
+                let _ = fs::remove_dir_all(&self.base);
+            }
+        }
+
+        fn plain(p: &Path) -> PathBuf {
+            PathBuf::from(p.to_string_lossy().trim_start_matches(r"\\?\"))
+        }
+
+        #[test]
+        fn a_name_with_a_trailing_dot_stays_itself() {
+            let d = Dir::new("dot");
+            fs::create_dir(d.base.join("dotdir")).unwrap();
+            if fs::create_dir(d.base.join("dotdir.")).is_err() {
+                eprintln!("skipped: the OS refused a name with a trailing dot");
+                return;
+            }
+            fs::write(d.base.join("dotdir.").join("mark"), b"x").unwrap();
+            let got = RealFs.resolve_target(&plain(&d.base.join("dotdir."))).expect("resolves");
+            assert_eq!(got.file_name().unwrap(), "dotdir.", "{got:?}");
+            assert!(got.join("mark").exists(), "{got:?} is not the dotdir. folder");
+        }
+
+        #[test]
+        fn a_junction_item_is_not_followed() {
+            let d = Dir::new("junction");
+            fs::create_dir(d.base.join("other")).unwrap();
+            fs::write(d.base.join("other").join("keep"), b"x").unwrap();
+            let Some(link) = d.junction("link", &d.base.join("other")) else { return };
+            let got = RealFs.resolve_target(&plain(&link)).expect("resolves");
+            assert_eq!(got, link);
+            assert!(d.base.join("other").join("keep").exists());
+        }
+
+        #[test]
+        fn a_short_name_of_a_junction_item_becomes_its_long_name() {
+            let d = Dir::new("shortlink");
+            fs::create_dir(d.base.join("other")).unwrap();
+            let Some(link) = d.junction("a long junction name", &d.base.join("other")) else { return };
+            let wide: Vec<u16> = link.as_os_str().encode_wide().chain(Some(0)).collect();
+            let mut buf = [0u16; 1024];
+            // SAFETY: `wide` is NUL-terminated and `buf` is 1024 wide chars, as the length says.
+            let n = unsafe {
+                windows_sys::Win32::Storage::FileSystem::GetShortPathNameW(wide.as_ptr(), buf.as_mut_ptr(), 1024)
+            } as usize;
+            let short = PathBuf::from(String::from_utf16_lossy(&buf[..n]));
+            if n == 0 || short == link {
+                eprintln!("skipped: no 8.3 name for the junction (8.3 names are off)");
+                return;
+            }
+            let got = RealFs.resolve_target(&plain(&short)).expect("resolves");
+            assert_eq!(got.file_name().unwrap(), "a long junction name", "{got:?}");
+        }
+
+        #[test]
+        fn a_normal_item_resolves_to_its_canonical_long_form() {
+            let d = Dir::new("normal");
+            fs::create_dir(d.base.join("NormalItem")).unwrap();
+            let got = RealFs.resolve_target(&plain(&d.base.join("normalitem"))).expect("resolves");
+            assert_eq!(got, d.base.join("NormalItem"));
+        }
+
+        #[test]
+        fn a_missing_item_is_missing_and_a_missing_parent_is_unresolved() {
+            let d = Dir::new("missing");
+            let root = plain(&d.base);
+            let got = check_target_in(&root, &root.join("nope"), true, &RealFs, &env());
+            assert_eq!(got, Err(Refusal::Missing));
+            let got = check_target_in(&root, &root.join("no").join("x"), true, &RealFs, &env());
+            assert_eq!(got, Err(Refusal::Unresolved));
+        }
+    }
+
+    #[test]
     fn mode_for_table() {
         for (shift, want) in [(false, DeleteMode::RecycleBin), (true, DeleteMode::Permanent)] {
             assert_eq!(mode_for(shift), want, "shift={shift}");
