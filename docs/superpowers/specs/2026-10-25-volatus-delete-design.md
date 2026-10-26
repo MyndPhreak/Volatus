@@ -99,6 +99,10 @@ The owner decided delete is on from the first release. The safety rules above ar
 - How to test delete safely: the temporary-folder tests, the refusal list, link handling, locked-file handling (a test that holds a file open), long paths, read-only files.
 - Updates to `README.md` and `docs/USAGE.md`.
 
+## Seam with the shell menu (owner, 2026-10-26)
+
+The Delete of this design is the only Delete in the shell context menu of PR #7: a **Delete** item in the Volatus group at the top runs this flow for the item the menu was opened on, with Shift read when the item is chosen; the shell's own Delete is hidden. See the addendum in `2026-10-26-volatus-context-menu-design.md`.
+
 ## Open items for the owner
 
 None. The decisions marked **(my call)** are for checking while reading, the most important being the protected-folder list, that both Delete and Shift+Delete still show a confirm dialog, and that the Recycle Bin does not free space until emptied.

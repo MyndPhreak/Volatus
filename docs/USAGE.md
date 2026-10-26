@@ -23,11 +23,14 @@ Volatus shows which folders and files use the space on a drive.
 
 Volatus can delete the file or folder that you select. Delete works on one item at a time.
 
-- To delete, right-click a file or folder in the tree or in the treemap and choose **Delete**.
-  You can also select the item and press **Delete**. Volatus then asks you to confirm. After you
-  confirm, it moves the item to the Recycle Bin.
-- To delete permanently, hold **Shift** while you choose **Delete**, or press **Shift+Delete**.
+- To delete, right-click a file or folder in the tree, in the treemap or in the crumbs and choose
+  **Delete** in the Volatus items at the top of the menu. You can also select the item and press
+  **Delete**. Volatus then asks you to confirm. After you confirm, it moves the item to the Recycle
+  Bin.
+- To delete permanently, hold **Shift** when you choose **Delete**, or press **Shift+Delete**.
   After you confirm, Volatus removes the item from the disk. You cannot undo a permanent delete.
+- Volatus reads the Shift key at the moment that you choose **Delete** in the menu. If Windows does
+  not say clearly that Shift is down, Volatus uses the Recycle Bin.
 - The dialog shows the name, the path and the size of the item. It also shows the number of files
   and folders, from the scan. A link in the dialog switches between the Recycle Bin and the
   permanent delete.
@@ -110,13 +113,15 @@ Press Tab to move to the next control, and Shift+Tab to move back.
 ## Context menu
 - Right-click a tile, a frame, a tree row or a crumb. Or select the item and press the Menu key or Shift+F10. Shift+right-click adds the extended
   verbs. The menu works only for a finished scan.
-- The menu shows the Volatus items first: Explore Folder, Command Prompt Here, Copy Path and, for a folder, Show this folder. The items of Windows
-  for that file or folder follow. They depend on your shell extensions. The first menu can take up to one second while Windows loads them.
-- Delete is the Delete of Windows. Windows asks you to confirm. Shift gives a permanent delete. After a delete, the item leaves the map and the tree
-  and the sizes change. Volatus does not scan again.
+- The menu shows the Volatus items first: Explore Folder, Command Prompt Here, Copy Path, for a folder Show this folder, and Delete. The items of
+  Windows for that file or folder follow. They depend on your shell extensions. The first menu can take up to one second while Windows loads them.
+- Delete is the Volatus Delete. The Delete of Windows is not in the menu, so there is only one Delete. Volatus asks you to confirm and uses the
+  Recycle Bin. Hold Shift when you choose Delete for a permanent delete. All the rules of the [Delete](#delete) section apply. After a delete, the
+  item leaves the map and the tree and the sizes change. Volatus does not scan again.
 - If the item changed on disk after the scan, the menu shows only "This item changed on disk. Rescan." This also covers a name that ends in a dot or
   a space, or has unusual characters.
-- "Files changed after this scan." shows in the top bar when another action removes or changes an item. The sizes can be wrong. Select "Rescan" to
+- "Files changed after this scan." shows in the top bar when an item of Windows (for example Cut and Paste, or a shell extension) removes or
+  changes an item. The sizes can be wrong. Select "Rescan" to
   scan the same folder again.
 - Limit: a hard-linked file counts once. Delete one name, and the whole counted size leaves.
 
