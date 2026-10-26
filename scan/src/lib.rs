@@ -126,8 +126,42 @@ impl Tree {
 
     /// Unlinks `n` from its parent and subtracts its sizes from every ancestor. `None` for the
     /// root and for a node already detached. The arena slots stay in place and are not reused.
-    pub fn detach(&mut self, _n: NodeId) -> Option<Detached> {
-        None
+    pub fn detach(&mut self, n: NodeId) -> Option<Detached> {
+        // The root has no parent, and a detached node has its parent cleared below.
+        let parent = self.node(n).parent?;
+
+        // No back-pointer: walk the parent's child chain to the node before `n`.
+        let next = self.node(n).next_sibling;
+        if self.node(parent).first_child == Some(n) {
+            self.nodes[parent.0 as usize].first_child = next;
+        } else {
+            let prev = self.children(parent).find(|&c| self.node(c).next_sibling == Some(n))?;
+            self.nodes[prev.0 as usize].next_sibling = next;
+        }
+        let node = &mut self.nodes[n.0 as usize];
+        node.parent = None;
+        node.next_sibling = None;
+        let (size, allocated) = (node.size, node.allocated);
+
+        let mut cur = Some(parent);
+        while let Some(a) = cur {
+            let anc = &mut self.nodes[a.0 as usize];
+            anc.size = anc.size.saturating_sub(size);
+            anc.allocated = anc.allocated.saturating_sub(allocated);
+            cur = anc.parent;
+        }
+
+        let (mut files, mut dirs) = (0, 0);
+        let mut stack = vec![n];
+        while let Some(c) = stack.pop() {
+            if self.node(c).is_dir {
+                dirs += 1;
+            } else {
+                files += 1;
+            }
+            stack.extend(self.children(c));
+        }
+        Some(Detached { size, allocated, files, dirs })
     }
 }
 

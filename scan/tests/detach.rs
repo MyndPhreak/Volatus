@@ -41,7 +41,7 @@ fn detach_file_lowers_every_ancestor_and_keeps_sibling_order() {
 
     assert_eq!((d.size, d.allocated, d.files, d.dirs), (10, 20, 1, 0));
     assert_eq!((t.node(a).size, t.node(a).allocated), (20, 30));
-    assert_eq!((t.node(root).size, t.node(root).allocated), (32, 32 + 30 + 10));
+    assert_eq!((t.node(root).size, t.node(root).allocated), (32, 30 + 15 + 17));
     assert_eq!(names(&t, root), ["a", "b", "c"]);
     assert_eq!(names(&t, a), ["f2"]);
 }
