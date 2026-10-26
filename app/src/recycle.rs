@@ -8,9 +8,6 @@
 //! plain (`C:\...`) path, so the verbatim (`\\?\`) path from `check_target` is made plain only
 //! where the plain form names the same item.
 
-#![cfg_attr(not(test), expect(dead_code, reason = "wired in the UI task"))]
-#![cfg_attr(test, allow(dead_code, reason = "tests do not use every item; wired in the UI task"))]
-
 use crate::delete::{DeleteTarget, Outcome, Remover, SkipReason, Skipped, reason_from_win32};
 use std::sync::atomic::AtomicU64;
 use std::os::windows::ffi::OsStrExt;

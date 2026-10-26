@@ -111,11 +111,14 @@ impl RowModel {
 
     /// Lets go of the model's weak link to the data, so `Arc::get_mut` can change the data in
     /// place (a weak link makes it fail too). The rows stay; `row_data` gives nothing until `attach`.
-    fn release(&self) {}
+    fn release(&self) {
+        *self.data.borrow_mut() = std::sync::Weak::new();
+    }
 
     /// Gives the model its data again and makes the list read every row again.
     fn attach(&self, data: &Arc<Data>) {
-        let _ = data;
+        *self.data.borrow_mut() = Arc::downgrade(data);
+        self.notify.reset();
     }
 
     fn set_rows(&self, rows: Vec<Row>) {
@@ -231,6 +234,8 @@ struct Session {
     /// Where the settings are saved. `None`: they are never saved (no `APPDATA`, or the file
     /// could not be kept before a save would replace it, see `adopt_settings`).
     settings_path: Option<PathBuf>,
+    /// The delete dialog and the delete it runs.
+    delete: scan_apply::DeleteSession,
 }
 
 /// The text the flyout shows when the settings are not saved.
@@ -544,6 +549,7 @@ thread_local! {
         follow: None,
         settings: Settings::default(),
         settings_path: None,
+        delete: scan_apply::DeleteSession::default(),
     });
     /// Starts one relayout after the window stops changing the treemap size.
     static RESIZE_TIMER: Timer = Timer::default();
@@ -1405,12 +1411,8 @@ fn rescan(ui: &MainWindow) {
 /// Replaces the shown scan with a new one.
 fn install(ui: &MainWindow, data: Arc<Data>) {
     let root = data.tree.root();
-    let model = Rc::new(RowModel {
-        data: RefCell::new(Arc::downgrade(&data)),
-        rows: RefCell::new(Vec::new()),
-        notify: ModelNotify::default(),
-        unit: Cell::new(current_unit()),
-    });
+    let model = Rc::new(RowModel::new(data.clone()));
+    model.unit.set(current_unit());
     ui.set_rows(ModelRc::from(model.clone()));
     SESSION.with_borrow_mut(|s| {
         s.loaded = Some(Loaded {

@@ -1,9 +1,6 @@
 //! Delete policy: which items may go, how a run is reported. Pure logic, no UI and no deletion.
 //! The checks come first and fail closed: an unknown target is refused, never deleted.
 
-#![cfg_attr(not(test), expect(dead_code, reason = "wired in the UI task"))]
-#![cfg_attr(test, allow(dead_code, reason = "tests do not use every item; wired in the UI task"))]
-
 use crate::model::{Unit, format_size};
 use scan::NodeId;
 use std::path::{Path, PathBuf};
@@ -24,6 +21,7 @@ pub enum Refusal {
     DriveRoot,
     Missing,
     KindChanged,
+    #[cfg_attr(not(test), expect(dead_code, reason = "delete_flow::open_for gives no dialog while a scan runs"))]
     ScanRunning,
     /// The root or the item could not be resolved to a real path, or the environment is unknown.
     Unresolved,
@@ -372,6 +370,7 @@ pub fn mode_for(shift: bool) -> DeleteMode {
 pub enum SkipReason {
     Locked,
     AccessDenied,
+    #[cfg_attr(not(test), expect(dead_code, reason = "no engine maps a Windows code to it yet"))]
     NeedsAdmin,
     TooLong,
     Other(i32),

@@ -5,9 +5,6 @@
 //! again, so a folder swapped for a link during the run cannot lead the delete out of the target.
 //! Work runs in parallel batches; progress and `stop` are seen between batches.
 
-#![cfg_attr(not(test), expect(dead_code, reason = "wired in the UI task"))]
-#![cfg_attr(test, allow(dead_code, reason = "tests do not use every item; wired in the UI task"))]
-
 use crate::delete::{DeleteTarget, Outcome, Remover, Skipped, reason_from_win32};
 use rayon::prelude::*;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};

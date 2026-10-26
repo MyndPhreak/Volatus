@@ -163,7 +163,6 @@ pub fn view_for_selection(tree: &Tree, view_root: NodeId, selected: NodeId) -> N
 /// Lowers the file count of `parent` and of each of its ancestors by `d.files`, after the delete
 /// of a node. `parent` is the node's former parent: read it BEFORE `Tree::detach`, which clears
 /// the link. The detached node's own entry is left as it was; no state may keep its id.
-#[cfg_attr(not(test), expect(dead_code, reason = "wired in by the delete task in main.rs"))]
 pub fn counts_after_detach(counts: &mut [u64], tree: &Tree, parent: Option<NodeId>, d: &Detached) {
     let mut cur = parent;
     while let Some(p) = cur {
@@ -176,7 +175,6 @@ pub fn counts_after_detach(counts: &mut [u64], tree: &Tree, parent: Option<NodeI
 /// The folder the treemap must show after `deleted` is removed: `deleted`'s parent if the view is
 /// `deleted` or under it, else `view_root` unchanged. Call BEFORE `Tree::detach`, which clears the
 /// parent links it walks. Store the result, so the view never keeps a detached id.
-#[cfg_attr(not(test), expect(dead_code, reason = "wired in by the delete task in main.rs"))]
 pub fn view_for_deleted(tree: &Tree, view_root: NodeId, deleted: NodeId) -> NodeId {
     let mut n = Some(view_root);
     while let Some(c) = n {
@@ -191,7 +189,6 @@ pub fn view_for_deleted(tree: &Tree, view_root: NodeId, deleted: NodeId) -> Node
 /// The node to select after `deleted` is removed: its next sibling, else its previous sibling,
 /// else its parent. `None` for the scan root. Call BEFORE `Tree::detach`, which clears the sibling
 /// chain it reads. Store the result, so the selection never keeps a detached id.
-#[cfg_attr(not(test), expect(dead_code, reason = "wired in by the delete task in main.rs"))]
 pub fn selection_after(tree: &Tree, deleted: NodeId) -> Option<NodeId> {
     let parent = tree.node(deleted).parent?;
     let node = tree.node(deleted);

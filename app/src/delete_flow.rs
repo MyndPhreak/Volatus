@@ -3,7 +3,7 @@
 //! tested. `scan_apply.rs` drives it on the UI thread.
 
 use crate::delete::{self, DeleteMode, DeleteTarget, Outcome, Refusal, Remover, SkipReason, Skipped};
-use crate::model::{ScanState, display_name, format_size, group_digits};
+use crate::model::{ScanState, Unit, display_name, format_size, group_digits};
 use scan::{NodeId, Tree};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -82,8 +82,36 @@ pub enum DialogEvent {
 /// only when the dialog is closed; `SwitchMode` only in `Confirm`; `Stop` only in `Running` with
 /// the permanent delete (the Recycle Bin has no Stop); `Close` does nothing while a delete runs.
 pub fn next(state: DialogState, event: DialogEvent) -> DialogState {
-    let _ = event;
-    state
+    use DialogEvent as E;
+    use DialogState as S;
+    match (state, event) {
+        (S::Closed, E::Open { shift, target: Ok(target) }) => S::Confirm { mode: delete::mode_for(shift), target },
+        (S::Closed, E::Open { target: Err(r), .. }) => S::Refused { text: delete::refusal_text(r).to_string() },
+        (S::Confirm { mode, target }, E::SwitchMode) => S::Confirm { mode: other(mode), target },
+        (S::Confirm { mode, target }, E::Confirm) => {
+            S::Running { mode, target, progress: RunProgress::default(), stopping: false }
+        }
+        (S::Confirm { .. } | S::Refused { .. } | S::Done { .. }, E::Close) => S::Closed,
+        (S::Running { mode, target, stopping, .. }, E::Progress { items, bytes }) => {
+            S::Running { mode, target, progress: RunProgress { items, bytes }, stopping }
+        }
+        (S::Running { mode: DeleteMode::Permanent, target, progress, .. }, E::Stop) => {
+            S::Running { mode: DeleteMode::Permanent, target, progress, stopping: true }
+        }
+        (S::Running { mode, target, .. }, E::Finished { outcome, target_gone }) => {
+            let tree_action = tree_action(&outcome, mode, target_gone);
+            S::Done { mode, target, outcome, tree_action }
+        }
+        (s, _) => s,
+    }
+}
+
+/// The mode the switch link changes to.
+fn other(mode: DeleteMode) -> DeleteMode {
+    match mode {
+        DeleteMode::RecycleBin => DeleteMode::Permanent,
+        DeleteMode::Permanent => DeleteMode::RecycleBin,
+    }
 }
 
 /// What a finished run does to the open scan. `target_gone` comes from a check of the resolved
@@ -97,18 +125,23 @@ pub fn next(state: DialogState, event: DialogEvent) -> DialogState {
 ///
 /// The mode does not change the action: a Recycle Bin move that left the item in its place is
 /// still a changed disk to look at again.
-pub fn tree_action(outcome: &Outcome, mode: DeleteMode, target_gone: bool) -> TreeAction {
-    let _ = (outcome, mode, target_gone);
-    TreeAction::Nothing
+pub fn tree_action(outcome: &Outcome, _mode: DeleteMode, target_gone: bool) -> TreeAction {
+    if target_gone {
+        TreeAction::Detach
+    } else if !outcome.skipped.is_empty() || outcome.removed_items > 0 {
+        TreeAction::KeepAndOfferRescan
+    } else {
+        TreeAction::Nothing
+    }
 }
 
 /// A delete can start only while no scan runs.
 pub fn can_start(scan: &ScanState) -> bool {
-    let _ = scan;
-    false
+    !matches!(scan, ScanState::Scanning { .. })
 }
 
 /// The confirm text, line by line in the order the dialog shows it.
+#[cfg_attr(not(test), expect(dead_code, reason = "shown by the dialog in Task 7b"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfirmText {
     /// The name; a link is named as a link.
@@ -124,6 +157,7 @@ pub struct ConfirmText {
 }
 
 /// The dialog's buttons for a mode.
+#[cfg_attr(not(test), expect(dead_code, reason = "shown by the dialog in Task 7b"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Buttons {
     pub action: &'static str,
@@ -132,52 +166,105 @@ pub struct Buttons {
     pub action_is_default: bool,
 }
 
+#[cfg_attr(not(test), expect(dead_code, reason = "shown by the dialog in Task 7b"))]
 pub fn confirm_text(mode: DeleteMode, t: &TargetInfo) -> ConfirmText {
-    let _ = (mode, t);
-    ConfirmText { name: String::new(), path: String::new(), size: String::new(), counts: String::new(), effect: "", link_note: None }
+    ConfirmText {
+        name: if t.is_link { format!("Link: {}", t.name) } else { t.name.clone() },
+        path: t.path.clone(),
+        size: t.size.clone(),
+        counts: counts_text(t.files, t.dirs),
+        effect: match mode {
+            DeleteMode::RecycleBin => {
+                "Move to Recycle Bin puts the item in the Recycle Bin. You can restore it in Windows."
+            }
+            DeleteMode::Permanent => "Delete permanently removes the item from the disk. There is no undo.",
+        },
+        link_note: t
+            .is_link
+            .then_some("The item is a link. Volatus deletes only the link. The item that the link points to stays."),
+    }
+}
+
+/// "1 file", "3 folders": the count with digit groups, the word in the singular for 1.
+fn count(n: u64, one: &str, many: &str) -> String {
+    format!("{} {}", group_digits(n), if n == 1 { one } else { many })
 }
 
 /// "12 files and 3 folders, from the scan."
+#[cfg_attr(not(test), expect(dead_code, reason = "shown by the dialog in Task 7b"))]
 pub fn counts_text(files: u64, dirs: u64) -> String {
-    let _ = (files, dirs);
-    String::new()
+    format!("{} and {}, from the scan.", count(files, "file", "files"), count(dirs, "folder", "folders"))
 }
 
+#[cfg_attr(not(test), expect(dead_code, reason = "shown by the dialog in Task 7b"))]
 pub fn buttons(mode: DeleteMode) -> Buttons {
-    let _ = mode;
-    Buttons { action: "", cancel: "", action_is_default: false }
+    match mode {
+        DeleteMode::RecycleBin => Buttons { action: "Move to Recycle Bin", cancel: "Cancel", action_is_default: true },
+        DeleteMode::Permanent => Buttons { action: "Delete permanently", cancel: "Cancel", action_is_default: false },
+    }
 }
 
 /// The text of the link that changes to the other mode.
+#[cfg_attr(not(test), expect(dead_code, reason = "shown by the dialog in Task 7b"))]
 pub fn switch_text(mode: DeleteMode) -> &'static str {
-    let _ = mode;
-    ""
+    match mode {
+        DeleteMode::RecycleBin => "Delete permanently instead",
+        DeleteMode::Permanent => "Move to Recycle Bin instead",
+    }
 }
 
 /// The line under the progress bar while a delete runs.
+#[cfg_attr(not(test), expect(dead_code, reason = "shown by the dialog in Task 7b"))]
 pub fn progress_line(mode: DeleteMode, p: RunProgress) -> String {
-    let _ = (mode, p);
-    String::new()
+    match mode {
+        // One shell operation with no progress of its own.
+        DeleteMode::RecycleBin => "Volatus moves the item to the Recycle Bin.".to_string(),
+        DeleteMode::Permanent => format!("Removed {} so far ({}).", count(p.items, "item", "items"), format_size(p.bytes, Unit::Dynamic)),
+    }
 }
 
 /// The result text, one short sentence per line (`delete::summary_lines`).
+#[cfg_attr(not(test), expect(dead_code, reason = "shown by the dialog in Task 7b"))]
 pub fn result_lines(mode: DeleteMode, o: &Outcome) -> Vec<String> {
-    let _ = (mode, o);
-    Vec::new()
+    delete::summary_lines(mode, o)
 }
 
 /// One line of the skip list: the path (no `\\?\`, through `display_name`), then the reason in
 /// plain words. The `recycle` engine's own texts are used where it has one.
+#[cfg_attr(not(test), expect(dead_code, reason = "shown by the dialog in Task 7b"))]
 pub fn skip_line(s: &Skipped) -> String {
-    let _ = s;
-    String::new()
+    let reason: std::borrow::Cow<'static, str> = match crate::recycle::skip_text(s.reason) {
+        Some(text) => text.into(),
+        None => match s.reason {
+            SkipReason::Locked => "Another program uses the item.".into(),
+            SkipReason::AccessDenied => {
+                "Windows does not give access to the item. Restart as administrator to try again.".into()
+            }
+            SkipReason::NeedsAdmin => "The item needs administrator rights.".into(),
+            SkipReason::TooLong => "The path is too long.".into(),
+            SkipReason::Other(ENGINE_FAILED) => {
+                "Volatus stopped because of an internal error. Scan the folder again to see what is left.".into()
+            }
+            SkipReason::Other(code) => format!("Windows reported error {code}.").into(),
+        },
+    };
+    format!("{}: {reason}", shown_path(&s.path))
+}
+
+/// A path as the dialog shows it: no `\\?\` prefix, hidden characters as placeholders.
+fn shown_path(p: &Path) -> String {
+    let s = p.to_string_lossy();
+    display_name(s.strip_prefix(r"\\?\").unwrap_or(&s)).into_owned()
 }
 
 /// The label of the "Restart as administrator" button, when a skip needs more rights
 /// (`NeedsAdmin` or `AccessDenied`).
+#[cfg_attr(not(test), expect(dead_code, reason = "shown by the dialog in Task 7b"))]
 pub fn admin_hint(o: &Outcome) -> Option<&'static str> {
-    let _ = o;
-    None
+    o.skipped
+        .iter()
+        .any(|s| matches!(s.reason, SkipReason::NeedsAdmin | SkipReason::AccessDenied))
+        .then_some("Restart as administrator")
 }
 
 /// The dialog for Delete (`shift` false) or Shift+Delete on `selected`. `Closed` when nothing is
@@ -185,6 +272,7 @@ pub fn admin_hint(o: &Outcome) -> Option<&'static str> {
 /// decides: `Refused` with its text, or `Confirm` with the resolved path stored for the delete.
 /// `scan_root` is the root AS TYPED: the policy resolves it itself. `is_link(resolved)` is asked
 /// for a file item only (the scan records a link as a file).
+#[expect(clippy::too_many_arguments, reason = "the scan's parts plus the two seams the tests replace")]
 pub fn open_for(
     tree: &Tree,
     counts: &[u64],
@@ -195,15 +283,44 @@ pub fn open_for(
     check: impl FnOnce(&Path, &Path, bool) -> Result<PathBuf, Refusal>,
     is_link: impl FnOnce(&Path) -> bool,
 ) -> DialogState {
-    let _ = (tree, counts, selected, scan, scan_root, shift, check, is_link);
-    DialogState::Closed
+    // An id from another tree (a stale row) is not looked up.
+    let Some(node) = selected.filter(|n| can_start(scan) && (n.0 as usize) < counts.len()) else {
+        return DialogState::Closed;
+    };
+    let is_dir = tree.node(node).is_dir;
+    let target = check(scan_root, &tree.path(node), is_dir).map(|resolved| {
+        let link = !is_dir && is_link(&resolved);
+        target_info(tree, counts, node, resolved, link)
+    });
+    next(DialogState::Closed, DialogEvent::Open { shift, target })
 }
 
 /// The dialog's view of `node` with its resolved path.
 pub fn target_info(tree: &Tree, counts: &[u64], node: NodeId, resolved: PathBuf, is_link: bool) -> TargetInfo {
     let n = tree.node(node);
-    let target = DeleteTarget { node, path: resolved, is_dir: n.is_dir, is_link, size: n.size, files: 0, dirs: 0 };
-    TargetInfo { name: String::new(), path: String::new(), size: String::new(), files: 0, dirs: 0, is_link, target }
+    let (files, dirs) = (counts[node.0 as usize], folders_under(tree, node));
+    TargetInfo {
+        name: display_name(tree.name(node)).into_owned(),
+        path: shown_path(&resolved),
+        size: format_size(n.size, Unit::Dynamic),
+        files,
+        dirs,
+        is_link,
+        target: DeleteTarget { node, path: resolved, is_dir: n.is_dir, is_link, size: n.size, files, dirs },
+    }
+}
+
+/// Folders under `node`, `node` itself not included. Walks the subtree once.
+fn folders_under(tree: &Tree, node: NodeId) -> u64 {
+    let mut stack: Vec<NodeId> = tree.children(node).collect();
+    let mut dirs = 0;
+    while let Some(n) = stack.pop() {
+        if tree.node(n).is_dir {
+            dirs += 1;
+            stack.extend(tree.children(n));
+        }
+    }
+    dirs
 }
 
 /// True when `p` is a reparse point (a junction or a symbolic link). Not followed. False when the
@@ -224,15 +341,16 @@ pub enum DeleteMsg {
 
 impl DeleteMsg {
     pub fn generation(&self) -> u64 {
-        0
+        match self {
+            DeleteMsg::Progress { generation, .. } | DeleteMsg::Finished { generation, .. } => *generation,
+        }
     }
 }
 
 /// True only when the file system says `p` is not found. Any other answer (access denied, a
 /// failing disk) counts as still there, so the tree never drops an item that may exist.
 pub fn target_gone(p: &Path) -> bool {
-    let _ = p;
-    false
+    matches!(std::fs::symlink_metadata(p), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
 }
 
 /// The `Outcome` for a run whose engine failed: nothing known removed, the target skipped with
@@ -252,7 +370,13 @@ pub fn run_delete(
     gone: &dyn Fn(&Path) -> bool,
     post: &dyn Fn(DeleteMsg),
 ) {
-    let _ = (remover, target, generation, stop, gone, post);
+    let progress = |items, bytes| post(DeleteMsg::Progress { generation, items, bytes });
+    // A panic is turned into a skip, never lost. The engines keep no state across runs that a
+    // panic could leave broken, so going on after one is safe.
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| remover.remove(target, &progress, stop)))
+        .unwrap_or_else(|_| failed_outcome(target));
+    let target_gone = gone(&target.path);
+    post(DeleteMsg::Finished { generation, outcome, target_gone });
 }
 
 /// Runs `remover` on a new worker thread (`run_delete` with `target_gone`). Never runs the
@@ -264,8 +388,9 @@ pub fn spawn_delete(
     stop: Arc<AtomicBool>,
     post: impl Fn(DeleteMsg) + Send + 'static,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
-    let _ = (remover, target, generation, stop, post);
-    std::thread::Builder::new().name("volatus-delete".into()).spawn(|| {})
+    std::thread::Builder::new()
+        .name("volatus-delete".into())
+        .spawn(move || run_delete(&*remover, &target, generation, &stop, &target_gone, &post))
 }
 
 #[cfg(test)]
