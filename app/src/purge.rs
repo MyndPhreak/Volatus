@@ -4,16 +4,301 @@
 #![cfg_attr(not(test), expect(dead_code, reason = "wired in the UI task"))]
 #![cfg_attr(test, allow(dead_code, reason = "tests do not use every item; wired in the UI task"))]
 
-use crate::delete::{DeleteTarget, Outcome, Remover};
-use std::sync::atomic::AtomicBool;
+use crate::delete::{DeleteTarget, Outcome, Remover, Skipped, reason_from_win32};
+use rayon::prelude::*;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use windows_sys::Win32::Foundation::{
+    ERROR_ACCESS_DENIED, ERROR_DIR_NOT_EMPTY, ERROR_FILE_NOT_FOUND, ERROR_INVALID_NAME, ERROR_NO_MORE_FILES,
+    GetLastError, HANDLE, INVALID_HANDLE_VALUE,
+};
+use windows_sys::Win32::Storage::FileSystem::{
+    DeleteFileW, FILE_ATTRIBUTE_ARCHIVE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_NORMAL,
+    FILE_ATTRIBUTE_NOT_CONTENT_INDEXED, FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_REPARSE_POINT,
+    FILE_ATTRIBUTE_SYSTEM, FILE_ATTRIBUTE_TEMPORARY, FIND_FIRST_EX_LARGE_FETCH, FindClose, FindExInfoBasic,
+    FindExSearchNameMatch, FindFirstFileExW, FindNextFileW, RemoveDirectoryW, SetFileAttributesW, WIN32_FIND_DATAW,
+};
+
+/// Items removed between two progress calls: the bound on the progress rate.
+const PROGRESS_EVERY: usize = 256;
+
+/// The attributes `SetFileAttributesW` can set; the others in the find data are left out.
+const SETTABLE: u32 = FILE_ATTRIBUTE_ARCHIVE
+    | FILE_ATTRIBUTE_HIDDEN
+    | FILE_ATTRIBUTE_NOT_CONTENT_INDEXED
+    | FILE_ATTRIBUTE_OFFLINE
+    | FILE_ATTRIBUTE_SYSTEM
+    | FILE_ATTRIBUTE_TEMPORARY;
 
 /// The fast permanent delete.
 pub struct Purge;
 
+/// A file or a link the walk found: removed in the parallel pass. `path` has no NUL.
+struct Entry {
+    path: Vec<u16>,
+    attrs: u32,
+    size: u64,
+}
+
+/// A real folder (not a link) the walk found, `depth` below the target. `listed` is false when
+/// its listing failed: that failure is already a skip, so the folder is not tried again.
+struct Folder {
+    path: Vec<u16>,
+    attrs: u32,
+    depth: usize,
+    listed: bool,
+}
+
+/// What happened to one item. `Removed` holds the bytes it freed.
+enum Done {
+    Removed(u64),
+    Skipped(Skipped),
+    NotRun,
+}
+
 impl Remover for Purge {
-    fn remove(&self, _t: &DeleteTarget, _progress: &dyn Fn(u64, u64), _stop: &AtomicBool) -> Outcome {
-        Outcome::default()
+    /// The target must be a verbatim (`\\?\`) path, as `check_target` gives it; any other path is
+    /// one skip and nothing is touched. A file or a link target is removed alone. A folder is
+    /// walked once (links inside are entries, never walked into), its files and links are removed
+    /// in parallel, then its folders from the deepest up, the target last. `removed_items` counts
+    /// files, links and folders; `removed_bytes` is the find-data size of the files (a link frees
+    /// nothing). A folder that still holds a skipped item stays, with no extra skip.
+    fn remove(&self, t: &DeleteTarget, progress: &dyn Fn(u64, u64), stop: &AtomicBool) -> Outcome {
+        let mut out = Outcome::default();
+        let root: Vec<u16> = t.path.as_os_str().encode_wide().collect();
+        let prefix: Vec<u16> = r"\\?\".encode_utf16().collect();
+        if !root.starts_with(&prefix) {
+            out.skipped.push(skip(&root, ERROR_INVALID_NAME));
+            return out;
+        }
+        let data = match find_one(&root) {
+            Ok(d) => d,
+            Err(code) => {
+                out.skipped.push(skip(&root, code));
+                return out;
+            }
+        };
+        let attrs = data.dwFileAttributes;
+        if attrs & FILE_ATTRIBUTE_DIRECTORY == 0 || attrs & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            tally(&mut out, remove_entry(&Entry { path: root, attrs, size: file_size(&data) }));
+            progress(out.removed_items, out.removed_bytes);
+            return out;
+        }
+        let Some((files, mut folders)) = walk(root, attrs, stop, &mut out.skipped) else {
+            out.stopped = true;
+            return out;
+        };
+        for chunk in files.chunks(PROGRESS_EVERY) {
+            if stop.load(Ordering::Relaxed) {
+                out.stopped = true;
+                break;
+            }
+            let done: Vec<Done> = chunk
+                .par_iter()
+                .map(|e| if stop.load(Ordering::Relaxed) { Done::NotRun } else { remove_entry(e) })
+                .collect();
+            for d in done {
+                tally(&mut out, d);
+            }
+            progress(out.removed_items, out.removed_bytes);
+        }
+        if !out.stopped {
+            // Deepest first, so each folder is empty when its turn comes; the target is depth 0.
+            folders.sort_by_key(|f| std::cmp::Reverse(f.depth));
+            for (i, f) in folders.iter().filter(|f| f.listed).enumerate() {
+                if stop.load(Ordering::Relaxed) {
+                    out.stopped = true;
+                    break;
+                }
+                match with_read_only_retry(&f.path, f.attrs, RemoveDirectoryW) {
+                    Ok(()) => out.removed_items += 1,
+                    // It still holds a skipped item, which is listed already.
+                    Err(ERROR_DIR_NOT_EMPTY) => {}
+                    Err(code) => out.skipped.push(skip(&f.path, code)),
+                }
+                if (i + 1) % PROGRESS_EVERY == 0 {
+                    progress(out.removed_items, out.removed_bytes);
+                }
+            }
+        }
+        progress(out.removed_items, out.removed_bytes);
+        out
     }
+}
+
+/// Adds one item's result to the outcome.
+fn tally(out: &mut Outcome, d: Done) {
+    match d {
+        Done::Removed(bytes) => {
+            out.removed_items += 1;
+            out.removed_bytes += bytes;
+        }
+        Done::Skipped(s) => out.skipped.push(s),
+        Done::NotRun => out.stopped = true,
+    }
+}
+
+/// Removes a file (`DeleteFileW`) or a link itself: a folder link or junction with
+/// `RemoveDirectoryW`, a file link with `DeleteFileW`. Neither call follows the link.
+fn remove_entry(e: &Entry) -> Done {
+    let link = e.attrs & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+    let op = if link && e.attrs & FILE_ATTRIBUTE_DIRECTORY != 0 { RemoveDirectoryW } else { DeleteFileW };
+    match with_read_only_retry(&e.path, e.attrs, op) {
+        Ok(()) => Done::Removed(if link { 0 } else { e.size }),
+        Err(code) => Done::Skipped(skip(&e.path, code)),
+    }
+}
+
+/// Runs `op` on `path`. On access denied, a read-only item that is not a link loses the flag and
+/// `op` runs once more; if that fails too, the flag is put back. A link's attributes are never
+/// set, so nothing reaches its target. The error is the last delete's, never the restore's: the
+/// item is a skip either way.
+fn with_read_only_retry(path: &[u16], attrs: u32, op: unsafe extern "system" fn(*const u16) -> i32) -> Result<(), u32> {
+    let z = nul(path);
+    // SAFETY: `z` is NUL-terminated and lives across the call.
+    if unsafe { op(z.as_ptr()) } != 0 {
+        return Ok(());
+    }
+    let code = last_error();
+    if code != ERROR_ACCESS_DENIED || attrs & FILE_ATTRIBUTE_READONLY == 0 || attrs & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(code);
+    }
+    let cleared = match attrs & SETTABLE {
+        0 => FILE_ATTRIBUTE_NORMAL,
+        a => a,
+    };
+    // SAFETY: `z` is NUL-terminated and lives across the call.
+    if unsafe { SetFileAttributesW(z.as_ptr(), cleared) } == 0 {
+        return Err(last_error());
+    }
+    // SAFETY: as above.
+    if unsafe { op(z.as_ptr()) } != 0 {
+        return Ok(());
+    }
+    let code = last_error();
+    // SAFETY: as above. A failed restore leaves the item without the flag; it is a skip already.
+    unsafe { SetFileAttributesW(z.as_ptr(), (attrs & SETTABLE) | FILE_ATTRIBUTE_READONLY) };
+    Err(code)
+}
+
+/// Lists every folder under `root` once, depth first. Links are entries, never walked into.
+/// A listing that fails is a skip for that folder and the walk goes on. `None` when `stop` is
+/// set: nothing has been removed yet.
+fn walk(root: Vec<u16>, attrs: u32, stop: &AtomicBool, skipped: &mut Vec<Skipped>) -> Option<(Vec<Entry>, Vec<Folder>)> {
+    let (mut files, mut folders) = (Vec::new(), Vec::new());
+    let mut todo = vec![(root, attrs, 0)];
+    while let Some((dir, attrs, depth)) = todo.pop() {
+        if stop.load(Ordering::Relaxed) {
+            return None;
+        }
+        let listed = list(&dir, |d| {
+            let mut path = dir.clone();
+            path.push(u16::from(b'\\'));
+            path.extend_from_slice(name_of(d));
+            let a = d.dwFileAttributes;
+            if a & FILE_ATTRIBUTE_DIRECTORY != 0 && a & FILE_ATTRIBUTE_REPARSE_POINT == 0 {
+                todo.push((path, a, depth + 1));
+            } else {
+                files.push(Entry { path, attrs: a, size: file_size(d) });
+            }
+        });
+        if let Err(code) = listed {
+            skipped.push(skip(&dir, code));
+        }
+        folders.push(Folder { path: dir, attrs, depth, listed: listed.is_ok() });
+    }
+    Some((files, folders))
+}
+
+/// Calls `f` for each entry in the folder `dir` (no NUL), `.` and `..` left out.
+fn list(dir: &[u16], mut f: impl FnMut(&WIN32_FIND_DATAW)) -> Result<(), u32> {
+    let mut pattern = dir.to_vec();
+    pattern.extend(r"\*".encode_utf16());
+    let pattern = nul(&pattern);
+    let mut data = WIN32_FIND_DATAW::default();
+    // SAFETY: `pattern` is NUL-terminated; `data` is a WIN32_FIND_DATAW, the type FindExInfoBasic
+    // fills; no search filter is passed.
+    let h: HANDLE = unsafe {
+        FindFirstFileExW(
+            pattern.as_ptr(),
+            FindExInfoBasic,
+            (&raw mut data).cast(),
+            FindExSearchNameMatch,
+            std::ptr::null(),
+            FIND_FIRST_EX_LARGE_FETCH,
+        )
+    };
+    if h == INVALID_HANDLE_VALUE {
+        return match last_error() {
+            // No entry at all, not even `.`: an empty listing.
+            ERROR_FILE_NOT_FOUND => Ok(()),
+            code => Err(code),
+        };
+    }
+    let mut result = Ok(());
+    loop {
+        let name = name_of(&data);
+        if name != [u16::from(b'.')] && name != [u16::from(b'.'), u16::from(b'.')] {
+            f(&data);
+        }
+        // SAFETY: `h` is the open find handle; `data` is a valid WIN32_FIND_DATAW.
+        if unsafe { FindNextFileW(h, &mut data) } == 0 {
+            match last_error() {
+                ERROR_NO_MORE_FILES => {}
+                code => result = Err(code),
+            }
+            break;
+        }
+    }
+    // SAFETY: `h` is the open find handle and is closed once.
+    if unsafe { FindClose(h) } == 0 && result.is_ok() {
+        result = Err(last_error());
+    }
+    result
+}
+
+/// The find data of the item at `path` itself (no wildcard), so a link is seen as a link.
+fn find_one(path: &[u16]) -> Result<WIN32_FIND_DATAW, u32> {
+    let z = nul(path);
+    let mut data = WIN32_FIND_DATAW::default();
+    // SAFETY: `z` is NUL-terminated; `data` is a WIN32_FIND_DATAW, the type FindExInfoBasic fills;
+    // no search filter is passed.
+    let h = unsafe {
+        FindFirstFileExW(z.as_ptr(), FindExInfoBasic, (&raw mut data).cast(), FindExSearchNameMatch, std::ptr::null(), 0)
+    };
+    if h == INVALID_HANDLE_VALUE {
+        return Err(last_error());
+    }
+    // SAFETY: `h` is the open find handle and is closed once.
+    if unsafe { FindClose(h) } == 0 {
+        return Err(last_error());
+    }
+    Ok(data)
+}
+
+/// The entry's name, up to its NUL.
+fn name_of(d: &WIN32_FIND_DATAW) -> &[u16] {
+    let n = d.cFileName.iter().position(|c| *c == 0).unwrap_or(d.cFileName.len());
+    &d.cFileName[..n]
+}
+
+/// The logical size from the find data.
+fn file_size(d: &WIN32_FIND_DATAW) -> u64 {
+    (u64::from(d.nFileSizeHigh) << 32) | u64::from(d.nFileSizeLow)
+}
+
+fn nul(p: &[u16]) -> Vec<u16> {
+    p.iter().copied().chain(Some(0)).collect()
+}
+
+fn last_error() -> u32 {
+    // SAFETY: reads the calling thread's last-error value; no arguments.
+    unsafe { GetLastError() }
+}
+
+fn skip(path: &[u16], code: u32) -> Skipped {
+    Skipped { path: PathBuf::from(std::ffi::OsString::from_wide(path)), reason: reason_from_win32(code as i32) }
 }
 
 /// Real file system tests. Every path is under one unique directory in the temp folder that the
