@@ -46,8 +46,9 @@ that change in the next pull request.
 - A network fault: open the failed run and select **Re-run failed jobs**. This keeps the release
   that release-please made. Do not re-run all jobs: release-please does not make the release again,
   so the build does not start.
-- A fault in the code or the scripts: fix it in a pull request with a `fix:` title. Its release
-  pull request has the next version. When that release is published, delete the old draft.
+- A fault in the code or the scripts: fix it in a pull request with a `fix:` title. For 0.1.0,
+  that pull request also removes `release-as` and `bootstrap-sha`. Its release pull request has
+  the next version. When that release is published, delete the old draft and its tag.
 
 ## The first release (0.1.0)
 
