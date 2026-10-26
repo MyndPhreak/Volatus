@@ -219,7 +219,10 @@ fn shell_menu(owner: HWND, path: &Path, menu: HMENU, flags: u32) -> windows::cor
         let mut child = std::ptr::null_mut();
         // SAFETY: `child` points into `pidl`, which lives until the menu is dropped.
         let folder: IShellFolder = unsafe { SHBindToParent(pidl.0, Some(&mut child))? };
+        // SAFETY: `child` is the last item of `pidl` (alive here and kept with the menu), relative
+        // to `folder` as GetUIObjectOf wants; one item, so the slice length is right.
         let cm: IContextMenu = unsafe { folder.GetUIObjectOf(owner, &[child as *const _], None)? };
+        // SAFETY: `menu` is a live popup menu of this thread; the id range is SHELL_FIRST..=SHELL_LAST.
         unsafe { cm.QueryContextMenu(menu, 0, SHELL_FIRST, SHELL_LAST, flags) }.ok()?;
         Ok((cm, pidl))
     })();

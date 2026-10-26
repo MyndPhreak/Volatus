@@ -443,7 +443,16 @@ export component MainWindow inherits Window {
                                                     accessible-role: button;
                                                     accessible-label: row.expanded ? "Collapse \{row.name}" : "Expand \{row.name}";
                                                 }
-                                                if row.has-children : TouchArea { clicked => { root.tree-toggle(i); tree-focus.focus(); } }
+                                                if row.has-children : TouchArea {
+                                                    clicked => { root.tree-toggle(i); tree-focus.focus(); }
+                                                    // Above the row's TouchArea: a right-click here opens the row's menu too.
+                                                    pointer-event(event) => {
+                                                        if (event.kind == PointerEventKind.up && event.button == PointerEventButton.right) {
+                                                            tree-focus.focus();
+                                                            root.tree-menu(i, (self.absolute-position.x + self.mouse-x) / 1px, (self.absolute-position.y + self.mouse-y) / 1px);
+                                                        }
+                                                    }
+                                                }
                                             }
                                             Text {
                                                 text: row.name;
