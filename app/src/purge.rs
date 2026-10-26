@@ -1309,7 +1309,9 @@ mod tests {
         let names = ["Purge", "rd /s /q", "Remove-Item", "SHFileOperationW"];
         let mut times = vec![Vec::new(); names.len()];
         for round in 0..3 {
-            for (m, name) in names.iter().enumerate() {
+            // Each round starts with a different method, so none always runs first.
+            for m in (0..names.len()).map(|i| (round + i) % names.len()) {
+                let name = names[m];
                 let items = make_bench_tree(&t);
                 let took = match m {
                     0 => time_purge(&t, items, &Options::default()),

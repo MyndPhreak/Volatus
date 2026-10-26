@@ -243,27 +243,34 @@ target), under a unique folder in the temp folder. Each run deletes a newly made
 right after it is made (warm cache). The four methods take turns in each of 3 rounds. Every run
 checks that the whole tree is gone. Best of 3.
 
-| Date | Drive / disk | Files | `Purge` | `rd /s /q` | `Remove-Item -Recurse -Force` | `SHFileOperationW` FO_DELETE | Cache |
-|---|---|---|---|---|---|---|---|
-| 2026-10-26 | C: / MP600 PRO NH | 100,000 (1,111 folders) | 5,140 ms | 20,013 ms | 16,810 ms | 31,453 ms | warm |
+| Date | Build | Drive / disk | Files | `Purge` | `rd /s /q` | `Remove-Item -Recurse -Force` | `SHFileOperationW` FO_DELETE | Cache |
+|---|---|---|---|---|---|---|---|---|
+| 2026-10-26 | first run, `Purge` first in every round | C: / MP600 PRO NH | 100,000 (1,111 folders) | 5,140 ms | 20,013 ms | 16,810 ms | 31,453 ms | warm |
+| 2026-10-26 | held-folder fix, start method rotated per round | C: / MP600 PRO NH | 100,000 (1,111 folders) | 5,458 ms | 20,561 ms | 18,530 ms | 34,324 ms | warm |
 
-All rounds (ms): `Purge` 5140, 5190, 5374. `rd` 21163, 21128, 20013. `Remove-Item` 17280,
-16810, 17175. `SHFileOperationW` 31453, 33284, 32749.
+All rounds of the first run (ms): `Purge` 5140, 5190, 5374. `rd` 21163, 21128, 20013.
+`Remove-Item` 17280, 16810, 17175. `SHFileOperationW` 31453, 33284, 32749.
 
-`Purge` is 3.9 times faster than `rd /s /q`, 3.3 times faster than `Remove-Item` and 6.1 times
-faster than the shell's permanent delete.
+All rounds of the second run (ms), in run order: round 0 `Purge` 5458, `rd` 23526,
+`Remove-Item` 19872, `SHFileOperationW` 34324; round 1 `rd` 20561, `Remove-Item` 18530,
+`SHFileOperationW` 38390, `Purge` 5812; round 2 `Remove-Item` 18648, `SHFileOperationW` 37541,
+`Purge` 5728, `rd` 26879. `cmd /c rem` 36 ms.
+
+Every method was 3-11% slower in the second run, so the machine was busier. The ratios did
+not change. In the second run `Purge` is 3.8 times faster than `rd /s /q`, 3.4 times faster
+than `Remove-Item` and 6.3 times faster than `SHFileOperationW` (first run: 3.9, 3.3 and 6.1).
 
 Method notes:
 
 - `Purge`: in-process time of `remove_with` with the default options (rayon's global pool of 32
   threads, batches of 256 items, 64 KiB listing buffer, POSIX delete).
 - `rd /s /q`: wall time of `cmd /c rd /s /q <folder>`. It includes the start of `cmd.exe`, which is
-  28 ms (best of 3 `cmd /c rem`), so it does not change the result.
+  28-36 ms (best of 3 `cmd /c rem`), so it does not change the result.
 - `Remove-Item`: Windows PowerShell 5.1 (`powershell.exe -NoProfile`), timed inside PowerShell
   with `Measure-Command`. PowerShell's start-up is not in the number.
 - `SHFileOperationW`: in-process, `FO_DELETE` with `FOF_NO_UI` and without `FOF_ALLOWUNDO`. This is
-  the shell operation that a permanent delete in Explorer uses. The Explorer window itself
-  (Shift+Delete with its progress dialog) was not timed.
+  the shell operation that programs commonly use for a permanent delete. Explorer's own
+  Shift+Delete goes through `IFileOperation` and was not timed.
 
 ### Tuning (best of 3, same tree, ms)
 
