@@ -126,10 +126,6 @@
            major upgrades (MajorUpgrade migrates feature states). A child of Main: its command
            names Main's exe ([INSTALLFOLDER]volatus.exe), so the exe is always there with it. -->
       <Feature Id="ExplorerMenu" Title="Explorer menu" Level="1" AllowAdvertise="no">
-        <!-- EXPLORERMENU=0 on the command line (also with /qn) leaves the menu out. First install
-             or upgrade only: a level of 0 on an installed feature would keep its keys at
-             uninstall. -->
-        <Condition Level="0">NOT Installed AND EXPLORERMENU = "0"</Condition>
         <ComponentRef Id="MenuDirectory"/>
         <ComponentRef Id="MenuBackground"/>
         <ComponentRef Id="MenuDrive"/>
@@ -138,6 +134,12 @@
     <!-- The options page's checkbox: ticked unless the user clears it. Secure, so what the dialog
          sets reaches the elevated part of the install. -->
     <Property Id="EXPLORERMENU" Value="1" Secure="yes"/>
+    <!-- EXPLORERMENU=0 on the command line (also with /qn) leaves the menu out: on a first install
+         with no feature list of its own, it installs Main only. The menu feature is then
+         registered as absent, so upgrades and repairs keep it off. A feature condition (level 0)
+         can't do this: a disabled feature is not registered, and the next upgrade adds it. An
+         upgrade keeps the installed features, also with EXPLORERMENU=0. -->
+    <SetProperty Id="ADDLOCAL" Value="Main" Before="CostInitialize" Sequence="both">NOT Installed AND NOT WIX_UPGRADE_DETECTED AND EXPLORERMENU = "0" AND NOT ADDLOCAL AND NOT REMOVE</SetProperty>
 
     <!-- Installed apps: the exe's icon, links, and nothing to change after install. -->
     <Icon Id="volatus.ico" SourceFile="$(sys.SOURCEFILEDIR)..\assets\volatus.ico"/>

@@ -450,18 +450,35 @@ fn the_menu_is_a_feature_on_by_default_offered_on_first_install_only() {
     assert!(add[0].2 < new_dialog[0].2 && remove[0].2 < new_dialog[0].2, "the choice is applied before the page changes");
 }
 
-/// `msiexec /i volatus.msi /qn EXPLORERMENU=0` installs without the menu: the property sets the
-/// feature's level to 0, also with no UI. First install or upgrade only (`NOT Installed`): a level
-/// of 0 on an installed feature would keep its keys at uninstall.
+/// The menu feature has no condition: a feature disabled by a condition (level 0) is not
+/// registered, so a major upgrade has no "absent" state to carry and installs the menu again.
 #[test]
-fn explorermenu_0_on_the_command_line_leaves_the_menu_out() {
+fn the_menu_feature_has_no_condition() {
     let source = source();
     let doc = Document::parse(&source).unwrap();
     let feature = by_id(&doc, "Feature", "ExplorerMenu");
-    let conditions: Vec<Node> = feature.children().filter(|n| is(n, "Condition")).collect();
-    assert_eq!(conditions.len(), 1, "one feature condition");
-    assert_eq!(attr(&conditions[0], "Level"), Some("0"), "the feature is left out");
-    assert_eq!(clauses(&conditions[0]), set(&["NOT Installed", r#"EXPLORERMENU = "0""#]));
+    let conditions = feature.children().filter(|n| is(n, "Condition")).count();
+    assert_eq!(conditions, 0, "no feature condition: the menu's off state must be registered to survive upgrades");
+}
+
+/// `msiexec /i volatus.msi /qn EXPLORERMENU=0` installs without the menu, and later upgrades and
+/// repairs keep it off: on a first install with no feature list of its own, the property sets
+/// ADDLOCAL to Main, so the menu feature is registered as absent and MajorUpgrade migrates that.
+/// In both sequences, before costing reads ADDLOCAL. Not on an upgrade (it would stop the feature
+/// states from migrating), and never over an ADDLOCAL or REMOVE from the command line or the UI.
+#[test]
+fn explorermenu_0_on_the_command_line_installs_main_only_on_a_first_install() {
+    let source = source();
+    let doc = Document::parse(&source).unwrap();
+    let set_addlocal: Vec<Node> = all(&doc, "SetProperty").into_iter().filter(|s| attr(s, "Id") == Some("ADDLOCAL")).collect();
+    assert_eq!(set_addlocal.len(), 1, "one <SetProperty Id=\"ADDLOCAL\">");
+    let set_addlocal = set_addlocal[0];
+    let placed = (attr(&set_addlocal, "Value"), attr(&set_addlocal, "Before"), attr(&set_addlocal, "After"), attr(&set_addlocal, "Sequence"));
+    assert_eq!(placed, (Some("Main"), Some("CostInitialize"), None, Some("both")));
+    assert_eq!(
+        clauses(&set_addlocal),
+        set(&["NOT Installed", "NOT WIX_UPGRADE_DETECTED", r#"EXPLORERMENU = "0""#, "NOT ADDLOCAL", "NOT REMOVE"])
+    );
 }
 
 /// The menu's command names the exe in the install folder, so it is only right when the exe is

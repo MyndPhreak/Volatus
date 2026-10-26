@@ -46,14 +46,21 @@ that change in the next pull request.
 - A network fault: open the failed run and select **Re-run failed jobs**. This keeps the release
   that release-please made. Do not re-run all jobs: release-please does not make the release again,
   so the build does not start.
-- A fault in the code or the scripts: fix it in a pull request with a `fix:` title. Its release
-  pull request has the next version. When that release is published, delete the old draft.
+- A fault in the code or the scripts: fix it in a pull request with a `fix:` title. Its release pull request has
+  the next version. When that release is published, delete the old draft and its tag.
 
-## The first release (0.1.0)
+## What happens now (after 0.1.0)
 
-There is no earlier tag. `release-please-config.json` sets `release-as` to `0.1.0`, and sets
-`bootstrap-sha` to `b927773` (the tip of `main` before the installer work). The first changelog
-then has only the commits after it, and the 152 earlier commits cannot change the version.
+Version 0.1.0 is published with the tag `v0.1.0`. `.release-please-manifest.json` says `0.1.0`.
+`release-please-config.json` no longer has `release-as` or `bootstrap-sha`, so release-please
+counts the commits after the tag `v0.1.0`.
 
-After 0.1.0 is published, remove `release-as` and `bootstrap-sha` in a `chore:` pull request. If
-`release-as` stays, release-please proposes 0.1.0 again.
+1. Squash-merge pull requests with conventional titles (see Normal work).
+2. After each merge to `main`, release-please opens or updates the release pull request. A `fix:`
+   gives 0.1.1. A `feat:` gives 0.2.0, because the version is below 1.0 (`bump-minor-pre-major`).
+3. Merge the release pull request when you want a release (see Make a release).
+4. The workflow makes the tag, builds the MSI and publishes it.
+
+Do not change the version in `app/Cargo.toml` or in the manifest by hand: the release pull request
+does it. Do not add `release-as` again, unless you must force one version. Remove it after that
+release, or release-please proposes the same version again.
