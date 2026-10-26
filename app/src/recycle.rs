@@ -12,7 +12,7 @@
 #![cfg_attr(test, allow(dead_code, reason = "tests do not use every item; wired in the UI task"))]
 
 use crate::delete::{DeleteTarget, Outcome, Remover, SkipReason, Skipped, reason_from_win32};
-use std::cell::Cell;
+use std::sync::atomic::AtomicU64;
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -53,6 +53,10 @@ pub const NOT_RECYCLABLE: i32 = i32::MIN + 2;
 /// `SkipReason::Other` code for an operation that reported success but did not report the item
 /// in the bin. The item may or may not still be in its place.
 pub const NOT_IN_BIN: i32 = i32::MIN + 3;
+
+/// `SkipReason::Other` code for an item the sink saw go to the bin, after which the operation
+/// failed or was aborted. The item is in the bin: no permanent delete is offered.
+pub const IN_BIN_THEN_ERROR: i32 = i32::MIN + 4;
 
 /// The legacy `DE_*` codes of the shell's copy engine (from the `SHFileOperation` documentation;
 /// shellapi.h does not define them). The ones not named here map through `reason_from_win32` to
@@ -210,6 +214,17 @@ fn worse(a: Seen, b: Seen) -> Seen {
     if rank(b) > rank(a) { b } else { a }
 }
 
+/// `Seen` as one `u64` for the sink's atomic state: the kind in the high 32 bits (0 Nothing,
+/// 1 Recycled, 2 NotRecycled, 3 Refused), the `NotRecycled` code in the low 32 bits.
+fn encode(_s: Seen) -> u64 {
+    0
+}
+
+/// The `Seen` that `encode` gave `v`. An unknown kind decodes as `Refused`: fail closed.
+fn decode(_v: u64) -> Seen {
+    Seen::Nothing
+}
+
 /// What one operation means for the target: `None` only when the result is a success, nothing
 /// aborted, and the sink saw the item recycled. In this order: `Refused` is
 /// `Other(NOT_RECYCLABLE)`; a failure code maps by `skip_for_shell_result`; a `NotRecycled` with
@@ -323,17 +338,22 @@ impl Drop for Com {
 }
 
 /// The progress sink: records what the shell did to the item. Every other call is accepted.
+/// The `implement` object is agile (callable from any thread), so the state is one atomic
+/// (`encode`d `Seen`), updated with `worse`: sound whatever thread the shell calls it on.
 #[windows_core::implement(IFileOperationProgressSink)]
 struct Sink {
-    seen: Cell<Seen>,
+    seen: AtomicU64,
 }
 
 impl Sink {
     fn new() -> ComObject<Sink> {
-        ComObject::new(Sink { seen: Cell::new(Seen::Nothing) })
+        ComObject::new(Sink { seen: AtomicU64::new(encode(Seen::Nothing)) })
+    }
+    fn seen(&self) -> Seen {
+        decode(self.seen.load(Ordering::SeqCst))
     }
     fn note(&self, s: Seen) {
-        self.seen.set(worse(self.seen.get(), s));
+        self.seen.update(Ordering::SeqCst, Ordering::SeqCst, |v| encode(worse(decode(v), s)));
     }
 }
 
@@ -491,7 +511,7 @@ fn shell_recycle(from: &[u16], owner: Option<isize>) -> Report {
     // SAFETY: as above.
     let aborted = unsafe { op.GetAnyOperationsAborted() }.map_or(true, |b| b.as_bool());
     drop(op);
-    Report { hr: performed.err().map_or(0, |e| e.code().0), aborted, seen: sink.seen.get() }
+    Report { hr: performed.err().map_or(0, |e| e.code().0), aborted, seen: sink.seen() }
 }
 
 #[cfg(test)]
@@ -738,30 +758,98 @@ mod tests {
 
     #[test]
     fn results_are_a_success_only_when_the_sink_saw_the_item_recycled() {
-        let recycled = Seen::Post(PostDelete::Recycled);
         let other = |c| Some(SkipReason::Other(c));
-        for (hr, aborted, seen, want) in [
-            (0, false, recycled, None),
-            // The sink refused the item: whatever the operation says, it is not recyclable.
-            (0, false, Seen::Refused, other(NOT_RECYCLABLE)),
-            (HR_E_ABORT, true, Seen::Refused, other(NOT_RECYCLABLE)),
-            (HR_USER_CANCELLED, true, Seen::Refused, other(NOT_RECYCLABLE)),
-            // A failure or an abort is never a success, even after a recycled report.
-            (0, true, recycled, other(ABORTED)),
-            (HR_E_ABORT, true, recycled, other(ABORTED)),
-            (hr_win32(1223), false, recycled, other(ABORTED)),
-            (hr_win32(5), false, recycled, Some(SkipReason::AccessDenied)),
-            (hr_win32(2), false, Seen::Nothing, Some(SkipReason::Other(2))),
-            // Not recycled: by its code, or not in the bin.
-            (0, false, Seen::Post(PostDelete::NotRecycled(hr_win32(32))), Some(SkipReason::Locked)),
-            (0, false, Seen::Post(PostDelete::NotRecycled(0)), other(NOT_IN_BIN)),
-            (0, true, Seen::Post(PostDelete::NotRecycled(0)), other(NOT_IN_BIN)),
-            // No report from the sink is never a success.
-            (0, false, Seen::Nothing, other(NOT_IN_BIN)),
-            (0, true, Seen::Nothing, other(ABORTED)),
-        ] {
-            assert_eq!(skip_for_result(hr, aborted, seen), want, "hr={hr:#x} aborted={aborted} seen={seen:?}");
+        // Every class of operation result: success, a positive non-zero code, a failure, a
+        // cancel, and Win32 codes in an HRESULT. With each: what the code alone means.
+        let hrs = [
+            (0, None),
+            (1, other(1)),
+            (E_FAIL.0, other(E_FAIL.0)),
+            (HR_E_ABORT, other(ABORTED)),
+            (hr_win32(5), Some(SkipReason::AccessDenied)),
+            (hr_win32(1223), other(ABORTED)),
+        ];
+        let seens = [
+            Seen::Nothing,
+            Seen::Refused,
+            Seen::Post(PostDelete::Recycled),
+            Seen::Post(PostDelete::NotRecycled(0)),
+            Seen::Post(PostDelete::NotRecycled(E_FAIL.0)),
+        ];
+        for (hr, by_code) in hrs {
+            for aborted in [false, true] {
+                for seen in seens {
+                    let got = skip_for_result(hr, aborted, seen);
+                    let want = match seen {
+                        // The sink's evidence wins over the operation's result.
+                        Seen::Refused => other(NOT_RECYCLABLE),
+                        // A success code with no new item: the item may be gone. Scan again.
+                        Seen::Post(PostDelete::NotRecycled(0)) => other(NOT_IN_BIN),
+                        Seen::Post(PostDelete::NotRecycled(code)) => other(code),
+                        // In the bin: a success only with no error and no abort after it.
+                        Seen::Post(PostDelete::Recycled) if hr == 0 && !aborted => None,
+                        Seen::Post(PostDelete::Recycled) => other(IN_BIN_THEN_ERROR),
+                        // No sink report: the operation's result, never a success.
+                        Seen::Nothing if hr != 0 => by_code,
+                        Seen::Nothing if aborted => other(ABORTED),
+                        Seen::Nothing => other(NOT_IN_BIN),
+                    };
+                    let case = format!("hr={hr:#x} aborted={aborted} seen={seen:?}");
+                    assert_eq!(got, want, "{case}");
+                    // Never a false success.
+                    let success = hr == 0 && !aborted && seen == Seen::Post(PostDelete::Recycled);
+                    assert_eq!(got.is_none(), success, "{case}");
+                }
+            }
         }
+    }
+
+    #[test]
+    fn every_seen_value_round_trips_through_the_atomic_encoding() {
+        let mut values = vec![Seen::Nothing, Seen::Refused, Seen::Post(PostDelete::Recycled)];
+        for code in [0, 1, -1, 2, i32::MIN, i32::MAX, E_FAIL.0, HR_E_ABORT, hr_win32(5)] {
+            values.push(Seen::Post(PostDelete::NotRecycled(code)));
+        }
+        for s in &values {
+            assert_eq!(decode(encode(*s)), *s, "{s:?}");
+        }
+        // Distinct values have distinct encodings.
+        let mut codes: Vec<u64> = values.iter().map(|s| encode(*s)).collect();
+        codes.sort_unstable();
+        codes.dedup();
+        assert_eq!(codes.len(), values.len());
+        assert_eq!(decode(encode(Seen::Nothing)), Seen::Nothing);
+        // An unknown kind fails closed.
+        assert_eq!(decode(7 << 32), Seen::Refused);
+    }
+
+    #[test]
+    fn the_sink_state_from_two_threads_ends_at_the_worst_report() {
+        let sink = Sink::new();
+        assert_eq!(sink.seen(), Seen::Nothing);
+        let (recycle, s) = (TSF_DELETE_RECYCLE_IF_POSSIBLE.0 as u32, &sink);
+        std::thread::scope(|scope| {
+            scope.spawn(move || {
+                for _ in 0..1000 {
+                    s.PostDeleteItem(recycle, Ref::default(), S_OK, Ref::default()).unwrap();
+                }
+            });
+            scope.spawn(move || {
+                for i in 0..1000 {
+                    let pre = s.PreDeleteItem(if i == 500 { 0 } else { recycle }, Ref::default());
+                    assert_eq!(pre.is_err(), i == 500);
+                }
+            });
+        });
+        assert_eq!(sink.seen(), Seen::Refused, "the refusal from the other thread is kept");
+
+        let sink = Sink::new();
+        let s = &sink;
+        std::thread::scope(|scope| {
+            scope.spawn(move || s.PostDeleteItem(recycle, Ref::default(), S_OK, Ref::default()).unwrap());
+            scope.spawn(move || s.PostDeleteItem(recycle, Ref::default(), S_OK, Ref::default()).unwrap());
+        });
+        assert_eq!(sink.seen(), Seen::Post(PostDelete::NotRecycled(0)));
     }
 
     #[test]
@@ -796,6 +884,10 @@ mod tests {
         assert!(skip_text(SkipReason::Other(PATH_REFUSED)).unwrap().contains("path"));
         assert!(skip_text(SkipReason::Other(DE_FILE_TOO_LARGE)).unwrap().contains("too large"));
         assert!(skip_text(SkipReason::Other(NOT_RECYCLABLE)).unwrap().contains("cannot take this item"));
+        // The item is in the bin: no offer to delete it permanently.
+        let in_bin = skip_text(SkipReason::Other(IN_BIN_THEN_ERROR)).expect("in-bin text");
+        assert!(in_bin.contains("in the Recycle Bin") && in_bin.contains("error"), "{in_bin}");
+        assert!(!in_bin.contains("permanently"), "{in_bin}");
         // The item may be gone: no offer to delete it, a request to scan again.
         let gone = skip_text(SkipReason::Other(NOT_IN_BIN)).expect("text");
         assert!(!gone.contains("permanently") && gone.contains("Scan"), "{gone}");
@@ -864,25 +956,25 @@ mod tests {
         let i: IFileOperationProgressSink = sink.to_interface();
         // SAFETY (each call below): `i` is a live sink on this thread; the items are live or null.
         unsafe { i.PreDeleteItem(recycle, None) }.expect("a recyclable item is allowed");
-        assert_eq!(sink.seen.get(), Seen::Nothing);
+        assert_eq!(sink.seen(), Seen::Nothing);
         unsafe { i.PostDeleteItem(recycle, None, S_OK, &item) }.unwrap();
-        assert_eq!(sink.seen.get(), Seen::Post(PostDelete::Recycled));
+        assert_eq!(sink.seen(), Seen::Post(PostDelete::Recycled));
         let refused = unsafe { i.PreDeleteItem(0, None) }.expect_err("an item the bin cannot take is refused");
         assert_eq!(refused.code(), E_ABORT);
-        assert_eq!(sink.seen.get(), Seen::Refused);
+        assert_eq!(sink.seen(), Seen::Refused);
         unsafe { i.PostDeleteItem(recycle, None, S_OK, &item) }.unwrap();
-        assert_eq!(sink.seen.get(), Seen::Refused, "a later report does not hide the refusal");
+        assert_eq!(sink.seen(), Seen::Refused, "a later report does not hide the refusal");
 
         let sink = Sink::new();
         let i: IFileOperationProgressSink = sink.to_interface();
         unsafe { i.PostDeleteItem(recycle, None, S_OK, None) }.unwrap();
-        assert_eq!(sink.seen.get(), Seen::Post(PostDelete::NotRecycled(0)), "no new item: not in the bin");
+        assert_eq!(sink.seen(), Seen::Post(PostDelete::NotRecycled(0)), "no new item: not in the bin");
         unsafe { i.PostDeleteItem(recycle, None, E_FAIL, &item) }.unwrap();
-        assert_eq!(sink.seen.get(), Seen::Post(PostDelete::NotRecycled(0)), "the first failure stays");
+        assert_eq!(sink.seen(), Seen::Post(PostDelete::NotRecycled(0)), "the first failure stays");
         let sink = Sink::new();
         let i: IFileOperationProgressSink = sink.to_interface();
         unsafe { i.PostDeleteItem(recycle, None, E_FAIL, &item) }.unwrap();
-        assert_eq!(sink.seen.get(), Seen::Post(PostDelete::NotRecycled(E_FAIL.0)));
+        assert_eq!(sink.seen(), Seen::Post(PostDelete::NotRecycled(E_FAIL.0)));
     }
 
     #[test]
