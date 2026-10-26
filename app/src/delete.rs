@@ -65,22 +65,39 @@ impl Probe for RealFs {
     fn resolve(&self, p: &Path) -> Option<PathBuf> {
         std::fs::canonicalize(p).ok()
     }
-    /// A link item (any reparse point) is not followed: its parent is resolved and the name joined
-    /// back, so the link is what gets deleted. Any other item is resolved in full, so an 8.3 short
-    /// name becomes the long name. An item that is gone has its parent resolved; `exists` then says
-    /// `Missing`.
+    /// The parent is resolved and the LITERAL name joined onto it, giving a verbatim (`\\?\`) path:
+    /// Win32 would drop a trailing dot or space and reach a sibling. All further calls use that
+    /// path. A link item (junction or symlink) is not followed; only its final name is made long,
+    /// so a short name cannot hide a protected link. Any other item is canonicalized, so an 8.3
+    /// short name becomes the long name. An item that is gone keeps the joined path; `exists` then
+    /// says `Missing`. A parent that cannot be resolved gives `None`.
     fn resolve_target(&self, p: &Path) -> Option<PathBuf> {
-        use std::os::windows::fs::MetadataExt;
-        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-        let by_parent = || {
-            let name = p.file_name()?;
-            std::fs::canonicalize(p.parent()?).ok().map(|dir| dir.join(name))
+        let (Some(parent), Some(name)) = (p.parent(), p.file_name()) else {
+            return std::fs::canonicalize(p).ok();
         };
-        match std::fs::symlink_metadata(p) {
-            Ok(m) if m.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 => by_parent(),
-            Ok(_) => std::fs::canonicalize(p).ok(),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => by_parent(),
+        let literal = std::fs::canonicalize(parent).ok()?.join(name);
+        match std::fs::symlink_metadata(&literal) {
+            Ok(m) if m.file_type().is_symlink() => long_name(&literal),
+            Ok(_) => std::fs::canonicalize(&literal).ok(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(literal),
             Err(_) => None,
+        }
+    }
+}
+
+/// `GetLongPathNameW`: long names for every part of `p`. It does not follow a link.
+fn long_name(p: &Path) -> Option<PathBuf> {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use windows_sys::Win32::Storage::FileSystem::GetLongPathNameW;
+    let wide: Vec<u16> = p.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut buf = vec![0u16; 1024];
+    loop {
+        // SAFETY: `wide` is NUL-terminated; `buf` has the length passed.
+        let n = unsafe { GetLongPathNameW(wide.as_ptr(), buf.as_mut_ptr(), buf.len() as u32) } as usize;
+        match n {
+            0 => return None,
+            n if n < buf.len() => return Some(PathBuf::from(std::ffi::OsString::from_wide(&buf[..n]))),
+            n => buf.resize(n, 0),
         }
     }
 }
@@ -103,11 +120,11 @@ impl Env {
     pub fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Option<Env> {
         let var = |name: &str| get(name).filter(|v| !v.is_empty());
         Some(Env {
-            windir: var("SystemRoot").or_else(|| var("windir"))?,
+            windir: var("SystemRoot").or_else(|| var("windir")).filter(|v| Path::new(v).is_absolute())?,
             program_files: var("ProgramW6432").or_else(|| var("ProgramFiles")).unwrap_or_default(),
             program_files_x86: var("ProgramFiles(x86)").unwrap_or_default(),
             program_data: var("ProgramData").unwrap_or_default(),
-            user_profile: var("USERPROFILE")?,
+            user_profile: var("USERPROFILE").filter(|v| Path::new(v).is_absolute())?,
         })
     }
 }
@@ -948,9 +965,11 @@ mod tests {
         fn a_missing_item_is_missing_and_a_missing_parent_is_unresolved() {
             let d = Dir::new("missing");
             let root = plain(&d.base);
-            let got = check_target_in(&root, &root.join("nope"), true, &RealFs, &env());
+            // The profile and Windows folder must exist for real, so read the real environment.
+            let env = Env::from_lookup(|k| std::env::var(k).ok()).expect("a real environment");
+            let got = check_target_in(&root, &root.join("nope"), true, &RealFs, &env);
             assert_eq!(got, Err(Refusal::Missing));
-            let got = check_target_in(&root, &root.join("no").join("x"), true, &RealFs, &env());
+            let got = check_target_in(&root, &root.join("no").join("x"), true, &RealFs, &env);
             assert_eq!(got, Err(Refusal::Unresolved));
         }
     }
