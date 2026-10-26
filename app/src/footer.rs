@@ -234,6 +234,36 @@ mod tests {
         assert_eq!(chips[8].size, "30 B");
     }
 
+    fn counted(ext: &str, bytes: u64, files: u64) -> TypeTotal {
+        TypeTotal { ext: ext.into(), bytes, files }
+    }
+
+    #[test]
+    fn subtract_lowers_bytes_and_files_of_each_extension_and_drops_one_left_with_no_file() {
+        let totals = [counted("dll", 100, 3), counted("exe", 50, 2), counted("txt", 10, 1)];
+        let gone = [counted("dll", 40, 1), counted("txt", 10, 1)];
+
+        let left = subtract(&totals, &gone);
+
+        assert_eq!(left, vec![counted("dll", 60, 2), counted("exe", 50, 2)]);
+    }
+
+    #[test]
+    fn subtract_extension_left_with_files_of_no_size_is_kept() {
+        let left = subtract(&[counted("log", 5, 2)], &[counted("log", 5, 1)]);
+
+        assert_eq!(left, vec![counted("log", 0, 1)]);
+    }
+
+    #[test]
+    fn subtract_result_keeps_bytes_descending_then_ext_ascending() {
+        let totals = [counted("a", 100, 2), counted("c", 90, 1), counted("b", 90, 2)];
+
+        let left = subtract(&totals, &[counted("a", 20, 1)]);
+
+        assert_eq!(left, vec![counted("b", 90, 2), counted("c", 90, 1), counted("a", 80, 1)]);
+    }
+
     #[test]
     fn spoken_chip_gives_label_percent_in_words_and_size() {
         let chips = chips(&[total("dll", 103), total("exe", 897)], 1000, 8);

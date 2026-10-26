@@ -34,6 +34,7 @@ use std::rc::Rc;
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 use tree_view::{AfterRemoval, Row, SortKey, ViewState};
+use treemap::filetype::TypeTotal;
 use treemap::{Chrome, Frame, Rect, Theme};
 
 slint::include_modules!();
@@ -63,6 +64,7 @@ const FOOTER_CHIPS: usize = 8;
 const LAUNCH_FALLBACK: Duration = Duration::from_secs(2);
 
 /// A finished scan plus its derived per-node data. Shared with treemap layout threads.
+#[derive(Clone)]
 struct Data {
     tree: Tree,
     /// Files under each node, from `tree_view::file_counts`.
@@ -129,6 +131,11 @@ struct Loaded {
     shown_root: Option<NodeId>,
     /// Footer chips of the whole scan; `None` while the file types are counted.
     chips: Option<Vec<footer::Chip>>,
+    /// File-type totals of the shown tree: the count less every removal since. `None` while the
+    /// file types are counted.
+    totals: Option<Vec<TypeTotal>>,
+    /// Removals from the tree since it was installed. A count started before a removal is late.
+    edits: u64,
 }
 
 /// UI-thread state. Events from worker threads are applied here via `invoke_from_event_loop`.
@@ -831,6 +838,8 @@ fn install(ui: &MainWindow, data: Arc<Data>) {
             rects: Vec::new(),
             shown_root: None,
             chips: None,
+            totals: None,
+            edits: 0,
         });
         s.fade_next = true;
     });
@@ -879,6 +888,38 @@ fn store_chips(generation: u64, data: &Arc<Data>, chips: Vec<footer::Chip>) -> b
         let shown = s.scan.is_current(generation).then_some(s.loaded.as_mut()).flatten();
         shown.filter(|l| Arc::ptr_eq(&l.data, data)).map(|l| l.chips = Some(chips)).is_some()
     })
+}
+
+/// What `store_totals` did with file-type totals that landed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stored {
+    /// Kept: the footer shows them.
+    Kept,
+    /// Dropped: of an older scan, or of data the window no longer shows.
+    Late,
+    /// Dropped: counted before a removal from the shown tree. The count must start again.
+    Recount,
+}
+
+/// Keeps the file-type `totals` counted for `data` of scan `generation` after `edits` removals.
+/// A result of an older scan or for data the window no longer shows is `Late`; one counted before
+/// a later removal is `Recount`. Only `Kept` keeps them.
+fn store_totals(generation: u64, data: &Arc<Data>, edits: u64, totals: Vec<TypeTotal>) -> Stored {
+    let _ = (generation, data, edits, totals);
+    unimplemented!("P2.T2: store_totals")
+}
+
+/// The file types `gone` (those of a removed subtree) left the shown tree: they come off the
+/// totals. While the totals are counted, nothing comes off: that count is late (`store_totals`).
+fn drop_types(l: &mut Loaded, gone: &[TypeTotal]) {
+    let _ = (l, gone);
+    unimplemented!("P2.T2: drop_types")
+}
+
+/// The footer chips of the shown tree, from its totals; `None` while they are counted.
+fn chips_of(l: &Loaded) -> Option<Vec<footer::Chip>> {
+    let _ = l;
+    unimplemented!("P2.T2: chips_of")
 }
 
 /// Pushes the footer chips into the window, in the tile colours of the current theme.
@@ -1498,8 +1539,9 @@ mod tests {
         Loaded, RowModel, SESSION, file_labels, frame_labels, glow_drawn, hover_of, map_labels, note_hover, restart_admin,
         store_chips, Move, picture_point, zoom_frame_at, take_launch_path, forget_scan, gate_hover, left_map,
         shows_start_at_launch, relaunch_path, LabelKind, LogicalBox, Placed, place_label, stretch,
-        apply_args,
+        apply_args, FOOTER_CHIPS, Stored, chips_of, drop_types, store_totals,
     };
+    use treemap::filetype::{TypeTotal, type_totals};
     use crate::tip;
     use crate::motion::Kind;
     use std::time::Instant;
@@ -2062,7 +2104,18 @@ mod tests {
     fn loaded(data: &Arc<Data>) -> Loaded {
         let root = data.tree.root();
         let model = Rc::new(RowModel { data: data.clone(), rows: RefCell::new(Vec::new()), notify: ModelNotify::default() });
-        Loaded { data: data.clone(), model, view: ViewState::new(root), selected: None, view_root: root, rects: Vec::new(), shown_root: None, chips: None }
+        Loaded {
+            data: data.clone(),
+            model,
+            view: ViewState::new(root),
+            selected: None,
+            view_root: root,
+            rects: Vec::new(),
+            shown_root: None,
+            chips: None,
+            totals: None,
+            edits: 0,
+        }
     }
 
     fn chips() -> Vec<Chip> {
@@ -2159,6 +2212,54 @@ mod tests {
         assert!(store_chips(generation, &d, chips()));
         assert!(store_chips(generation, &d, chips()));
         assert_eq!(kept_chips(), Some(chips()));
+    }
+
+    // ---- footer totals after a removal ----
+    /// root(0){ docs(1){ a.txt(4)=100, b.pdf(5)=50 }, c.txt(2)=10, d.exe(3)=30 }
+    fn typed() -> Arc<Data> {
+        let e = |id: u64, parent: u64, name: &str, size: u64, is_dir: bool| RawEntry { id, parent, name: name.into(), size, allocated: size, is_dir };
+        let entries = vec![
+            e(0, 0, "root", 0, true),
+            e(1, 0, "docs", 0, true),
+            e(2, 0, "c.txt", 10, false),
+            e(3, 0, "d.exe", 30, false),
+            e(4, 1, "a.txt", 100, false),
+            e(5, 1, "b.pdf", 50, false),
+        ];
+        let tree = rollup(0, entries).unwrap().tree;
+        Arc::new(Data { counts: crate::tree_view::file_counts(&tree), tree })
+    }
+
+    fn kept_totals() -> Option<Vec<TypeTotal>> {
+        SESSION.with_borrow(|s| s.loaded.as_ref().and_then(|l| l.totals.clone()))
+    }
+
+    #[test]
+    fn drop_types_chips_after_a_removal_are_those_of_a_new_count_and_the_footer_is_not_counting() {
+        let d = typed();
+        let (root, docs) = (d.tree.root(), NodeId(1));
+        let mut l = loaded(&d);
+        l.totals = Some(type_totals(&d.tree, root));
+        let gone = type_totals(&d.tree, docs);
+        Arc::make_mut(&mut l.data).tree.remove(docs);
+        let tree = &l.data.tree;
+        let want = crate::footer::chips(&type_totals(tree, root), tree.node(root).size, FOOTER_CHIPS);
+
+        drop_types(&mut l, &gone);
+
+        assert_eq!(chips_of(&l), Some(want));
+    }
+
+    #[test]
+    fn store_totals_counted_before_a_removal_and_landing_after_it_are_dropped_and_counted_again() {
+        let d = typed();
+        let generation = show_finished_scan(&d);
+        let counted = type_totals(&d.tree, d.tree.root());
+        super::with_loaded(|l| drop_types(l, &[]));
+
+        let stored = store_totals(generation, &d, 0, counted);
+
+        assert_eq!((stored, kept_totals()), (Stored::Recount, None));
     }
 
     fn run(timing: bool) -> (Result<(), String>, Option<(String, bool)>) {
