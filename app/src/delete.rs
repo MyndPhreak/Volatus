@@ -74,13 +74,24 @@ pub struct Env {
 }
 
 impl Env {
+    /// Builds the environment from a lookup. `None` if the Windows folder or the user profile is
+    /// unset or empty: the policy cannot name what to protect, so it refuses everything.
+    /// `ProgramW6432` (the 64-bit Program Files) wins over `ProgramFiles` when present. The other
+    /// folders may be empty: the every-volume rule in `check_target_in` still covers them.
     pub fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Option<Env> {
-        let _ = get;
-        None
+        let var = |name: &str| get(name).filter(|v| !v.is_empty());
+        Some(Env {
+            windir: var("SystemRoot").or_else(|| var("windir"))?,
+            program_files: var("ProgramW6432").or_else(|| var("ProgramFiles")).unwrap_or_default(),
+            program_files_x86: var("ProgramFiles(x86)").unwrap_or_default(),
+            program_data: var("ProgramData").unwrap_or_default(),
+            user_profile: var("USERPROFILE")?,
+        })
     }
 
+    /// Reads the process environment.
     pub fn from_process() -> Option<Env> {
-        None
+        Env::from_lookup(|k| std::env::var(k).ok())
     }
 }
 
@@ -93,26 +104,56 @@ pub enum Scope {
     Exact,
 }
 
+/// The folders taken from the environment that may not be deleted: `Windows` with everything
+/// inside it, and the four whose children are allowed. Empty values are left out.
 pub fn protected_folders(env: &Env) -> Vec<(PathBuf, Scope)> {
-    let mut v = vec![(PathBuf::from(&env.windir), Scope::Subtree)];
-    for p in [&env.program_files, &env.program_files_x86, &env.program_data, &env.user_profile] {
-        if !p.is_empty() {
-            v.push((PathBuf::from(p), Scope::Exact));
-        }
+    [
+        (&env.windir, Scope::Subtree),
+        (&env.program_files, Scope::Exact),
+        (&env.program_files_x86, Scope::Exact),
+        (&env.program_data, Scope::Exact),
+        (&env.user_profile, Scope::Exact),
+    ]
+    .into_iter()
+    .filter(|(v, _)| !v.is_empty())
+    .map(|(v, scope)| (PathBuf::from(v), scope))
+    .collect()
+}
+
+/// The same names on every volume, whatever the environment says: `<volume>\windows` with its
+/// contents, and the three Program folders themselves. `t` is in `norm` form.
+fn on_any_volume(t: &str) -> Option<Scope> {
+    let rest = t.get(1..3).filter(|c| *c == r":\").and_then(|_| t.get(3..))?;
+    if within(rest, "windows") {
+        Some(Scope::Subtree)
+    } else if ["program files", "program files (x86)", "programdata"].contains(&rest) {
+        Some(Scope::Exact)
+    } else {
+        None
     }
-    v
 }
 
+/// The text for a refusal, one short sentence (ASD-STE100).
 pub fn refusal_text(r: Refusal) -> &'static str {
-    let _ = r;
-    ""
+    match r {
+        Refusal::NotUnderRoot => "The item is not inside the scanned folder.",
+        Refusal::ProtectedFolder => "Windows needs this folder. You cannot delete it.",
+        Refusal::DriveRoot => "You cannot delete a whole drive.",
+        Refusal::Missing => "The item is already gone.",
+        Refusal::KindChanged => "The item changed after the scan. Scan again.",
+        Refusal::ScanRunning => "A scan is running. Wait until it ends.",
+        Refusal::Unresolved => "Volatus cannot find the real path of the item. It does not delete the item.",
+    }
 }
 
-/// Lowercase, `\\?\` stripped, `/` as `\`, trailing separators trimmed. The form paths compare in.
+/// Lowercase, `\\?\` stripped, `/` as `\`, trailing dots and spaces of each name dropped (Windows
+/// ignores them), trailing separators trimmed. The form paths compare in.
 fn norm(p: &Path) -> String {
     let s = p.to_string_lossy().to_lowercase().replace('/', r"\");
     let s = s.strip_prefix(r"\\?\").unwrap_or(&s);
-    s.trim_end_matches('\\').to_string()
+    let parts: Vec<&str> =
+        s.split('\\').map(|c| if c == "." || c == ".." { c } else { c.trim_end_matches(['.', ' ']) }).collect();
+    parts.join(r"\").trim_end_matches('\\').to_string()
 }
 
 /// True when `child` is `parent` or inside it. Both are in `norm` form.
@@ -120,13 +161,24 @@ fn within(child: &str, parent: &str) -> bool {
     child == parent || child.strip_prefix(parent).is_some_and(|rest| rest.starts_with('\\'))
 }
 
-/// Checks the item against the scan root, the protected list and the disk, in this order:
-/// `NotUnderRoot`, `DriveRoot`, `NotUnderRoot` (the root itself), `ProtectedFolder`, `Missing`,
-/// `KindChanged`. Reads the real environment for the protected list.
+/// Checks the item against the scan root, the protected list and the disk. The root and the item
+/// are resolved first (`..`, links, trailing dots); if either cannot be resolved the result is
+/// `Unresolved`. Then, in this order: `NotUnderRoot`, `DriveRoot`, `NotUnderRoot` (the root
+/// itself), `ProtectedFolder`, `Missing`, `KindChanged`. Reads the real environment for the
+/// protected list; if that is unknown, everything is `Unresolved`.
 pub fn check_target(root: &Path, target: &Path, is_dir: bool, fs: &dyn Probe) -> Result<(), Refusal> {
     match Env::from_process() {
         Some(env) => check_target_in(root, target, is_dir, fs, &env),
         None => Err(Refusal::Unresolved),
+    }
+}
+
+/// The real path of the item. Its parent is resolved and the name is joined back, so an item that
+/// is a link stays the link and is never followed.
+fn resolve_item(fs: &dyn Probe, target: &Path) -> Option<PathBuf> {
+    match (target.parent(), target.file_name()) {
+        (Some(parent), Some(name)) => fs.resolve(parent).map(|p| p.join(name)),
+        _ => fs.resolve(target),
     }
 }
 
@@ -138,28 +190,34 @@ pub fn check_target_in(
     fs: &dyn Probe,
     env: &Env,
 ) -> Result<(), Refusal> {
-    let (r, t) = (norm(root), norm(target));
+    // A miss here never falls back to the raw path: the text of a path proves nothing.
+    let root = fs.resolve(root).ok_or(Refusal::Unresolved)?;
+    let target = resolve_item(fs, target).ok_or(Refusal::Unresolved)?;
+    let (r, t) = (norm(&root), norm(&target));
     if !within(&t, &r) {
         return Err(Refusal::NotUnderRoot);
     }
     // A drive root is named before the root check below, so a scan of `C:\` says "drive root".
     let bare_drive = t.len() == 2 && t.ends_with(':');
-    if bare_drive || scan::is_volume_root(target) {
+    if bare_drive || scan::is_volume_root(&target) {
         return Err(Refusal::DriveRoot);
     }
     if t == r {
         return Err(Refusal::NotUnderRoot);
     }
-    // `protected_folders` lists `Windows` first: it guards everything inside; the rest, only itself.
-    let list: Vec<String> = protected_folders(env).iter().map(|p| norm(&p.0)).collect();
-    let hit = list.iter().enumerate().any(|(i, p)| if i == 0 { within(&t, p) } else { t == *p });
-    if hit {
+    let hit = |p: &str, scope: Scope| match scope {
+        Scope::Subtree => within(&t, p),
+        Scope::Exact => t == p,
+    };
+    let from_env = protected_folders(env).iter().any(|(p, scope)| hit(&norm(p), *scope));
+    let any_volume = on_any_volume(&t).is_some();
+    if from_env || any_volume {
         return Err(Refusal::ProtectedFolder);
     }
-    if !fs.exists(target) {
+    if !fs.exists(&target) {
         return Err(Refusal::Missing);
     }
-    if fs.is_dir(target) != is_dir {
+    if fs.is_dir(&target) != is_dir {
         return Err(Refusal::KindChanged);
     }
     Ok(())
@@ -213,7 +271,7 @@ pub fn summary_lines(mode: DeleteMode, o: &Outcome) -> Vec<String> {
         match mode {
             DeleteMode::RecycleBin => {
                 lines.push(format!("Moved {} to the Recycle Bin.", items(o.removed_items)));
-                lines.push("Disk space is freed only when you empty the Recycle Bin.".to_string());
+                lines.push("Windows frees the disk space only when you empty the Recycle Bin.".to_string());
             }
             DeleteMode::Permanent => {
                 lines.push(format!("Deleted {}.", items(o.removed_items)));
@@ -222,7 +280,7 @@ pub fn summary_lines(mode: DeleteMode, o: &Outcome) -> Vec<String> {
         }
     }
     if o.stopped {
-        lines.push("You stopped the delete.".to_string());
+        lines.push("You stopped the operation.".to_string());
         lines.push("Items that Volatus removed stay removed.".to_string());
     }
     if !o.skipped.is_empty() {
