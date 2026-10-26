@@ -20,7 +20,7 @@ use windows_sys::Wdk::Storage::FileSystem::{
 use windows_sys::Win32::Foundation::{
     CloseHandle, ERROR_ACCESS_DENIED, ERROR_DIR_NOT_EMPTY, ERROR_FILE_NOT_FOUND, ERROR_FILENAME_EXCED_RANGE,
     ERROR_INVALID_DATA, ERROR_INVALID_FUNCTION, ERROR_INVALID_HANDLE, ERROR_INVALID_NAME, ERROR_INVALID_PARAMETER,
-    ERROR_NO_MORE_FILES, ERROR_NOT_SUPPORTED, GetLastError, HANDLE, INVALID_HANDLE_VALUE, OBJ_CASE_INSENSITIVE,
+    ERROR_NO_MORE_FILES, ERROR_NOT_SUPPORTED, ERROR_SHARING_VIOLATION, GetLastError, HANDLE, INVALID_HANDLE_VALUE,
     RtlNtStatusToDosError, UNICODE_STRING,
 };
 use windows_sys::Win32::Storage::FileSystem::{
@@ -61,6 +61,13 @@ const ITEM_ACCESS: u32 = DELETE | FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES |
 
 /// Access for a folder that is listed and then removed.
 const FOLDER_ACCESS: u32 = ITEM_ACCESS | FILE_LIST_DIRECTORY;
+
+/// Access for a folder that another process holds open without share delete: listed and
+/// emptied, never removed (no delete access).
+const LIST_ACCESS: u32 = FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE;
+
+/// Access for the first open of the target by its path: its attributes only.
+const PROBE_ACCESS: u32 = FILE_READ_ATTRIBUTES | SYNCHRONIZE;
 
 /// No `FILE_SHARE_DELETE`: while the run holds a folder open, no one can rename or move it out
 /// of the target (that needs delete access), so the folder the handle names stays where the run
@@ -159,6 +166,8 @@ struct Listed {
 struct DirNode {
     h: Option<Handle>,
     attrs: u32,
+    /// False when `h` is the list-only open of a folder held open elsewhere.
+    deletable: bool,
     path: Vec<u16>,
     parent: Option<usize>,
     /// Entries not finished yet.
@@ -169,8 +178,8 @@ struct DirNode {
 enum Work {
     /// An entry of the open folder `parent`.
     Child { parent: usize, entry: Listed },
-    /// The folder `dir`, with every entry finished: removed through `h`.
-    Rmdir { dir: usize, h: Handle, attrs: u32 },
+    /// The folder `dir`, with every entry finished: removed through `h` when `deletable`.
+    Rmdir { dir: usize, h: Handle, attrs: u32, deletable: bool },
 }
 
 /// What a worker did with one item of a batch.
@@ -187,7 +196,7 @@ enum Done {
     Removed(u64),
     Failed(u32),
     /// A folder, open and listed (or not, with the listing's error).
-    Folder { h: Handle, attrs: u32, listed: Result<Vec<Listed>, u32> },
+    Folder { h: Handle, attrs: u32, deletable: bool, listed: Result<Vec<Listed>, u32> },
 }
 
 /// The caller-thread state of a folder run.
@@ -206,7 +215,8 @@ struct Run<'a> {
 /// folder that is not a link, like a cloud folder) is listed in turn. A folder is removed when
 /// all its entries are finished. A folder that will not empty stays: it gets its own skip unless
 /// a skip already recorded lies in it, so a target that stays always has a skip (or `stopped`).
-/// Counts are as `Remover` says; `removed_bytes` takes each file's size from its folder listing.
+/// A folder (the target too) that another process holds open without share delete is opened for
+/// listing only: it is emptied and stays, with one Locked skip. Counts are as `Remover` says; `removed_bytes` takes each file's size from its folder listing.
 pub(crate) fn remove_with(t: &DeleteTarget, progress: &dyn Fn(u64, u64), stop: &AtomicBool, opts: &Options) -> Outcome {
     let mut out = Outcome::default();
     let root: Vec<u16> = t.path.as_os_str().encode_wide().collect();
@@ -216,9 +226,14 @@ pub(crate) fn remove_with(t: &DeleteTarget, progress: &dyn Fn(u64, u64), stop: &
         return out;
     }
     let posix = AtomicBool::new(opts.posix);
-    let opened = open_path(&root).and_then(|h| tag_info(&h).map(|(attrs, tag)| (h, attrs, tag)));
-    let (h, attrs, tag) = match opened {
-        Ok(v) => v,
+    // The attribute-only open names the object; the access the run needs comes from opening
+    // that same object again, by its kind (a file target asks for no list access).
+    let opened = open_path(&root).and_then(|probe| {
+        let (attrs, tag) = tag_info(&probe)?;
+        open_entry(&|a| reopen_info(&probe, a), kind_of(attrs, tag) == Kind::Folder)
+    });
+    let Opened { h, attrs, tag, deletable } = match opened {
+        Ok(o) => o,
         Err(code) => {
             out.skipped.push(skip(&root, code));
             return out;
@@ -249,7 +264,7 @@ pub(crate) fn remove_with(t: &DeleteTarget, progress: &dyn Fn(u64, u64), stop: &
         f(&to_path(&root));
     }
     let mut run = Run { dirs: Vec::new(), work: Vec::new(), out, hook: opts.hook };
-    run.add_folder(h, attrs, root, None, listed);
+    run.add_folder(h, attrs, deletable, root, None, listed);
     // Only the benchmark asks for a thread count. If that pool cannot be made, the global pool
     // does the same work.
     let pool = match opts.threads {
@@ -289,7 +304,13 @@ impl Work {
     /// Runs on a worker thread.
     fn run(self, dirs: &[DirNode], posix: &AtomicBool, list_buf: usize) -> Finished {
         match self {
-            Work::Rmdir { dir, h, attrs } => Finished::Rmdir { dir, result: dispose(h, attrs, posix) },
+            Work::Rmdir { dir, h, attrs, deletable: true } => Finished::Rmdir { dir, result: dispose(h, attrs, posix) },
+            // Opened for listing only: held open elsewhere without share delete. The handle
+            // has no delete access, so no delete is tried; the folder stays as a Locked skip.
+            Work::Rmdir { dir, h, deletable: false, .. } => {
+                drop(h);
+                Finished::Rmdir { dir, result: Err(ERROR_SHARING_VIOLATION) }
+            }
             Work::Child { parent, entry } => {
                 let done = match dirs.get(parent).and_then(|d| d.h.as_ref()) {
                     Some(ph) => child(ph, &entry, posix, list_buf),
@@ -303,10 +324,18 @@ impl Work {
 
 impl Run<'_> {
     /// Adds an open, listed folder and queues its entries (or its own removal when it is empty).
-    fn add_folder(&mut self, h: Handle, attrs: u32, path: Vec<u16>, parent: Option<usize>, listed: Vec<Listed>) {
+    fn add_folder(
+        &mut self,
+        h: Handle,
+        attrs: u32,
+        deletable: bool,
+        path: Vec<u16>,
+        parent: Option<usize>,
+        listed: Vec<Listed>,
+    ) {
         let dir = self.dirs.len();
         let pending = listed.len();
-        self.dirs.push(DirNode { h: Some(h), attrs, path, parent, pending });
+        self.dirs.push(DirNode { h: Some(h), attrs, deletable, path, parent, pending });
         if pending == 0 {
             self.queue_rmdir(dir);
         } else {
@@ -317,7 +346,7 @@ impl Run<'_> {
     fn queue_rmdir(&mut self, dir: usize) {
         let node = &mut self.dirs[dir];
         match node.h.take() {
-            Some(h) => self.work.push(Work::Rmdir { dir, h, attrs: node.attrs }),
+            Some(h) => self.work.push(Work::Rmdir { dir, h, attrs: node.attrs, deletable: node.deletable }),
             // Not reached: a folder's removal is queued once. Reported, never silent.
             None => self.out.skipped.push(skip(&node.path, ERROR_INVALID_HANDLE)),
         }
@@ -355,14 +384,14 @@ impl Run<'_> {
                     self.out.skipped.push(skip(&path, code));
                     self.finish(parent);
                 }
-                Done::Folder { h, attrs, listed } => {
+                Done::Folder { h, attrs, deletable, listed } => {
                     let path = self.child_path(parent, &name);
                     match listed {
                         Ok(listed) => {
                             if let Some(f) = self.hook {
                                 f(&to_path(&path));
                             }
-                            self.add_folder(h, attrs, path, Some(parent), listed);
+                            self.add_folder(h, attrs, deletable, path, Some(parent), listed);
                         }
                         Err(code) => {
                             // Not listed, so not removed: the skip says why the folder stays.
@@ -400,21 +429,12 @@ impl Run<'_> {
 /// open. The listing's kind only picks the access asked for; a folder where the listing saw
 /// something else is opened again, still relative to the same folder handle.
 fn child(parent: &Handle, e: &Listed, posix: &AtomicBool, list_buf: usize) -> Done {
-    let access = if e.folder_hint { FOLDER_ACCESS } else { ITEM_ACCESS };
-    let opened = open_child_info(parent, &e.name, access).and_then(|(h, attrs, tag)| {
-        if kind_of(attrs, tag) == Kind::Folder && !e.folder_hint {
-            drop(h);
-            open_child_info(parent, &e.name, FOLDER_ACCESS)
-        } else {
-            Ok((h, attrs, tag))
-        }
-    });
-    let (h, attrs, tag) = match opened {
-        Ok(v) => v,
+    let Opened { h, attrs, tag, deletable } = match open_entry(&|a| open_child_info(parent, &e.name, a), e.folder_hint) {
+        Ok(o) => o,
         Err(code) => return Done::Failed(code),
     };
     match kind_of(attrs, tag) {
-        Kind::Folder => Done::Folder { listed: list(&h, list_buf), h, attrs },
+        Kind::Folder => Done::Folder { listed: list(&h, list_buf), h, attrs, deletable },
         Kind::Link => match dispose(h, attrs, posix) {
             Ok(()) => Done::Removed(0),
             Err(code) => Done::Failed(code),
@@ -424,6 +444,49 @@ fn child(parent: &Handle, e: &Listed, posix: &AtomicBool, list_buf: usize) -> Do
             Err(code) => Done::Failed(code),
         },
     }
+}
+
+/// An item open for the run, with its kind read from its own handle. `deletable` is false for a
+/// folder opened with list access only, because another process holds it open without share
+/// delete: it is listed and emptied, and then gets a Locked skip instead of a delete.
+struct Opened {
+    h: Handle,
+    attrs: u32,
+    tag: u32,
+    deletable: bool,
+}
+
+/// Opens an item through `open` (one access mask in, the open handle and its attributes and tag
+/// out; every call opens the same name relative to the same handle). `folder_hint` picks the
+/// first access. A folder where the hint said otherwise is opened again with folder access. A
+/// folder that cannot be opened for delete because of a sharing violation is opened with list
+/// access only.
+fn open_entry(open: &dyn Fn(u32) -> Result<(Handle, u32, u32), u32>, folder_hint: bool) -> Result<Opened, u32> {
+    let first = open(if folder_hint { FOLDER_ACCESS } else { ITEM_ACCESS });
+    match first {
+        Ok((h, attrs, tag)) if kind_of(attrs, tag) == Kind::Folder && !folder_hint => {
+            drop(h);
+            match open(FOLDER_ACCESS) {
+                Ok((h, attrs, tag)) => Ok(Opened { h, attrs, tag, deletable: true }),
+                Err(ERROR_SHARING_VIOLATION) => open_listing_only(open),
+                Err(code) => Err(code),
+            }
+        }
+        Ok((h, attrs, tag)) => Ok(Opened { h, attrs, tag, deletable: true }),
+        Err(ERROR_SHARING_VIOLATION) if folder_hint => open_listing_only(open),
+        Err(code) => Err(code),
+    }
+}
+
+/// The list-only open of a folder held open elsewhere without share delete. It still shares
+/// no delete itself, so the folder cannot be moved away while it is open. Anything that is not
+/// a folder on this open stays as a Locked skip: this handle cannot delete it.
+fn open_listing_only(open: &dyn Fn(u32) -> Result<(Handle, u32, u32), u32>) -> Result<Opened, u32> {
+    let (h, attrs, tag) = open(LIST_ACCESS)?;
+    if kind_of(attrs, tag) != Kind::Folder {
+        return Err(ERROR_SHARING_VIOLATION);
+    }
+    Ok(Opened { h, attrs, tag, deletable: false })
 }
 
 /// True when a find-data entry is a link: a reparse point with a name-surrogate tag (junction,
@@ -438,7 +501,10 @@ fn needs_skip_for_folder(folder: &Path, skips: &[Skipped]) -> bool {
     !skips.iter().any(|s| s.path.starts_with(folder))
 }
 
-/// Opens the target itself by its verbatim path, without following a final link.
+/// Opens the target itself by its verbatim path, without following a final link, for its
+/// attributes only. This is the only path the run resolves. No data or delete access, so the
+/// open takes part in no sharing check and starts no antivirus scan; the access the run needs is
+/// asked for by opening this same object again (`reopen_info`).
 fn open_path(path: &[u16]) -> Result<Handle, u32> {
     let z = nul(path);
     // SAFETY: `z` is NUL-terminated and lives across the call; no security attributes and no
@@ -446,7 +512,7 @@ fn open_path(path: &[u16]) -> Result<Handle, u32> {
     let h = unsafe {
         CreateFileW(
             z.as_ptr(),
-            FOLDER_ACCESS,
+            PROBE_ACCESS,
             SHARE,
             std::ptr::null(),
             OPEN_EXISTING,
@@ -472,21 +538,38 @@ fn open_child_info(parent: &Handle, name: &[u16], access: u32) -> Result<(Handle
     if !is_plain_name(name) {
         return Err(ERROR_INVALID_NAME);
     }
+    let h = nt_open(parent, name, access)?;
+    let (attrs, tag) = tag_info(&h)?;
+    Ok((h, attrs, tag))
+}
+
+/// Opens the object `h` is open on again, with `access` (an empty name relative to `h`, as
+/// `ReOpenFile` does): no name is looked up, so it is the same object.
+fn reopen_info(h: &Handle, access: u32) -> Result<(Handle, u32, u32), u32> {
+    let h = nt_open(h, &[], access)?;
+    let (attrs, tag) = tag_info(&h)?;
+    Ok((h, attrs, tag))
+}
+
+/// `NtCreateFile` of `name` relative to `root`, without following a link. The lookup is exact
+/// (no `OBJ_CASE_INSENSITIVE`): every name comes from the folder's own listing.
+fn nt_open(root: &Handle, name: &[u16], access: u32) -> Result<Handle, u32> {
     let bytes = u16::try_from(name.len() * 2).map_err(|_| ERROR_FILENAME_EXCED_RANGE)?;
     let us = UNICODE_STRING { Length: bytes, MaximumLength: bytes, Buffer: name.as_ptr().cast_mut() };
     let oa = OBJECT_ATTRIBUTES {
         Length: size_of::<OBJECT_ATTRIBUTES>() as u32,
-        RootDirectory: parent.0,
+        RootDirectory: root.0,
         ObjectName: &us,
-        Attributes: OBJ_CASE_INSENSITIVE,
+        Attributes: 0,
         SecurityDescriptor: std::ptr::null(),
         SecurityQualityOfService: std::ptr::null(),
     };
     let mut h: HANDLE = std::ptr::null_mut();
     let mut iosb = IO_STATUS_BLOCK::default();
-    // SAFETY: `oa` points at `us`, whose counted buffer is `name` (NT names need no NUL); both
-    // outlive the call, which only reads them. `parent` is an open folder handle. `h` and
-    // `iosb` are valid out locations. No allocation size and no extended attributes.
+    // SAFETY: `oa` points at `us`, whose counted buffer is `name` (NT names need no NUL; an
+    // empty name has length 0, so its buffer is not read); both outlive the call, which only
+    // reads them. `root` is an open handle. `h` and `iosb` are valid out locations. No
+    // allocation size and no extended attributes.
     let status = unsafe {
         NtCreateFile(
             &mut h,
@@ -506,9 +589,7 @@ fn open_child_info(parent: &Handle, name: &[u16], access: u32) -> Result<(Handle
         // SAFETY: a pure conversion of a status value.
         return Err(unsafe { RtlNtStatusToDosError(status) });
     }
-    let h = Handle(h);
-    let (attrs, tag) = tag_info(&h)?;
-    Ok((h, attrs, tag))
+    Ok(Handle(h))
 }
 
 /// The opened item's attributes and reparse tag (the tag means something only with
