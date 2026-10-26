@@ -59,24 +59,27 @@ Press Tab to move to the next control, and Shift+Tab to move back.
 - **Theme**: "Follow Windows", "Light" or "Dark". "Follow Windows" uses the Windows theme and
   changes when the Windows theme changes. The other two choices keep their scheme.
 - **Units**: "Dynamic", "Byte", "KB", "MB", "GB" or "TB". Every size in the window uses this unit.
-  A step is 1024. "Dynamic" picks the unit that fits each size. A fixed unit shows a size below
-  0.05 of that unit as "< 0.1 KB", "< 0.1 MB", and so on (with the unit that you chose).
+  Each step is 1024 times the one before. "Dynamic" selects the unit that fits each size. "Byte"
+  shows the exact number of bytes, with separators. With KB, MB, GB or TB, a size below 0.05 of
+  that unit shows as "< 0.1" and the unit, for example "< 0.1 MB".
 - **Show**: a switch for each part of the window. All parts show by default.
   - "Header": the scan title and the summary text in the top bar. The buttons stay.
   - "Folder tree": the file tree on the left. The treemap then uses its space.
-  - "File types strip": the bar of file types in the footer.
-  - "File type chips": the file type chips in the footer. The footer is gone when both the strip
-    and the chips are hidden.
+  - "File type strip": the bar of file types in the footer.
+  - "File type chips": the file type chips in the footer. The footer does not show when both the
+    strip and the chips are hidden.
   - "Tile labels": the names on the tiles and the folder frames. The name of the tile under the
     pointer still shows. The tooltips stay.
 - A choice takes effect at once. Volatus saves each change in `%APPDATA%\Volatus\settings.json`
   and reads this file at start.
-- If Volatus cannot read the file cleanly, it keeps the file as `settings.json.bad` in the same
-  folder. Volatus then uses the default settings for the fields that it cannot read. If the whole
-  file is not valid, all fields use the default settings. The next change replaces
+- If Volatus finds a wrong or damaged field in the file, it keeps the file as `settings.json.bad`
+  in the same folder. Volatus then uses the default settings for the fields that it cannot read.
+  If the whole file is not valid, all fields use the default settings. The next change replaces
   `settings.json`.
 - If Volatus cannot keep a copy of the file, it does not save any setting. Your choices still
   apply to the window until you close it. The flyout shows "Settings could not be saved."
+  Volatus also does not save when it cannot find the `%APPDATA%` folder or cannot read the file at
+  all. Both give the same message.
 
 ## Administrator rights
 - Without administrator rights, Volatus reads the folders one by one. This is slower.

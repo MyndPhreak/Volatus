@@ -199,7 +199,7 @@ export component MainWindow inherits Window {
     /// Height of the footer panel (the host's `footer_height`): 0 hides it.
     in property <length> footer-height: 48px;
     /// A part was shown (true) or hidden (false) in the flyout. The first argument is its index in
-    /// the host's `Part::ALL`: 0 header, 1 folder tree, 2 file types strip, 3 file type chips,
+    /// the host's `Part::ALL`: 0 header, 1 folder tree, 2 file type strip, 3 file type chips,
     /// 4 tile labels.
     callback part-toggled(int, bool);
     /// A row of the folder tree has the keyboard focus.
@@ -254,8 +254,9 @@ export component MainWindow inherits Window {
     callback theme-changed();
 
     // Widths of the number columns of the file tree, and the room kept free for its scroll bar
-    // (the Fluent scroll bar is 14 px, drawn over the list).
-    private property <length> size-column: 76px;
+    // (the Fluent scroll bar is 14 px, drawn over the list). The host sets the Size column for
+    // the unit, so a size in Byte, KB or MB is not cut.
+    in property <length> size-column: 76px;
     private property <length> percent-column: 60px;
     private property <length> files-column: 72px;
     private property <length> scrollbar-room: 16px;
@@ -297,6 +298,7 @@ export component MainWindow inherits Window {
             width: 100%;
             height: 100%;
             drives: root.drive-buttons;
+            settings-open: root.settings-open;
             loading: root.drives-loading;
             admin-note: root.admin-note;
             message: root.banner;

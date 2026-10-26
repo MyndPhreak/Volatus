@@ -185,7 +185,7 @@ export component SettingsFlyout inherits GlassPanel {
     in property <int> unit-choice;
     /// Why the settings are not saved, or "".
     in property <string> error;
-    /// Which parts show, in the host's `Part::ALL` order: header, folder tree, file types strip,
+    /// Which parts show, in the host's `Part::ALL` order: header, folder tree, file type strip,
     /// file type chips, tile labels.
     in property <[bool]> shown;
     callback theme-chosen(int);
@@ -237,7 +237,7 @@ export component SettingsFlyout inherits GlassPanel {
             }
             Rectangle { height: 6px; }
             GroupTitle { text: "Show"; }
-            for name[i] in ["Header", "Folder tree", "File types strip", "File type chips", "Tile labels"] : PartSwitch {
+            for name[i] in ["Header", "Folder tree", "File type strip", "File type chips", "Tile labels"] : PartSwitch {
                 text: name;
                 on: root.shown[i];
                 toggled(on) => { root.part-toggled(i, on); }

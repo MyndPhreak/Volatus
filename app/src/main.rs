@@ -228,13 +228,12 @@ enum Site {
     /// The drive cards of the start screen.
     Drives,
     /// The width of the Size column of the tree.
-    #[allow(dead_code)] // Red stub; used from "Fix the final review findings".
     Column,
 }
 
 /// Every part that is synced again after a unit change (`resync_after_unit_change`).
 fn sites_after_unit_change() -> &'static [Site] {
-    &[Site::Rows, Site::Types, Site::Selection, Site::Banner, Site::Map, Site::Drives]
+    &[Site::Rows, Site::Types, Site::Selection, Site::Banner, Site::Map, Site::Drives, Site::Column]
 }
 
 /// Puts the settings loaded from `path` into the session. A file that was not kept
@@ -268,15 +267,36 @@ fn effective_dark(choice: ThemeChoice, system_dark: bool) -> bool {
 }
 
 /// The theme the winit window is set to for `choice`: `None` follows Windows.
-#[allow(dead_code)] // Red stub; used from "Fix the final review findings".
-fn winit_theme_for(_choice: ThemeChoice) -> Option<slint::winit_030::winit::window::Theme> {
-    None
+fn winit_theme_for(choice: ThemeChoice) -> Option<slint::winit_030::winit::window::Theme> {
+    use slint::winit_030::winit::window::Theme;
+    choice.forced_dark().map(|dark| if dark { Theme::Dark } else { Theme::Light })
 }
 
-/// The width of the Size column of the tree for `unit`, in logical pixels.
-#[allow(dead_code)] // Red stub; used from "Fix the final review findings".
-fn size_column_width(_unit: Unit) -> f32 {
-    76.0
+/// The biggest folder the Size column is made for: 4 TiB.
+const SIZE_COLUMN_SAMPLE: u64 = 4 << 40;
+/// The Size column width for Dynamic, GB and TB, where every size fits (logical pixels).
+const SIZE_COLUMN_MIN: f32 = 76.0;
+
+/// The width of the Size column of the tree for `unit`, in logical pixels: room for the size of a
+/// 4 TiB folder in that unit (`estimated_text_width`), and never less than `SIZE_COLUMN_MIN`.
+fn size_column_width(unit: Unit) -> f32 {
+    // `NumberCell` keeps 6 px at its right; 2 px more is room for the estimate to be wrong.
+    let text = estimated_text_width(&format_size(SIZE_COLUMN_SAMPLE, unit)) + 8.0;
+    text.ceil().max(SIZE_COLUMN_MIN)
+}
+
+/// A high estimate of the width of a size text in the tree font, in logical pixels. Measured at
+/// 100%: a digit is about 6 px, and a space and "B" together about 11 px.
+fn estimated_text_width(text: &str) -> f32 {
+    text.chars()
+        .map(|c| match c {
+            '0'..='9' => 7.0,
+            ',' | '.' | ' ' => 3.5,
+            'M' => 9.0,
+            'G' => 8.0,
+            _ => 7.5,
+        })
+        .sum()
 }
 
 /// Where the keyboard focus is, as far as hiding a part cares.
@@ -340,17 +360,34 @@ fn apply_settings(ui: &MainWindow) {
     let s = SESSION.with_borrow(|s| s.settings.clone());
     ui.set_theme_choice(s.theme.index());
     ui.set_unit_choice(s.unit.index());
+    ui.set_size_column(size_column_width(s.unit));
     apply_shown(ui);
+    // A forced scheme is written before the window shows, so the first frame has it. Follow
+    // Windows waits for `apply_theme`: the system theme is known once the window exists.
+    if let Some(dark) = s.theme.forced_dark() {
+        let scheme = if dark { slint::language::ColorScheme::Dark } else { slint::language::ColorScheme::Light };
+        ui.global::<Palette>().set_color_scheme(scheme);
+    }
 }
 
 /// Applies the theme setting: always writes `Palette.color-scheme` (a write cannot be undone, so
-/// Follow Windows writes the system theme too), and Mica with the same dark mode, which also sets
-/// the title bar. An unknown system theme keeps the scheme the window has. The `dark` property
-/// then follows and `theme-changed` redraws the map and the chips.
+/// Follow Windows writes the system theme too), sets the winit window theme (`winit_theme_for`),
+/// and Mica with the same dark mode, which also sets the title bar. An unknown system theme keeps
+/// the scheme the window has. The `dark` property then follows and `theme-changed` redraws the map
+/// and the chips.
 fn apply_theme(ui: &MainWindow) {
     use slint::winit_030::{WinitWindowAccessor, winit::window::Theme as WinitTheme};
     let choice = SESSION.with_borrow(|s| s.settings.theme);
-    let system = ui.window().with_winit_window(|w| w.theme()).flatten().map(|t| t == WinitTheme::Dark);
+    // winit 0.30 keeps `theme()` as the system theme whatever `set_theme` is given: its
+    // `set_theme` only calls `try_theme` and does not change `current_theme`.
+    let system = ui
+        .window()
+        .with_winit_window(|w| {
+            w.set_theme(winit_theme_for(choice));
+            w.theme()
+        })
+        .flatten()
+        .map(|t| t == WinitTheme::Dark);
     let dark = effective_dark(choice, system.unwrap_or_else(|| ui.get_dark()));
     let scheme = if dark { slint::language::ColorScheme::Dark } else { slint::language::ColorScheme::Light };
     ui.global::<Palette>().set_color_scheme(scheme);
@@ -374,7 +411,7 @@ fn resync_after_unit_change(ui: &MainWindow) {
             // The start screen lists the drives again each time it shows.
             Site::Drives if ui.get_start_screen() => refresh_drives(ui),
             Site::Drives => {}
-            Site::Column => {}
+            Site::Column => ui.set_size_column(size_column_width(current_unit())),
         }
     }
 }
@@ -4098,7 +4135,7 @@ mod tests {
     }
 
     #[test]
-    fn part_toggled_persists_and_applies() {
+    fn toggle_part_saves_once_and_never_after_not_kept() {
         SESSION.with_borrow_mut(|s| adopt_settings(s, Some(path()), (Settings::default(), settings::Loaded::Fresh)));
         let calls = Cell::new(0);
         let saved = RefCell::new(None);

@@ -102,6 +102,8 @@ export component StartScreen inherits Rectangle {
     in property <bool> browsing;
     /// Why the last "Restart as administrator" did not restart, or "".
     in property <string> restart-note;
+    /// The settings flyout is open: a new drive list does not take the focus from it.
+    in property <bool> settings-open;
 
     callback scan-drive(string);
     callback choose-folder();
@@ -132,7 +134,7 @@ export component StartScreen inherits Rectangle {
                 }
                 for d[i] in root.drives : DriveTile {
                     drive: d;
-                    take-focus: i == 0;
+                    take-focus: i == 0 && !root.settings-open;
                     clicked => { root.scan-drive(d.root); }
                 }
                 // One note for all the drives, and the button it is about.
