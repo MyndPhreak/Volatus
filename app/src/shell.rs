@@ -302,6 +302,11 @@ fn execute(mut info: SHELLEXECUTEINFOW) -> windows::core::Result<()> {
     unsafe { ShellExecuteExW(&mut info) }
 }
 
+/// The result of `SHOpenFolderAndSelectItems` as Explore Folder reads it.
+fn opened(result: windows::core::Result<()>) -> windows::core::Result<()> {
+    result
+}
+
 /// The HWND of the Slint window, once it exists.
 pub fn window_hwnd(window: &slint::Window) -> Option<HWND> {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -452,6 +457,15 @@ mod tests {
         let verbs = verbs_of(&folder, false);
 
         assert!(has(&verbs, "delete"), "{verbs:?}");
+    }
+
+    #[test]
+    fn opened_takes_an_abort_as_opened_by_another_file_manager() {
+        use windows::Win32::Foundation::E_ABORT;
+
+        let got = [opened(Ok(())), opened(Err(E_ABORT.into())), opened(Err(E_FAIL.into()))].map(|r| r.is_ok());
+
+        assert_eq!(got, [true, true, false]);
     }
 
     #[test]
