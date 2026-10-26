@@ -61,17 +61,38 @@ enum Done {
     NotRun,
 }
 
+/// How a run works. `Purge` uses `Options::default()`; tests and the benchmark change it.
+pub struct Options<'a> {
+    /// Try the POSIX delete first (falls back to the classic delete when the volume refuses it).
+    pub posix: bool,
+    /// Test seam: called on the caller's thread with a folder's path after the folder is listed
+    /// and before anything in it is opened.
+    pub hook: Option<&'a dyn Fn(&Path)>,
+}
+
+impl Default for Options<'_> {
+    fn default() -> Self {
+        Options { posix: true, hook: None }
+    }
+}
+
 impl Remover for Purge {
-    /// The target must be a verbatim (`\\?\`) path, as `check_target` gives it; any other path is
-    /// one skip and nothing is touched. A file or a link target is removed alone. A folder is
-    /// walked once (links inside are entries, never walked into), its files and links are removed
-    /// in parallel, then its folders from the deepest up, the target last. A link is a
-    /// name-surrogate reparse point only; any other reparse folder (a cloud folder) is walked
-    /// and removed as a folder, any other reparse file as a file. `removed_items` counts files,
-    /// links and folders; `removed_bytes` is the find-data size of the files (a link frees
-    /// nothing). A folder that will not empty stays: it gets its own skip unless a skip already
-    /// recorded lies in it, so a target that stays always has a skip (or `stopped`).
     fn remove(&self, t: &DeleteTarget, progress: &dyn Fn(u64, u64), stop: &AtomicBool) -> Outcome {
+        remove_with(t, progress, stop, &Options::default())
+    }
+}
+
+/// The target must be a verbatim (`\\?\`) path, as `check_target` gives it; any other path is
+/// one skip and nothing is touched. A file or a link target is removed alone. A folder is
+/// walked once (links inside are entries, never walked into), its files and links are removed
+/// in parallel, then its folders from the deepest up, the target last. A link is a
+/// name-surrogate reparse point only; any other reparse folder (a cloud folder) is walked
+/// and removed as a folder, any other reparse file as a file. `removed_items` counts files,
+/// links and folders; `removed_bytes` is the find-data size of the files (a link frees
+/// nothing). A folder that will not empty stays: it gets its own skip unless a skip already
+/// recorded lies in it, so a target that stays always has a skip (or `stopped`).
+pub(crate) fn remove_with(t: &DeleteTarget, progress: &dyn Fn(u64, u64), stop: &AtomicBool, opts: &Options) -> Outcome {
+    {
         let mut out = Outcome::default();
         let root: Vec<u16> = t.path.as_os_str().encode_wide().collect();
         let prefix: Vec<u16> = r"\\?\".encode_utf16().collect();
@@ -93,7 +114,7 @@ impl Remover for Purge {
             progress(out.removed_items, out.removed_bytes);
             return out;
         }
-        let Some((files, mut folders)) = walk(root, attrs, stop, &mut out.skipped) else {
+        let Some((files, mut folders)) = walk(root, attrs, stop, &mut out.skipped, opts.hook) else {
             out.stopped = true;
             return out;
         };
@@ -215,7 +236,13 @@ fn with_read_only_retry(
 /// Lists every folder under `root` once, depth first. Links are entries, never walked into.
 /// A listing that fails is a skip for that folder and the walk goes on. `None` when `stop` is
 /// set: nothing has been removed yet.
-fn walk(root: Vec<u16>, attrs: u32, stop: &AtomicBool, skipped: &mut Vec<Skipped>) -> Option<(Vec<Entry>, Vec<Folder>)> {
+fn walk(
+    root: Vec<u16>,
+    attrs: u32,
+    stop: &AtomicBool,
+    skipped: &mut Vec<Skipped>,
+    hook: Option<&dyn Fn(&Path)>,
+) -> Option<(Vec<Entry>, Vec<Folder>)> {
     let (mut files, mut folders) = (Vec::new(), Vec::new());
     let mut todo = vec![(root, attrs, 0)];
     while let Some((dir, attrs, depth)) = todo.pop() {
@@ -236,6 +263,9 @@ fn walk(root: Vec<u16>, attrs: u32, stop: &AtomicBool, skipped: &mut Vec<Skipped
         });
         if let Err(code) = listed {
             skipped.push(skip(&dir, code));
+        }
+        if let Some(h) = hook {
+            h(&PathBuf::from(std::ffi::OsString::from_wide(&dir)));
         }
         folders.push(Folder { path: dir, attrs, depth, listed: listed.is_ok() });
     }
@@ -626,5 +656,136 @@ mod tests {
         ] {
             assert_eq!(needs_skip_for_folder(folder, &skips), want, "{skips:?}");
         }
+    }
+
+    fn run_with(t: &DeleteTarget, opts: &Options) -> Outcome {
+        remove_with(t, &|_, _| {}, &AtomicBool::new(false), opts)
+    }
+
+    /// The target `t` holds `sub\inner.txt` ("real"); `decoy\inner.txt` ("decoy") lies beside
+    /// it, so a delete that went through a junction at `t\sub` would find the same name there.
+    fn swap_fixture(d: &Dir) -> (PathBuf, PathBuf, PathBuf) {
+        let decoy = d.base.join("decoy");
+        fs::create_dir(&decoy).unwrap();
+        fs::write(decoy.join("inner.txt"), b"decoy").unwrap();
+        let t = d.base.join("t");
+        let sub = t.join("sub");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(sub.join("inner.txt"), b"real").unwrap();
+        (t, sub, decoy)
+    }
+
+    #[test]
+    fn a_folder_swapped_for_a_junction_after_the_listing_is_removed_as_the_link() {
+        let d = Dir::new("swap");
+        let (t, sub, decoy) = swap_fixture(&d);
+        let swapped = std::cell::Cell::new(None::<bool>);
+        // The target is listed (`sub` is in the listing as a real folder) and nothing in it is
+        // open yet: replace `sub` with a junction to the decoy.
+        let hook = |p: &Path| {
+            if p == t.as_path() && swapped.get().is_none() {
+                fs::remove_dir_all(&sub).unwrap();
+                swapped.set(Some(d.junction(&sub, &decoy).is_some()));
+            }
+        };
+        let o = run_with(&target(&t, true), &Options { hook: Some(&hook), ..Options::default() });
+        match swapped.get() {
+            None => panic!("the hook was not called for the target"),
+            Some(false) => return,
+            Some(true) => {}
+        }
+        assert!(decoy.join("inner.txt").exists(), "nothing behind the junction is touched");
+        assert_eq!(fs::read(decoy.join("inner.txt")).unwrap(), b"decoy");
+        assert!(o.skipped.is_empty(), "{:?}", o.skipped);
+        assert_eq!((o.removed_items, o.removed_bytes), (2, 0), "the junction and the target");
+        assert!(fs::symlink_metadata(&sub).is_err() && !t.exists());
+    }
+
+    #[test]
+    fn a_folder_the_run_works_in_cannot_be_moved_out_of_the_target() {
+        let d = Dir::new("pin");
+        let (t, sub, decoy) = swap_fixture(&d);
+        let moved = d.base.join("moved");
+        let (tried, moved_away) = (std::cell::Cell::new(false), std::cell::Cell::new(false));
+        // `sub` is listed and its file not yet removed: move `sub` out of the target and put a
+        // junction to the decoy in its place.
+        let hook = |p: &Path| {
+            if p == sub.as_path() {
+                tried.set(true);
+                if fs::rename(&sub, &moved).is_ok() {
+                    moved_away.set(true);
+                    let _ = d.junction(&sub, &decoy);
+                }
+            }
+        };
+        let o = run_with(&target(&t, true), &Options { hook: Some(&hook), ..Options::default() });
+        assert!(tried.get(), "the hook was called for the subfolder");
+        assert!(decoy.join("inner.txt").exists(), "nothing behind a junction is touched");
+        assert!(!moved_away.get(), "a folder the run holds open cannot be moved away");
+        assert!(o.skipped.is_empty(), "{:?}", o.skipped);
+        assert_eq!((o.removed_items, o.removed_bytes), (3, 4));
+        assert!(!t.exists());
+    }
+
+    #[test]
+    fn a_directory_symlink_inside_is_removed_and_its_target_stays() {
+        let d = Dir::new("symlink");
+        let other = d.base.join("other");
+        fs::create_dir(&other).unwrap();
+        fs::write(other.join("keep"), b"keep me").unwrap();
+        let t = d.base.join("t");
+        fs::create_dir(&t).unwrap();
+        fs::write(t.join("own.txt"), b"abc").unwrap();
+        let link = t.join("s");
+        if std::os::windows::fs::symlink_dir(&other, &link).is_err() {
+            skipped("directory symlink inside the target (needs Developer Mode or administrator)");
+            return;
+        }
+        d.links.borrow_mut().push(link);
+        let o = run(&target(&t, true));
+        assert!(o.skipped.is_empty(), "{:?}", o.skipped);
+        assert_eq!((o.removed_items, o.removed_bytes), (3, 3));
+        assert!(!t.exists());
+        assert_eq!(fs::read(other.join("keep")).unwrap(), b"keep me");
+    }
+
+    #[test]
+    fn a_read_only_folder_and_file_are_removed_with_and_without_posix_semantics() {
+        for posix in [true, false] {
+            let d = Dir::new(if posix { "ro-posix" } else { "ro-classic" });
+            let t = d.base.join("t");
+            let sub = t.join("ro-dir");
+            fs::create_dir_all(&sub).unwrap();
+            let f = sub.join("ro.txt");
+            fs::write(&f, b"12345").unwrap();
+            for p in [&f, &sub] {
+                let mut perm = fs::metadata(p).unwrap().permissions();
+                perm.set_readonly(true);
+                fs::set_permissions(p, perm).unwrap();
+            }
+            let o = run_with(&target(&t, true), &Options { posix, ..Options::default() });
+            assert!(o.skipped.is_empty(), "posix={posix}: {:?}", o.skipped);
+            assert_eq!((o.removed_items, o.removed_bytes), (3, 5), "posix={posix}");
+            assert!(!t.exists(), "posix={posix}");
+        }
+    }
+
+    #[test]
+    fn a_file_held_open_with_share_delete_goes_at_once_with_its_folder() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE};
+        let d = Dir::new("sharedelete");
+        let t = d.base.join("t");
+        fs::create_dir(&t).unwrap();
+        let f = t.join("open.txt");
+        fs::write(&f, b"open").unwrap();
+        let share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+        let handle = fs::OpenOptions::new().read(true).share_mode(share).open(&f).unwrap();
+        let o = run(&target(&t, true));
+        // The POSIX delete takes the name away while the file is still open elsewhere.
+        assert!(o.skipped.is_empty(), "{:?}", o.skipped);
+        assert_eq!((o.removed_items, o.removed_bytes), (2, 4));
+        assert!(!t.exists());
+        drop(handle);
     }
 }
