@@ -11,6 +11,7 @@
 
 mod browse;
 mod cli;
+mod delete;
 mod drives;
 mod elevate;
 mod footer;
