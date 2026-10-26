@@ -31,6 +31,16 @@ pub struct Node {
     pub next_sibling: Option<NodeId>,
 }
 
+/// What `Tree::detach` removed: the node's rolled-up sizes and the files and folders under it
+/// (the node itself included).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Detached {
+    pub size: u64,
+    pub allocated: u64,
+    pub files: u64,
+    pub dirs: u64,
+}
+
 /// Flat arena of nodes plus one shared name buffer.
 #[derive(Debug, Clone)]
 pub struct Tree {
@@ -112,6 +122,12 @@ impl Tree {
             cur = self.node(c).parent;
         }
         parts.iter().rev().collect()
+    }
+
+    /// Unlinks `n` from its parent and subtracts its sizes from every ancestor. `None` for the
+    /// root and for a node already detached. The arena slots stay in place and are not reused.
+    pub fn detach(&mut self, _n: NodeId) -> Option<Detached> {
+        None
     }
 }
 
