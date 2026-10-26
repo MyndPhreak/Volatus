@@ -17,8 +17,8 @@
 //! keys are in `delete_ui`, which shows the dialog again (`delete_ui::sync`) after each call here.
 
 use super::{
-    Data, Loaded, MainWindow, SESSION, Session, count_types, crumb, drop_hover, refresh_drives, relayout, select,
-    show_state, stop_move, sync_rows, sync_selection, with_loaded,
+    Data, Loaded, MainWindow, SESSION, Session, crumb, drop_types, drop_hover, refresh_drives, relayout, select,
+    show_state, stop_move, sync_rows, sync_selection, sync_types, with_loaded,
 };
 use crate::delete::{self, DeleteMode, DeleteTarget, RealFs, Refusal, Remover};
 use crate::delete_flow::{self, DeleteMsg, DialogEvent, DialogState, TreeAction};
@@ -117,8 +117,22 @@ pub(crate) fn scan_changed(s: &mut Session) {
 /// Opens the dialog on the selection when none is open. `check` is the policy, `is_link` the link
 /// probe, `gone` the strict "not found" check. A `Missing` refusal whose item `gone` confirms
 /// is removed from the tree too: `true` when such a removal now waits (`apply_pending` does it).
+#[cfg(test)]
 pub(crate) fn open_in(
     s: &mut Session,
+    shift: bool,
+    check: impl FnOnce(&Path, &Path, bool) -> Result<PathBuf, Refusal>,
+    is_link: impl FnOnce(&Path) -> bool,
+    gone: impl FnOnce(&Path) -> bool,
+) -> bool {
+    let selected = s.loaded.as_ref().and_then(|l| l.selected);
+    open_in_for(s, selected, shift, check, is_link, gone)
+}
+
+/// `open_in` for `node` (the item a context menu was opened on), which need not be the selection.
+pub(crate) fn open_in_for(
+    s: &mut Session,
+    node: Option<NodeId>,
     shift: bool,
     check: impl FnOnce(&Path, &Path, bool) -> Result<PathBuf, Refusal>,
     is_link: impl FnOnce(&Path) -> bool,
@@ -135,7 +149,7 @@ pub(crate) fn open_in(
     let Some(origin) = origin_of(s) else { return false };
     let Some(l) = s.loaded.as_ref() else { return false };
     let (tree, counts) = (&l.data.tree, &l.data.counts);
-    let checked = delete_flow::open_check(tree, counts, l.selected, s.scan.state(), &s.scan_root, check, is_link);
+    let checked = delete_flow::open_check(tree, counts, node, s.scan.state(), &s.scan_root, check, is_link);
     let Some((node, target)) = checked else { return false };
     let path = tree.path(node);
     s.delete.opened = Some(origin);
@@ -304,8 +318,14 @@ fn mark_list(s: &mut Session, p: Pending, removed: bool) {
 /// system and the scan root AS TYPED (the policy resolves it itself). An item gone from the disk
 /// leaves the tree.
 pub(crate) fn request_delete(ui: &MainWindow, shift: bool) {
+    let selected = SESSION.with_borrow(|s| s.loaded.as_ref().and_then(|l| l.selected));
+    request_delete_of(ui, selected, shift);
+}
+
+/// `request_delete` for `node`: the Delete of the context menu, on the item the menu was opened on.
+pub(crate) fn request_delete_of(ui: &MainWindow, node: Option<NodeId>, shift: bool) {
     let check = |root: &Path, target: &Path, is_dir: bool| delete::check_target(root, target, is_dir, &RealFs);
-    if SESSION.with_borrow_mut(|s| open_in(s, shift, check, delete_flow::is_link, delete_flow::target_gone)) {
+    if SESSION.with_borrow_mut(|s| open_in_for(s, node, shift, check, delete_flow::is_link, delete_flow::target_gone)) {
         apply_pending(ui);
     }
 }
@@ -442,8 +462,8 @@ pub(crate) fn data_released(ui: &MainWindow) {
 }
 
 /// Redraws everything after `remove_from`: no picture or hover of the old tree stays, a new
-/// layout starts, the crumbs and rows are rebuilt, the selection shows, the footer totals are
-/// counted again from the whole scan and the drive list (free space) is read again.
+/// layout starts, the crumbs and rows are rebuilt, the selection shows, the footer shows the
+/// totals less the removed file types and the drive list (free space) is read again.
 fn refresh_after_remove(ui: &MainWindow) {
     SESSION.with_borrow_mut(|s| {
         s.held = None;
@@ -462,9 +482,7 @@ fn refresh_after_remove(ui: &MainWindow) {
             sync_selection(ui);
         }
     }
-    if let Some(data) = with_loaded(|l| l.data.clone()) {
-        count_types(ui, data);
-    }
+    sync_types(ui);
     refresh_drives(ui);
 }
 
@@ -482,19 +500,24 @@ pub(crate) fn in_subtree(tree: &Tree, n: NodeId, root: NodeId) -> bool {
 /// keeps. `Err(Busy)`, and nothing changed, while a worker holds the `Data`. `Ok(None)`, and
 /// nothing changed, for the root, an id outside the tree, or a node already removed.
 pub(crate) fn remove_from(l: &mut Loaded, node: NodeId) -> Result<Option<Detached>, Busy> {
-    let Loaded { data, model, view, selected, view_root, rects, shown_root, totals, edits, .. } = l;
+    // The file types of the subtree, read before the tree changes; not needed while the totals are
+    // counted (that count is late anyway). Only for a node `remove_node` can remove.
+    let tree = &l.data.tree;
+    let removable = (node.0 as usize) < l.data.counts.len() && node != tree.root() && in_subtree(tree, node, tree.root());
+    let gone = if removable && l.totals.is_some() { treemap::filetype::type_totals(&l.data.tree, node) } else { Vec::new() };
+    let Loaded { data, model, view, selected, view_root, rects, shown_root, .. } = l;
     // The model's weak link goes first, so `get_mut` can see the data is not shared.
     model.release();
     let result = match Arc::get_mut(data) {
         None => Err(Busy),
-        Some(d) => Ok(remove_node(d, node, view, selected, view_root, rects, shown_root).inspect(|_| {
-            // The file-type totals are of the old tree: they are counted again, and a count that
-            // started before this removal is late (`store_totals`).
-            *totals = None;
-            *edits += 1;
-        })),
+        Some(d) => Ok(remove_node(d, node, view, selected, view_root, rects, shown_root)),
     };
     model.attach(data);
+    if let Ok(Some(_)) = result {
+        // The footer totals lose the file types of the subtree (no new count of the whole scan),
+        // and a count that started before this removal is late (`store_totals`).
+        drop_types(l, &gone);
+    }
     result
 }
 
@@ -509,8 +532,9 @@ fn remove_node(
     rects: &mut Vec<treemap::Rect>,
     shown_root: &mut Option<NodeId>,
 ) -> Option<Detached> {
-    // The root, an id outside the tree, and a node already removed (no parent) stay as they are.
-    if node.0 as usize >= d.counts.len() {
+    // The root, an id outside the tree, and a node already removed (or under a removed folder)
+    // stay as they are; nothing below changes for them.
+    if node.0 as usize >= d.counts.len() || !in_subtree(&d.tree, node, d.tree.root()) {
         return None;
     }
     let parent = d.tree.node(node).parent?;

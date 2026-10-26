@@ -1,12 +1,12 @@
-//! The delete dialog and the Delete keys, wired to `scan_apply`.
+//! The delete dialog, the Delete keys and the Delete of the context menu, wired to `scan_apply`.
 //!
 //! The dialog shows `SESSION.delete.state`: `sync` copies `delete_flow::view` of it into the
 //! window. It runs after every delete callback here, after each message of a running delete and
 //! each try of a pending removal (`scan_apply`), and after each scan change (`show_state`,
 //! `clear`).
 //!
-//! Shift for a menu's Delete: a menu entry has no key state, so `shift_held` asks Windows when
-//! the entry is used. Both the Shift state of the message being handled (`GetKeyState`) and the
+//! Shift for the menu's Delete (`menu_delete`, from the shell menu's Volatus group): a menu entry
+//! has no key state, so `shift_held` asks Windows when the entry is chosen. Both the Shift state of the message being handled (`GetKeyState`) and the
 //! key's state now (`GetAsyncKeyState`) must say "down"; any other answer is the Recycle Bin. The
 //! keys carry their own Shift state (`Keys.event-name` in Slint).
 
@@ -16,18 +16,16 @@ use crate::scan_apply::{self, RemoverFor, Spawn};
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 use std::rc::Rc;
 
-/// What the wiring needs from the outside: the engines, where a delete runs, and the Shift key.
-/// `Deps::real` in the app; the tests give fakes, so no test runs a real delete.
+/// What the wiring needs from the outside: the engines and where a delete runs. `Deps::real` in
+/// the app; the tests give fakes, so no test runs a real delete.
 pub(crate) struct Deps {
     pub(crate) remover_for: Box<RemoverFor>,
     pub(crate) spawn: Box<Spawn>,
-    #[allow(dead_code, reason = "the shell menu's Delete reads it (Task 9 seam)")]
-    pub(crate) shift_held: Box<dyn Fn() -> bool>,
 }
 
 impl Deps {
     pub(crate) fn real() -> Deps {
-        Deps { remover_for: Box::new(scan_apply::remover_for), spawn: Box::new(scan_apply::spawn_worker), shift_held: Box::new(shift_held) }
+        Deps { remover_for: Box::new(scan_apply::remover_for), spawn: Box::new(scan_apply::spawn_worker) }
     }
 }
 
@@ -87,7 +85,13 @@ pub(crate) fn request(ui: &MainWindow, shift: bool) {
 /// The Delete of the context menu, for the item the menu was opened on (`node`, which need not be
 /// the selection: a crumb is not selected). `shift` is the Shift key when the item was chosen.
 pub(crate) fn menu_delete_with(ui: &MainWindow, node: scan::NodeId, shift: bool) {
-    let _ = (ui, node, shift);
+    scan_apply::request_delete_of(ui, Some(node), shift);
+    sync(ui);
+}
+
+/// The Delete of the context menu (`menu::Cmd::Delete`) on `node`, with the Shift key read now.
+pub(crate) fn menu_delete(ui: &MainWindow, node: scan::NodeId) {
+    menu_delete_with(ui, node, shift_held());
 }
 
 /// True only when Windows says Shift is down both for the message being handled and now.
@@ -95,7 +99,7 @@ fn shift_from(queued: i16, now: i16) -> bool {
     queued < 0 && now < 0
 }
 
-/// The Shift key, read when a menu's Delete is used (see the module text).
+/// The Shift key, read when the menu's Delete is chosen (see the module text).
 fn shift_held() -> bool {
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, GetKeyState, VK_SHIFT};
     // SAFETY: two reads of the keyboard state, with no pointers.
@@ -167,7 +171,7 @@ mod tests {
     use scan::rollup::{RawEntry, rollup};
     use slint::platform::{Key, WindowEvent};
     use slint::Model;
-    use std::cell::{Cell, RefCell};
+    use std::cell::RefCell;
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -190,7 +194,6 @@ mod tests {
         static MODES: RefCell<Vec<DeleteMode>> = const { RefCell::new(Vec::new()) };
         /// The deletes that were started and not run yet.
         static JOBS: RefCell<Vec<Job>> = const { RefCell::new(Vec::new()) };
-        static SHIFT: Cell<bool> = const { Cell::new(false) };
         static OUTCOME: RefCell<Outcome> = RefCell::new(Outcome::default());
     }
 
@@ -204,7 +207,6 @@ mod tests {
                 JOBS.with_borrow_mut(|j| j.push((remover, target, generation, stop)));
                 Ok(())
             }),
-            shift_held: Box::new(|| SHIFT.get()),
         }
     }
 

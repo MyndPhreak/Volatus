@@ -126,6 +126,8 @@ pub fn items(p: &Prepared, is_dir: bool, shell_ok: bool) -> Vec<Item> {
     if is_dir {
         out.push(Item::Action(Cmd::ShowFolder, "Show this folder"));
     }
+    // The only Delete in the menu: the shell's own is hidden (`is_delete_verb`).
+    out.push(Item::Action(Cmd::Delete, "Delete"));
     out.push(Item::Separator);
     if !shell_ok {
         out.push(Item::Disabled("Windows has no menu for this item."));
@@ -156,6 +158,7 @@ pub fn picked(id: u32) -> Picked {
         3 => Picked::Volatus(Cmd::CopyPath),
         4 => Picked::Volatus(Cmd::ShowFolder),
         5 => Picked::Volatus(Cmd::Rescan),
+        6 => Picked::Volatus(Cmd::Delete),
         SHELL_FIRST..=SHELL_LAST => Picked::Shell(id - SHELL_FIRST),
         _ => Picked::Nothing,
     }
@@ -189,26 +192,35 @@ pub fn invoke_mask(shift: bool, ctrl: bool) -> u32 {
 /// True only for the shell's canonical verb `delete` (ASCII case). The shell item with this verb
 /// is taken out of the menu (`shell::Popup::new`): the Volatus Delete stands for it.
 pub fn is_delete_verb(verb: &str) -> bool {
-    let _ = verb;
-    false
+    verb.eq_ignore_ascii_case("delete")
 }
 
 /// The positions of the separators to take out of the shell part of a menu, from whether each of
 /// its lines is a separator (`is_sep`): one at the start or the end of the part, and the second of
 /// two in a row. In ascending order; remove them from the last one back.
 pub fn separators_to_remove(is_sep: &[bool]) -> Vec<usize> {
-    let _ = is_sep;
-    Vec::new()
-}
-
-/// True only for the canonical verb `delete` of the shell (ASCII case). A verb the shell could not
-/// give (`None`) is not delete: only the disk can then change the map, as "outdated".
-pub fn is_delete(verb: Option<&str>) -> bool {
-    verb.is_some_and(|v| v.eq_ignore_ascii_case("delete"))
+    let mut out = Vec::new();
+    // The start of the part counts as a separator: a first separator goes.
+    let mut after_separator = true;
+    for (i, &sep) in is_sep.iter().enumerate() {
+        if sep && after_separator {
+            out.push(i);
+        } else {
+            after_separator = sep;
+        }
+    }
+    // The last line that stays, when it is a separator, goes too.
+    if let Some(last) = (0..is_sep.len()).rev().find(|i| !out.contains(i))
+        && is_sep[last]
+    {
+        out.push(last);
+        out.sort_unstable();
+    }
+    out
 }
 
 /// True for the result of `InvokeCommand` that means the user cancelled (`COPYENGINE_E_USER_CANCELLED`).
-/// The shell's delete returns after the item is gone, so a cancelled one needs no check.
+/// A cancelled item changed nothing, so it needs no check.
 pub fn user_cancelled(hr: i32) -> bool {
     hr == COPYENGINE_E_USER_CANCELLED
 }
@@ -218,20 +230,18 @@ pub fn user_cancelled(hr: i32) -> bool {
 pub enum Outcome {
     /// Look again later.
     Wait,
-    /// The item was deleted: remove it from the map.
-    Remove,
     /// The item changed in another way: show "outdated" and Rescan.
     Outdated,
     /// No change.
     Nothing,
 }
 
-/// The outcome of one check. `delete`: the action was the shell's delete. `before`, `now`: the
-/// disk at the menu and at this check. `last`: no check follows.
-pub fn judge(delete: bool, before: &Disk, now: &Disk, last: bool) -> Outcome {
+/// The outcome of one check. `before`, `now`: the disk at the menu and at this check. `last`: no
+/// check follows. A shell item never removes a node from the map: the only Delete in the menu is
+/// the Volatus one (the shell's is hidden), so an item gone after a shell action is "outdated".
+pub fn judge(before: &Disk, now: &Disk, last: bool) -> Outcome {
     match now {
         Disk::Unreadable => Outcome::Outdated,
-        Disk::Gone if delete => Outcome::Remove,
         _ if now == before => if last { Outcome::Nothing } else { Outcome::Wait },
         _ => Outcome::Outdated,
     }
@@ -258,21 +268,17 @@ const FOLLOW_DELAYS: [Duration; 2] = [Duration::from_millis(500), Duration::from
 /// holds at most one, and a new menu, a scan or exit drops it.
 #[derive(Debug, Clone)]
 pub struct Follow {
-    /// The item the menu was for.
-    pub node: NodeId,
     /// `Loaded::edits` at the menu: a removal since then makes the node id stale.
     pub edits: u64,
     pub path: PathBuf,
-    /// The action was the shell's delete.
-    pub delete: bool,
     /// The disk at the menu.
     pub before: Disk,
     stage: u8,
 }
 
 impl Follow {
-    pub fn new(node: NodeId, edits: u64, path: PathBuf, delete: bool, before: Disk) -> Self {
-        Self { node, edits, path, delete, before, stage: 0 }
+    pub fn new(edits: u64, path: PathBuf, before: Disk) -> Self {
+        Self { edits, path, before, stage: 0 }
     }
 
     /// The next check, with the disk as `now`: its outcome and the time to the check after it.
@@ -283,7 +289,7 @@ impl Follow {
             return (Outcome::Nothing, None);
         }
         let last = usize::from(self.stage) == FOLLOW_DELAYS.len();
-        let outcome = judge(self.delete, &self.before, now, last);
+        let outcome = judge(&self.before, now, last);
         let delay = FOLLOW_DELAYS.get(usize::from(self.stage)).copied().filter(|_| outcome == Outcome::Wait);
         // A decision, or the last check, ends the follow.
         self.stage = if delay.is_some() { self.stage + 1 } else { FOLLOW_DELAYS.len() as u8 + 1 };
@@ -767,28 +773,6 @@ mod tests {
         assert_eq!((local, COPYENGINE_E_USER_CANCELLED), (crate_values, sh::COPYENGINE_E_USER_CANCELLED.0));
     }
 
-    // ---- verbs ----
-    #[test]
-    fn is_delete_is_true_only_for_the_verb_delete_in_any_ascii_case() {
-        let verbs = [Some("delete"), Some("Delete"), Some("DELETE"), Some("delete "), Some("deletex"), Some("Löschen"), Some(""), None];
-
-        let got = verbs.map(is_delete);
-
-        assert_eq!(got, [true, true, true, false, false, false, false, false]);
-    }
-
-    #[test]
-    fn is_delete_is_false_for_the_verbs_the_shell_gave_in_the_spike() {
-        // S6: copyaspath, properties and the like; third-party verbs are GUIDs or product names.
-        let verbs = [
-            "open", "Edit", "Print", "openas", "pintohomefile", "pintohome", "PinToStartScreen", "copyaspath", "Windows.ModernShare",
-            "PreviousVersions", "cut", "copy", "link", "properties", "Powershell", "WSL", "opennewprocess",
-            "{1861E28B-A1F0-4EF4-A1FE-4C8CA88E2174}", "PeaZip.ext2main", "SevenZipCompress", "TeraCopy", "ShareX", "Volatus", "WizTree",
-        ];
-
-        assert!(verbs.iter().all(|v| !is_delete(Some(v))));
-    }
-
     // ---- is_delete_verb ----
     #[test]
     fn is_delete_verb_is_true_only_for_delete_in_any_ascii_case() {
@@ -851,24 +835,18 @@ mod tests {
 
     // ---- judge ----
     #[test]
-    fn judge_covers_delete_and_other_actions_for_every_disk_now_and_last_check() {
+    fn judge_covers_every_disk_now_and_last_check() {
         let before = Disk::File(5);
         let nows = [("gone", Disk::Gone), ("same", Disk::File(5)), ("different", Disk::File(6)), ("unreadable", Disk::Unreadable)];
-        use Outcome::{Nothing, Outdated, Remove, Wait};
-        // (delete, now, last) in the order of the loops below.
-        let want = [
-            // delete: gone, same, different, unreadable; not last then last
-            Remove, Remove, Wait, Nothing, Outdated, Outdated, Outdated, Outdated,
-            // other action
-            Outdated, Outdated, Wait, Nothing, Outdated, Outdated, Outdated, Outdated,
-        ];
+        use Outcome::{Nothing, Outdated, Wait};
+        // (now, last) in the order of the loops below: gone, same, different, unreadable; not last
+        // then last. A gone item is outdated: a shell action never removes a node from the map.
+        let want = [Outdated, Outdated, Wait, Nothing, Outdated, Outdated, Outdated, Outdated];
 
         let mut got = Vec::new();
-        for delete in [true, false] {
-            for (_, now) in &nows {
-                for last in [false, true] {
-                    got.push(judge(delete, &before, now, last));
-                }
+        for (_, now) in &nows {
+            for last in [false, true] {
+                got.push(judge(&before, now, last));
             }
         }
 
@@ -876,13 +854,13 @@ mod tests {
     }
 
     // ---- Follow ----
-    fn follow(delete: bool) -> Follow {
-        Follow::new(NodeId(1), 0, PathBuf::from("C:\\x"), delete, Disk::File(5))
+    fn follow() -> Follow {
+        Follow::new(0, PathBuf::from("C:\\x"), Disk::File(5))
     }
 
     #[test]
     fn follow_step_waits_half_a_second_then_a_second_and_a_half_then_ends() {
-        let mut f = follow(false);
+        let mut f = follow();
         let same = Disk::File(5);
 
         let got = [f.step(&same), f.step(&same), f.step(&same)];
@@ -897,16 +875,16 @@ mod tests {
 
     #[test]
     fn follow_step_a_decision_has_no_delay_and_stops_the_checks() {
-        let mut f = follow(true);
+        let mut f = follow();
 
         let got = [f.step(&Disk::Gone), f.step(&Disk::Gone)];
 
-        assert_eq!(got, [(Outcome::Remove, None), (Outcome::Nothing, None)]);
+        assert_eq!(got, [(Outcome::Outdated, None), (Outcome::Nothing, None)]);
     }
 
     #[test]
     fn follow_step_an_item_that_changes_between_checks_is_outdated() {
-        let mut f = follow(false);
+        let mut f = follow();
 
         let got = [f.step(&Disk::File(5)), f.step(&Disk::File(9))];
 
@@ -915,17 +893,17 @@ mod tests {
 
     #[test]
     fn follow_new_keeps_what_it_was_made_with() {
-        let f = follow(true);
+        let f = follow();
 
-        assert_eq!((f.node, f.edits, f.path, f.delete, f.before), (NodeId(1), 0, PathBuf::from("C:\\x"), true, Disk::File(5)));
+        assert_eq!((f.edits, f.path, f.before), (0, PathBuf::from("C:\\x"), Disk::File(5)));
     }
 
     // ---- after_pick ----
-    /// Runs `after_pick` for `follow(delete)` with the disk `now` and an item that gives `hr`.
+    /// Runs `after_pick` for `follow()` with the disk `now` and an item that gives `hr`.
     /// Gives the checks and whether the item ran.
-    fn pick(delete: bool, now: Disk, hr: i32) -> (Option<Follow>, bool) {
+    fn pick(now: Disk, hr: i32) -> (Option<Follow>, bool) {
         let ran = std::cell::Cell::new(false);
-        let got = after_pick(follow(delete), |_| now.clone(), || {
+        let got = after_pick(follow(), |_| now.clone(), || {
             ran.set(true);
             hr
         });
@@ -934,7 +912,7 @@ mod tests {
 
     #[test]
     fn after_pick_a_file_replaced_by_a_folder_since_the_menu_is_not_run() {
-        let follow = Follow::new(NodeId(1), 0, PathBuf::from("C:\\x"), true, Disk::File(5));
+        let follow = Follow::new(0, PathBuf::from("C:\\x"), Disk::File(5));
         let ran = std::cell::Cell::new(false);
 
         let _ = after_pick(follow, |_| Disk::Dir, || {
@@ -954,7 +932,7 @@ mod tests {
         for before in &befores {
             for now in &nows {
                 let ran = std::cell::Cell::new(false);
-                let follow = Follow::new(NodeId(1), 0, PathBuf::from("C:\\x"), false, before.clone());
+                let follow = Follow::new(0, PathBuf::from("C:\\x"), before.clone());
                 let followed = after_pick(follow, |_| now.clone(), || {
                     ran.set(true);
                     0
@@ -980,28 +958,28 @@ mod tests {
 
     #[test]
     fn after_pick_runs_the_item_and_follows_it() {
-        let (got, ran) = pick(true, Disk::File(5), 0);
+        let (got, ran) = pick(Disk::File(5), 0);
 
-        assert_eq!((got.map(|f| (f.node, f.delete)), ran), (Some((NodeId(1), true)), true));
+        assert_eq!((got.map(|f| f.path), ran), (Some(PathBuf::from("C:\\x")), true));
     }
 
     #[test]
     fn after_pick_of_a_path_gone_since_the_menu_does_not_run_the_item_and_still_follows_it() {
-        let (got, ran) = pick(true, Disk::Gone, 0);
+        let (got, ran) = pick(Disk::Gone, 0);
 
         assert_eq!((got.is_some(), ran), (true, false));
     }
 
     #[test]
     fn after_pick_cancelled_by_the_user_has_no_checks() {
-        let (got, ran) = pick(true, Disk::File(5), 0x8027_0000_u32 as i32);
+        let (got, ran) = pick(Disk::File(5), 0x8027_0000_u32 as i32);
 
         assert_eq!((got.is_none(), ran), (true, true));
     }
 
     #[test]
     fn after_pick_of_an_item_that_failed_still_has_the_checks() {
-        let (got, ran) = pick(false, Disk::File(5), 0x8000_4005_u32 as i32);
+        let (got, ran) = pick(Disk::File(5), 0x8000_4005_u32 as i32);
 
         assert_eq!((got.is_some(), ran), (true, true));
     }
