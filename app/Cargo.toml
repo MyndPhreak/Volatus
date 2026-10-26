@@ -25,7 +25,7 @@ embed-resource = "3"
 
 # Elevation: IsUserAnAdmin and ShellExecuteW "runas". Same crate and version as `scan`, so no new code in the build.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_Debug", "Win32_System_WindowsProgramming", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Diagnostics_Debug", "Win32_System_WindowsProgramming", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 # The shell context menu (`shell`): IContextMenu and IShellFolder exist only in `windows`, not in
 # `windows-sys`. 0.62.2 is the copy Slint already builds: `cargo tree -p app -i windows -e normal`
 # fails if a second version comes in. Win32_System_Registry: SHELLEXECUTEINFOW (ShellExecuteExW).
