@@ -215,7 +215,9 @@ checksum = "940b3a0ca603d1eade50a4846a2afffd5ef57a9feac2c0e2ec2e14f9ead76000"
 name = "app"
 version = "0.1.0"
 dependencies = [
+ "arboard",
  "embed-resource",
+ "raw-window-handle",
  "rfd",
  "roxmltree",
  "scan",
@@ -225,6 +227,7 @@ dependencies = [
  "toml",
  "treemap",
  "window-vibrancy",
+ "windows",
  "windows-sys 0.61.2",
 ]
 

@@ -15,6 +15,7 @@ mod menu;
 mod model;
 mod motion;
 mod nav;
+mod shell;
 mod tip;
 mod tree_view;
 
@@ -866,6 +867,27 @@ fn target_of(l: &Loaded, src: Source, hit: Option<NodeId>) -> Option<(NodeId, bo
     };
     // A tile or a crumb can outlive a removal: a node that left the tree gets no menu.
     l.data.tree.is_attached(node).then_some((node, select))
+}
+
+/// What a menu is for, after the gate and the disk check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Request {
+    node: NodeId,
+    /// Select the node before the menu shows (`target_of`).
+    select: bool,
+    is_dir: bool,
+    /// `Loaded::edits` at the menu.
+    edits: u64,
+    prepared: menu::Prepared,
+}
+
+/// The menu asked for at `src` (`hit`: the tile under the pointer), or `None` when no menu opens:
+/// no finished scan (`menu::allowed`) or no item (`target_of`). The disk check (`menu::prepare`
+/// with `disk`) runs here only, for every way a menu opens. A menu drops the checks still to come
+/// of the menu before it.
+fn menu_request(src: Source, hit: Option<NodeId>, disk: impl Fn(&std::path::Path) -> menu::Disk) -> Option<Request> {
+    let _ = (src, hit, disk);
+    unimplemented!("menu_request")
 }
 
 /// The tile of the treemap (`rects`, physical pixels) under the view point (x, y) while `moving`
@@ -1737,7 +1759,7 @@ mod tests {
         Move, picture_point, zoom_frame_at, take_launch_path, forget_scan, gate_hover, left_map,
         shows_start_at_launch, relaunch_path, LabelKind, LogicalBox, Placed, place_label, stretch,
         apply_args, FOOTER_CHIPS, Stored, chips_of, drop_types, store_totals, remove_node, Removal, apply_removal,
-        Source, target_of, hit_at, run_action, rescan_shown, rescan_target,
+        Source, target_of, hit_at, run_action, rescan_shown, rescan_target, Request, menu_request,
     };
     use crate::menu::{self, Cmd, Disk};
     use treemap::filetype::{TypeTotal, type_totals};
@@ -3008,6 +3030,77 @@ mod tests {
         ];
 
         assert_eq!(by.map(|t| t.map(|(n, _)| n)), [Some(DOCS); 4]);
+    }
+
+    // ---- the context menu: the request ----
+    /// A finished scan on screen, shown as `loaded_with_rows`.
+    fn show_rows() {
+        SESSION.with_borrow_mut(|s| {
+            let (generation, _) = s.scan.start().unwrap();
+            assert!(s.scan.apply(generation, Event::Finished(summary())));
+            s.loaded = Some(loaded_with_rows());
+        });
+    }
+
+    fn pending() -> menu::Follow {
+        menu::Follow::new(D_EXE, 0, std::path::PathBuf::from("root\\d.exe"), false, Disk::File(30))
+    }
+
+    #[test]
+    fn menu_request_for_a_row_of_a_finished_scan_is_ready_with_the_path_of_its_node() {
+        show_rows();
+
+        let got = menu_request(Source::Row(2), None, |_| Disk::File(10));
+
+        let path = std::path::PathBuf::from("root").join("c.txt");
+        let want = Request { node: C_TXT, select: true, is_dir: false, edits: 0, prepared: menu::Prepared::Ready { path, before: Disk::File(10) } };
+        assert_eq!(got, Some(want));
+    }
+
+    #[test]
+    fn menu_request_without_a_finished_scan_is_none() {
+        SESSION.with_borrow_mut(|s| s.loaded = Some(loaded_with_rows()));
+
+        assert_eq!(menu_request(Source::Row(2), None, |_| Disk::File(10)), None);
+    }
+
+    #[test]
+    fn menu_request_with_a_disk_that_does_not_match_is_changed() {
+        show_rows();
+
+        let got = menu_request(Source::Crumb(DOCS.0 as i32), None, |_| Disk::Gone);
+
+        assert_eq!(got.map(|r| (r.node, r.select, r.is_dir, r.prepared)), Some((DOCS, false, true, menu::Prepared::Changed)));
+    }
+
+    #[test]
+    fn menu_request_carries_the_removals_since_the_scan() {
+        show_rows();
+        super::with_loaded(|l| remove_node(l, B_PDF));
+
+        let got = menu_request(Source::Key, None, |_| Disk::File(100));
+
+        assert_eq!(got.map(|r| (r.node, r.edits)), Some((A_TXT, 1)));
+    }
+
+    #[test]
+    fn menu_request_drops_the_checks_of_the_menu_before() {
+        show_rows();
+        SESSION.with_borrow_mut(|s| s.follow = Some(pending()));
+
+        menu_request(Source::Key, None, |_| Disk::File(100));
+
+        assert!(SESSION.with_borrow(|s| s.follow.is_none()));
+    }
+
+    #[test]
+    fn menu_request_for_no_item_keeps_the_checks_of_the_menu_before() {
+        show_rows();
+        SESSION.with_borrow_mut(|s| s.follow = Some(pending()));
+
+        let got = menu_request(Source::Map, None, |_| Disk::File(100));
+
+        assert_eq!((got, SESSION.with_borrow(|s| s.follow.is_some())), (None, true));
     }
 
     #[test]
