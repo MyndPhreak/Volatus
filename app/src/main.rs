@@ -891,9 +891,51 @@ enum Removal {
 /// The session part of a deletion of `n` on disk: removes it (`remove_node`), selects its parent,
 /// shows the parent when the shown folder went with it, and drops the picture kept for a zoom and
 /// the folder a zoom out starts from. The scan root goes back to the start screen.
+#[cfg_attr(not(test), expect(dead_code, reason = "called by removed, which the context menu calls (P4)"))]
 fn apply_removal(n: NodeId) -> Removal {
-    let _ = n;
-    unimplemented!("P2.T4: apply_removal")
+    SESSION.with_borrow_mut(|s| {
+        let Some(l) = s.loaded.as_mut() else { return Removal::Nothing };
+        if n == l.data.tree.root() {
+            return if s.scan.reset() { Removal::Start(ROOT_GONE) } else { Removal::Nothing };
+        }
+        let Some(after) = remove_node(l, n) else { return Removal::Nothing };
+        l.selected = Some(after.select);
+        if let Some(view) = after.view {
+            l.view_root = view;
+        }
+        // Both can show the removed node.
+        (s.held, s.out_from) = (None, None);
+        Removal::Shown(after)
+    })
+}
+
+/// The note on the start screen after the scanned folder itself was deleted.
+const ROOT_GONE: &str = "The scanned folder was deleted.";
+
+/// Node `n` of the shown scan was deleted on disk (`apply_removal`): the tree rows, the treemap,
+/// the selection and the footer show the scan without it, or the start screen shows when it was
+/// the scan root. Nothing is scanned again. With `--timing` it prints the time it took.
+#[expect(dead_code, reason = "the context menu calls it (P4)")]
+fn removed(ui: &MainWindow, n: NodeId) {
+    let started = Instant::now();
+    match apply_removal(n) {
+        Removal::Start(note) => {
+            clear(ui);
+            show_state(ui);
+            ui.set_elevate_note(note.into());
+        }
+        Removal::Shown(after) => {
+            stop_move(ui);
+            drop_hover(ui);
+            relayout(ui);
+            select(ui, after.select);
+            sync_types(ui);
+        }
+        Removal::Nothing => return,
+    }
+    if SESSION.with_borrow(|s| s.flags.timing) {
+        eprintln!("Removal: {:.2} ms.", started.elapsed().as_secs_f64() * 1000.0);
+    }
 }
 
 /// Counts the file types of the scan for the footer on its own worker thread, started after the
@@ -2455,6 +2497,16 @@ mod tests {
     }
 
     // ---- removed ----
+    #[test]
+    fn remove_node_of_the_root_is_none_and_changes_nothing() {
+        let mut l = loaded_typed();
+        let before = format!("{:?}", l.data.tree);
+
+        let after = remove_node(&mut l, NodeId(0));
+
+        assert_eq!((after, format!("{:?}", l.data.tree), l.edits), (None, before, 0));
+    }
+
     #[test]
     fn apply_removal_of_the_root_goes_to_the_start_screen_with_the_root_gone_note() {
         show_finished_scan(&typed());

@@ -203,7 +203,6 @@ pub fn zoom_way(tree: &Tree, shown: Option<NodeId>, rects: &[Rect], to: NodeId) 
 
 /// Where the selection and the treemap go after a removal (`after_removal`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(not(test), expect(dead_code, reason = "made by remove_node, which the context menu calls (P4)"))]
 pub struct AfterRemoval {
     /// The node to select: the folder the removed node was in.
     pub select: NodeId,
