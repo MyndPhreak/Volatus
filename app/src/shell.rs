@@ -17,7 +17,7 @@
 //! - The shell gets the plain path: a `\\?\` path fails (S10) and the menu degrades.
 //! - `QueryContextMenu` can block up to about 0.8 s (S9): a wait cursor shows meanwhile.
 
-use crate::menu::{Anchor, Item, SHELL_FIRST, SHELL_LAST};
+use crate::menu::{Anchor, Cmd, Item, SHELL_FIRST, SHELL_LAST};
 use std::cell::{Cell, RefCell};
 use std::path::Path;
 use windows::Win32::Foundation::{E_FAIL, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
@@ -254,6 +254,16 @@ fn after_menu(window: HWND) {
     }
 }
 
+/// Runs the Volatus item `cmd` for the item at `path` (`is_dir`: a folder). Explore Folder opens
+/// a file's folder with the file selected (`SHOpenFolderAndSelectItems`, D5) and a folder itself;
+/// Command Prompt Here starts `cmd.exe` in the folder `path` (`menu::terminal_folder`), with no
+/// path on a command line (D4); Copy Path puts the raw path on the clipboard. `Err` with what
+/// failed; Windows shows no error box of its own.
+pub fn act(cmd: Cmd, path: &Path, is_dir: bool) -> Result<(), String> {
+    let _ = (cmd, path, is_dir);
+    unimplemented!("act")
+}
+
 /// The HWND of the Slint window, once it exists.
 pub fn window_hwnd(window: &slint::Window) -> Option<HWND> {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -404,6 +414,15 @@ mod tests {
         let verbs = verbs_of(&folder, false);
 
         assert!(has(&verbs, "delete"), "{verbs:?}");
+    }
+
+    #[test]
+    fn act_explore_folder_of_a_missing_file_or_folder_fails() {
+        let dir = Scratch::new("explore-missing");
+
+        let got = [act(Cmd::ExploreFolder, &dir.0.join("gone.txt"), false), act(Cmd::ExploreFolder, &dir.0.join("gone"), true)];
+
+        assert!(got.iter().all(Result::is_err), "{got:?}");
     }
 
     #[test]
