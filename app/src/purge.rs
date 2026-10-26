@@ -1088,6 +1088,58 @@ mod tests {
         drop(handle);
     }
 
+    /// Opens the folder `p` as a terminal holds its working folder: list access, shared for
+    /// read and write only, so no one else can open it for delete.
+    fn hold_folder(p: &Path) -> fs::File {
+        use std::os::windows::fs::OpenOptionsExt;
+        fs::OpenOptions::new()
+            .access_mode(FILE_LIST_DIRECTORY)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(p)
+            .unwrap()
+    }
+
+    #[test]
+    fn a_folder_held_open_without_share_delete_is_emptied_and_stays_locked() {
+        let d = Dir::new("heldfolder");
+        let t = d.base.join("t");
+        let held = t.join("held");
+        fs::create_dir_all(&held).unwrap();
+        fs::write(held.join("x.txt"), b"xx").unwrap();
+        fs::write(held.join("y.txt"), b"yyy").unwrap();
+        fs::write(t.join("a.txt"), b"a").unwrap();
+        let h = hold_folder(&held);
+        let o = run(&target(&t, true));
+        drop(h);
+        assert!(!held.join("x.txt").exists() && !held.join("y.txt").exists(), "the files inside are gone");
+        assert!(held.is_dir(), "the held folder stays");
+        assert!(!t.join("a.txt").exists());
+        // One skip: the held folder. The target stays because of it and gets no skip of its own.
+        assert_eq!(o.skipped.len(), 1, "{:?}", o.skipped);
+        assert_eq!(o.skipped[0].path, held);
+        assert_eq!(o.skipped[0].reason, SkipReason::Locked);
+        assert_eq!((o.removed_items, o.removed_bytes), (3, 6));
+    }
+
+    #[test]
+    fn a_target_held_open_without_share_delete_is_emptied_and_stays_locked() {
+        let d = Dir::new("heldroot");
+        let t = d.base.join("t");
+        fs::create_dir_all(t.join("sub")).unwrap();
+        fs::write(t.join("sub").join("x.txt"), b"xx").unwrap();
+        fs::write(t.join("y.txt"), b"yyy").unwrap();
+        let h = hold_folder(&t);
+        let o = run(&target(&t, true));
+        drop(h);
+        assert!(!t.join("sub").exists() && !t.join("y.txt").exists(), "the contents are gone");
+        assert!(t.is_dir(), "the held target stays");
+        assert_eq!(o.skipped.len(), 1, "{:?}", o.skipped);
+        assert_eq!(o.skipped[0].path, t);
+        assert_eq!(o.skipped[0].reason, SkipReason::Locked);
+        assert_eq!((o.removed_items, o.removed_bytes), (3, 5));
+    }
+
     // ---- Benchmark (ignored; docs/BENCHMARK.md) ----
     // cargo test -p app -j 1 --release purge_bench -- --ignored --nocapture --test-threads 1
 
