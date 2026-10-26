@@ -331,6 +331,27 @@ fn sync_selection(ui: &MainWindow) {
     }
 }
 
+/// A treemap layout to run (`begin_layout`): the data, the folder, the scan and layout ids it is
+/// for, and the map size in logical pixels.
+struct LayoutJob {
+    data: Arc<Data>,
+    root: NodeId,
+    generation: u64,
+    seq: u64,
+    size: (f32, f32),
+}
+
+/// The session part of a new layout: a new `layout_seq` (any layout on its way is late now) and
+/// no layout kept for a zoom in. `None` with no scan shown.
+fn begin_layout(_s: &mut Session) -> Option<LayoutJob> {
+    unimplemented!("begin_layout")
+}
+
+/// `apply_removal` of `n`, and the layout to run when the map shows the change (`begin_layout`).
+fn take_removal(_n: NodeId) -> (Removal, Option<LayoutJob>) {
+    unimplemented!("take_removal")
+}
+
 /// Lays out and draws the treemap for the current folder and window size on a worker thread.
 /// The window keeps the old image until the new one arrives. A result is dropped if a newer
 /// layout or a new scan started meanwhile.
@@ -1923,7 +1944,7 @@ mod tests {
         Loaded, RowModel, SESSION, file_labels, frame_labels, glow_drawn, hover_of, map_labels, note_hover, restart_admin,
         Move, picture_point, zoom_frame_at, take_launch_path, forget_scan, gate_hover, left_map,
         shows_start_at_launch, relaunch_path, LabelKind, LogicalBox, Placed, place_label, stretch,
-        apply_args, FOOTER_CHIPS, Stored, chips_of, drop_types, store_totals, remove_node, Removal, apply_removal,
+        apply_args, FOOTER_CHIPS, Stored, chips_of, drop_types, store_totals, remove_node, Removal, apply_removal, begin_layout, take_removal,
         Source, target_of, hit_at, run_action, rescan_shown, rescan_target, Request, menu_request, FollowStep, check_follow,
     };
     use crate::menu::{self, Cmd, Disk};
@@ -2891,6 +2912,44 @@ mod tests {
         apply_removal(DOCS);
 
         assert_eq!(SESSION.with_borrow(|s| (s.held.is_none(), s.out_from)), (true, None));
+    }
+
+    #[test]
+    fn begin_layout_takes_a_new_layout_seq_and_drops_the_layout_kept_for_a_zoom() {
+        show_finished_scan(&typed());
+        let seq = SESSION.with_borrow_mut(|s| {
+            s.held = Some(super::Layout { root: DOCS, rects: Vec::new(), image: None, labels: (Vec::new(), Vec::new()), size: (0.0, 0.0) });
+            s.layout_seq
+        });
+
+        let job = SESSION.with_borrow_mut(begin_layout);
+
+        let after = SESSION.with_borrow(|s| (s.layout_seq, s.held.is_none()));
+        assert_eq!((job.map(|j| (j.root, j.seq)), after), (Some((NodeId(0), seq + 1)), (seq + 1, true)));
+    }
+
+    #[test]
+    fn take_removal_of_a_shown_node_starts_a_new_layout_of_the_view() {
+        show_finished_scan(&typed());
+        let seq = SESSION.with_borrow(|s| s.layout_seq);
+
+        let (removal, job) = take_removal(DOCS);
+
+        let after = SESSION.with_borrow(|s| s.layout_seq);
+        assert!(matches!(removal, Removal::Shown(_)), "{removal:?}");
+        assert_eq!((job.map(|j| (j.root, j.seq)), after), (Some((NodeId(0), seq + 1)), seq + 1));
+    }
+
+    #[test]
+    fn take_removal_that_shows_no_change_starts_no_layout() {
+        show_finished_scan(&typed());
+        take_removal(DOCS);
+        let seq = SESSION.with_borrow(|s| s.layout_seq);
+
+        let got = [take_removal(A_TXT), take_removal(NodeId(0))].map(|(removal, job)| (removal, job.is_some()));
+
+        let after = SESSION.with_borrow(|s| s.layout_seq);
+        assert_eq!((got, after), ([(Removal::Nothing, false), (Removal::Start("The scanned folder was deleted."), false)], seq));
     }
 
     #[test]
