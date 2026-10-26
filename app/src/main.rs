@@ -19,6 +19,7 @@ mod model;
 mod motion;
 mod nav;
 mod shell;
+mod settings;
 mod tip;
 mod tree_view;
 
