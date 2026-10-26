@@ -183,22 +183,38 @@ impl Unit {
     pub const ALL: [Unit; 6] = [Unit::Dynamic, Unit::Byte, Unit::Kb, Unit::Mb, Unit::Gb, Unit::Tb];
 
     /// The unit at position `i` in `ALL`; an unknown index is `Dynamic`.
-    pub fn from_index(_i: i32) -> Unit {
-        Unit::Dynamic
+    pub fn from_index(i: i32) -> Unit {
+        usize::try_from(i).ok().and_then(|i| Unit::ALL.get(i).copied()).unwrap_or_default()
     }
 
     /// The position of this unit in `ALL`.
     pub fn index(self) -> i32 {
-        0
+        Unit::ALL.iter().position(|&u| u == self).unwrap_or(0) as i32
     }
 }
 
 /// Binary units. `Dynamic`: one decimal above 1 KB, `1.5 MB`. A fixed unit: one decimal, digits
 /// grouped, `2,048.0 GB`; a non-empty size below 0.05 of the unit is `< 0.1 GB`.
 pub fn format_size(bytes: u64, unit: Unit) -> String {
-    if unit != Unit::Dynamic {
-        return String::new();
+    let (label, power) = match unit {
+        Unit::Dynamic => return format_size_dynamic(bytes),
+        Unit::Byte => return format!("{} B", group_digits(bytes)),
+        Unit::Kb => ("KB", 1),
+        Unit::Mb => ("MB", 2),
+        Unit::Gb => ("GB", 3),
+        Unit::Tb => ("TB", 4),
+    };
+    let v = bytes as f64 / 1024f64.powi(power);
+    if bytes > 0 && v < 0.05 {
+        return format!("< 0.1 {label}");
     }
+    let one_decimal = format!("{v:.1}");
+    let (whole, tenth) = one_decimal.split_once('.').unwrap_or((&one_decimal, "0"));
+    // `v` is at most 2^64 / 1024, so `whole` always fits a u64.
+    format!("{}.{tenth} {label}", group_digits(whole.parse().unwrap_or(0)))
+}
+
+fn format_size_dynamic(bytes: u64) -> String {
     const UNITS: [&str; 7] = ["B", "KB", "MB", "GB", "TB", "PB", "EB"];
     if bytes < 1024 {
         return format!("{bytes} B");
