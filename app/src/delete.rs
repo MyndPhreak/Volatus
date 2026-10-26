@@ -704,6 +704,15 @@ mod tests {
     }
 
     #[test]
+    fn a_name_with_a_colon_is_unresolved() {
+        let fs = all_dirs(&[r"C:\data\docs", r"C:\data\dd"]);
+        for t in [r"C:\data\c:Docs", r"C:\data\dd::$INDEX_ALLOCATION", r"C:\data\dd:s"] {
+            assert_eq!(check(r"C:\data", t, &fs), Err(Refusal::Unresolved), "{t}");
+        }
+        assert_eq!(check(r"C:\data:s", r"C:\data:s\docs", &fs), Err(Refusal::Unresolved));
+    }
+
+    #[test]
     fn verbatim_is_built_from_the_text_and_refuses_dot_names() {
         for (p, want) in [
             (r"C:\a\b", Some(r"\\?\C:\a\b")),
@@ -721,6 +730,11 @@ mod tests {
             (r"\\server\share\x", None),
             (r"\\?\UNC\server\share\x", None),
             (r"\\.\C:\x", None),
+            (r"C:\x\c:Docs", None),
+            (r"C:\dd::$INDEX_ALLOCATION", None),
+            (r"C:\ff::$DATA", None),
+            (r"\\?\C:\dir:s\x", None),
+            (r"C:\a:", None),
         ] {
             assert_eq!(verbatim(Path::new(p)), want.map(PathBuf::from), "{p}");
         }
@@ -1072,6 +1086,33 @@ mod tests {
             assert_eq!(check(&dot, &dot.join("child")), Ok(dot.join("child")));
             assert_eq!(check(&dot, &bare.join("child")), Err(Refusal::NotUnderRoot));
             assert_eq!(check(&bare, &dot.join("child")), Err(Refusal::NotUnderRoot));
+        }
+
+        #[test]
+        fn a_name_with_a_colon_is_unresolved_not_another_item() {
+            let d = Dir::new("colon");
+            fs::create_dir_all(d.base.join("x")).unwrap();
+            fs::create_dir(d.base.join("Docs")).unwrap();
+            fs::create_dir(d.base.join("dd")).unwrap();
+            fs::write(d.base.join("ff"), b"x").unwrap();
+            let Some(env) = d.env() else { return };
+            // `<drive>:Docs` on the base's own drive is drive-relative: Win32 reads it against the
+            // process's current directory. The cwd is left as it is.
+            // Built as text: `Path::join` would itself replace the base with `<drive>:Docs`.
+            let root = plain(&d.base);
+            let b = root.to_string_lossy().into_owned();
+            let letter = b.chars().next().unwrap();
+            for t in [
+                format!(r"{b}\x\{letter}:Docs"),
+                format!(r"{b}\dd::$INDEX_ALLOCATION"),
+                format!(r"{b}\ff::$DATA"),
+                format!(r"{b}\dd:s"),
+            ]
+            .map(PathBuf::from)
+            {
+                assert_eq!(RealFs.resolve_target(&t), None, "{t:?}");
+                assert_eq!(check_target_in(&root, &t, true, &RealFs, &env), Err(Refusal::Unresolved), "{t:?}");
+            }
         }
 
         #[test]
