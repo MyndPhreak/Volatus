@@ -269,20 +269,21 @@ fn the_release_seed_agrees_with_app_cargo_toml() {
     let manifest = json(".release-please-manifest.json");
     let manifest = manifest.as_object().expect("the manifest is an object");
     assert!(manifest.keys().all(|k| k == "."), "the manifest knows only the root package: {manifest:?}");
-    // release-please reads bootstrap-sha only at the top level of the config.
-    assert!(package.get("bootstrap-sha").is_none(), "bootstrap-sha is set at the top level, not in the package");
 
-    match manifest.get(".") {
-        // Before the first release: release-as forces the Cargo.toml version, and only commits
-        // after bootstrap-sha go in the first changelog.
-        None => {
-            assert_eq!(package.get("release-as").and_then(Value::as_str), Some(VERSION), "the first release is app/Cargo.toml's version");
-            let sha = config.get("bootstrap-sha").and_then(Value::as_str).unwrap_or_default();
-            assert!(is_full_sha(sha), "bootstrap-sha is a full 40-character commit SHA (release-please compares full SHAs): {sha:?}");
-        }
-        // After a release: the release pull request bumps the manifest and Cargo.toml together.
-        Some(released) => assert_eq!(released.as_str(), Some(VERSION), "the manifest and app/Cargo.toml carry the same version"),
-    }
+    // After the first release the release pull request bumps the manifest and Cargo.toml together.
+    assert_eq!(manifest.get(".").and_then(Value::as_str), Some(VERSION), "the manifest and app/Cargo.toml carry the same version");
+}
+
+#[test]
+fn the_first_release_settings_are_gone_after_the_first_release() {
+    let config = config();
+    let package = root_package(&config);
+
+    // If release-as stays, release-please proposes the released version again.
+    assert!(package.get("release-as").is_none(), "release-as is removed after the first release");
+    // bootstrap-sha is read only at the top level; it is not needed once a release tag exists.
+    assert!(config.get("bootstrap-sha").is_none(), "bootstrap-sha is removed after the first release");
+    assert!(package.get("bootstrap-sha").is_none(), "bootstrap-sha is not set in the package either");
 }
 
 #[test]
