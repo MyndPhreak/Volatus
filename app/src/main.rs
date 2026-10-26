@@ -74,7 +74,9 @@ struct Data {
 /// The file tree as a Slint model. Rows are cheap ids; text is built only for rows the list
 /// asks for, so a tree with millions of nodes costs nothing for the rows nobody sees.
 struct RowModel {
-    data: Arc<Data>,
+    /// The shown data. Weak, so that a removal changes the data in place (`remove_node`, which
+    /// points it at the data again); a strong one would make `Arc::make_mut` copy every time.
+    data: RefCell<std::sync::Weak<Data>>,
     rows: RefCell<Vec<Row>>,
     notify: ModelNotify,
 }
@@ -95,11 +97,12 @@ impl Model for RowModel {
 
     fn row_data(&self, i: usize) -> Option<TreeRow> {
         let row = *self.rows.borrow().get(i)?;
-        let tree = &self.data.tree;
+        let data = self.data.borrow().upgrade()?;
+        let tree = &data.tree;
         let node = tree.node(row.node);
         let parent_size = node.parent.map_or(node.size, |p| tree.node(p).size);
         let (name, size) = (model::display_name(tree.name(row.node)), format_size(node.size));
-        let (percent, files) = (tree_view::format_percent(node.size, parent_size), self.data.counts[row.node.0 as usize]);
+        let (percent, files) = (tree_view::format_percent(node.size, parent_size), data.counts[row.node.0 as usize]);
         Some(TreeRow {
             spoken: tree_view::row_spoken(&name, &size, &percent, files).into(),
             name: name.as_ref().into(),
@@ -824,7 +827,7 @@ fn select(ui: &MainWindow, node: NodeId) {
 fn install(ui: &MainWindow, data: Arc<Data>) {
     let root = data.tree.root();
     let model =
-        Rc::new(RowModel { data: data.clone(), rows: RefCell::new(Vec::new()), notify: ModelNotify::default() });
+        Rc::new(RowModel { data: RefCell::new(Arc::downgrade(&data)), rows: RefCell::new(Vec::new()), notify: ModelNotify::default() });
     ui.set_rows(ModelRc::from(model.clone()));
     SESSION.with_borrow_mut(|s| {
         s.loaded = Some(Loaded {
@@ -850,9 +853,28 @@ fn install(ui: &MainWindow, data: Arc<Data>) {
 /// ancestor and its file types off the footer totals, and drops the rects of its subtree. Returns
 /// where the selection and the treemap go; `None`, and nothing changes, for the root or a node
 /// that is already removed.
+#[cfg_attr(not(test), expect(dead_code, reason = "the context menu calls it (P4)"))]
 fn remove_node(l: &mut Loaded, n: NodeId) -> Option<AfterRemoval> {
-    let _ = (l, n);
-    unimplemented!("P2.T3: remove_node")
+    let tree = &l.data.tree;
+    // Checked first: a call that removes nothing must not copy the data.
+    if n == tree.root() || !tree.is_attached(n) {
+        return None;
+    }
+    // Before the unlink; not needed while the totals are counted (that count is late anyway).
+    let gone = if l.totals.is_some() { treemap::filetype::type_totals(tree, n) } else { Vec::new() };
+    let data = Arc::make_mut(&mut l.data);
+    let r = data.tree.remove(n)?;
+    let files = data.counts[n.0 as usize];
+    let mut up = Some(r.parent);
+    while let Some(p) = up {
+        data.counts[p.0 as usize] = data.counts[p.0 as usize].saturating_sub(files);
+        up = data.tree.node(p).parent;
+    }
+    *l.model.data.borrow_mut() = Arc::downgrade(&l.data);
+    drop_types(l, &gone);
+    // ponytail: O(rects x depth); fine for the <= 10^5 rects of a layout.
+    l.rects.retain(|rect| l.data.tree.is_attached(rect.node));
+    Some(tree_view::after_removal(&l.data.tree, l.view_root, &r))
 }
 
 /// Counts the file types of the scan for the footer on its own worker thread, started after the
@@ -1740,7 +1762,7 @@ mod tests {
         let (tree, folder, file) = spoofed();
         let data = Arc::new(Data { counts: crate::tree_view::file_counts(&tree), tree });
         let row = |node| crate::tree_view::Row { node, depth: 0, expanded: false, has_children: false };
-        let model = RowModel { data: data.clone(), rows: RefCell::new(vec![row(folder), row(file)]), notify: ModelNotify::default() };
+        let model = RowModel { data: RefCell::new(Arc::downgrade(&data)), rows: RefCell::new(vec![row(folder), row(file)]), notify: ModelNotify::default() };
 
         let names: Vec<String> = (0..2).map(|i| slint::Model::row_data(&model, i).unwrap().name.to_string()).collect();
 
@@ -2109,7 +2131,7 @@ mod tests {
 
     fn loaded(data: &Arc<Data>) -> Loaded {
         let root = data.tree.root();
-        let model = Rc::new(RowModel { data: data.clone(), rows: RefCell::new(Vec::new()), notify: ModelNotify::default() });
+        let model = Rc::new(RowModel { data: RefCell::new(Arc::downgrade(data)), rows: RefCell::new(Vec::new()), notify: ModelNotify::default() });
         Loaded {
             data: data.clone(),
             model,

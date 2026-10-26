@@ -203,6 +203,7 @@ pub fn zoom_way(tree: &Tree, shown: Option<NodeId>, rects: &[Rect], to: NodeId) 
 
 /// Where the selection and the treemap go after a removal (`after_removal`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(test), expect(dead_code, reason = "made by remove_node, which the context menu calls (P4)"))]
 pub struct AfterRemoval {
     /// The node to select: the folder the removed node was in.
     pub select: NodeId,
@@ -213,9 +214,10 @@ pub struct AfterRemoval {
 /// Where the selection and the treemap go after `r` was removed from `tree` (call it after
 /// `Tree::remove`) while the treemap shows `view_root`: the parent is selected; the treemap
 /// shows the parent only when the removal took the view root with it.
+#[cfg_attr(not(test), expect(dead_code, reason = "called by remove_node, which the context menu calls (P4)"))]
 pub fn after_removal(tree: &Tree, view_root: NodeId, r: &scan::Removed) -> AfterRemoval {
-    let _ = (tree, view_root, r);
-    unimplemented!("P2.T3: after_removal")
+    // The view root is detached only when it or one of its ancestors was removed.
+    AfterRemoval { select: r.parent, view: (!tree.is_attached(view_root)).then_some(r.parent) }
 }
 
 /// Map text for a folder with no file that has a size.
