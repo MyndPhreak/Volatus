@@ -36,7 +36,7 @@ use slint::{
 };
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
-use settings::{Settings, ThemeChoice};
+use settings::{Part, Settings, ThemeChoice};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -262,6 +262,50 @@ fn persist_with(s: &mut Session, save: impl FnOnce(&Path, &Settings) -> std::io:
 /// The window is dark for `choice` when Windows is dark or not (`system_dark`).
 fn effective_dark(choice: ThemeChoice, system_dark: bool) -> bool {
     choice.forced_dark().unwrap_or(system_dark)
+}
+
+/// Where the keyboard focus is, as far as hiding a part cares.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// Task 5 green wires it.
+#[allow(dead_code)]
+enum Focus {
+    /// A row of the folder tree.
+    Tree,
+    /// The treemap.
+    Map,
+    /// Anything else: the flyout, the gear, a button.
+    Other,
+}
+
+/// Height of the footer panel, in logical pixels: 0 when the strip and the chips are both hidden.
+// Task 5 green wires it.
+#[allow(dead_code)]
+fn footer_height(_strip: bool, _chips: bool) -> f32 {
+    48.0
+}
+
+/// Where the focus goes when `part` is hidden while the focus is at `focus`. A hidden tree must not
+/// keep the focus: it goes to the map, so the arrow keys still move the selection.
+// Task 5 green wires it.
+#[allow(dead_code)]
+fn focus_after_hide(_part: Part, focus: Focus) -> Focus {
+    focus
+}
+
+/// The values of the window's `show-header`, `show-tree`, `show-strip`, `show-chips` and
+/// `show-labels`, in `Part::ALL` order.
+// Task 5 green wires it.
+#[allow(dead_code)]
+fn show_flags(_s: &Settings) -> [bool; 5] {
+    [true; 5]
+}
+
+/// Shows or hides `part` in the session settings, then saves them with `save`. Returns the text
+/// for `settings-error`, as `persist_with` does.
+// Task 5 green wires it.
+#[allow(dead_code)]
+fn toggle_part_with(_s: &mut Session, _part: Part, _on: bool, _save: impl FnOnce(&Path, &Settings) -> std::io::Result<()>) -> &'static str {
+    ""
 }
 
 /// Saves the session settings and shows in the flyout whether that worked.
@@ -3933,5 +3977,81 @@ mod tests {
 
         assert_eq!((byte.size.as_str(), kb.size.as_str()), ("1,234,567 B", "1,205.6 KB"));
         assert!(byte.spoken.contains("1,234,567 B"), "{}", byte.spoken);
+    }
+
+    // ---- show or hide the parts ----
+    use super::{Focus, footer_height, focus_after_hide, show_flags, toggle_part_with};
+    use crate::settings::Part;
+
+    #[test]
+    fn footer_height_is_zero_only_when_the_strip_and_the_chips_are_both_hidden() {
+        assert_eq!(footer_height(true, true), 48.0);
+        assert_eq!(footer_height(true, false), 48.0);
+        assert_eq!(footer_height(false, true), 48.0);
+        assert_eq!(footer_height(false, false), 0.0);
+    }
+
+    #[test]
+    fn focus_after_hide_moves_the_focus_from_a_hidden_tree_to_the_map() {
+        assert_eq!(focus_after_hide(Part::Tree, Focus::Tree), Focus::Map);
+        for focus in [Focus::Map, Focus::Other] {
+            assert_eq!(focus_after_hide(Part::Tree, focus), focus, "tree hidden, focus at {focus:?}");
+        }
+        for part in Part::ALL.into_iter().filter(|&p| p != Part::Tree) {
+            for focus in [Focus::Tree, Focus::Map, Focus::Other] {
+                assert_eq!(focus_after_hide(part, focus), focus, "{part:?} hidden, focus at {focus:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn show_flags_follow_settings() {
+        for bits in 0u8..32 {
+            let mut s = Settings::default();
+            let want: [bool; 5] = std::array::from_fn(|i| bits & (1 << i) != 0);
+            for (part, on) in Part::ALL.into_iter().zip(want) {
+                s.set_shown(part, on);
+            }
+            assert_eq!(show_flags(&s), want, "bits {bits:05b}");
+        }
+    }
+
+    #[test]
+    fn part_toggled_persists_and_applies() {
+        SESSION.with_borrow_mut(|s| adopt_settings(s, Some(path()), (Settings::default(), settings::Loaded::Fresh)));
+        let calls = Cell::new(0);
+        let saved = RefCell::new(None);
+
+        let error = SESSION.with_borrow_mut(|s| {
+            toggle_part_with(s, Part::Tree, false, |_, set: &Settings| {
+                calls.set(calls.get() + 1);
+                *saved.borrow_mut() = Some(set.clone());
+                Ok(())
+            })
+        });
+
+        let want = Settings { show_tree: false, ..Settings::default() };
+        let now = SESSION.with_borrow(|s| s.settings.clone());
+        assert_eq!((error, calls.get(), saved.into_inner(), now), ("", 1, Some(want.clone()), want));
+
+        // After a file that was not kept: the change still applies, and no save is ever made.
+        SESSION.with_borrow_mut(|s| adopt_settings(s, Some(path()), (Settings::default(), settings::Loaded::NotKept)));
+        let calls = Cell::new(0);
+        let errors: Vec<&str> = [(Part::Labels, false), (Part::Header, false)]
+            .into_iter()
+            .map(|(part, on)| {
+                SESSION.with_borrow_mut(|s| {
+                    toggle_part_with(s, part, on, |_, _| {
+                        calls.set(calls.get() + 1);
+                        Ok(())
+                    })
+                })
+            })
+            .collect();
+        let now = SESSION.with_borrow(|s| s.settings.clone());
+        assert_eq!(
+            (errors, calls.get(), now),
+            (vec![SAVE_ERROR, SAVE_ERROR], 0, Settings { show_labels: false, show_header: false, ..Settings::default() })
+        );
     }
 }
