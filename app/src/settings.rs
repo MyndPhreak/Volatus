@@ -205,21 +205,24 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
 }
 
 /// Reads the file. On `Partial` and `Damaged` the file is first copied to `<name>.bad`, so a
-/// later save cannot destroy what the user wrote. The copy is best effort: if it fails, the
-/// settings still load (defaults for what was wrong).
+/// later save cannot destroy what the user wrote. `Partial` and `Damaged` are returned only
+/// when that copy was written; if it fails, or the file cannot be read, the result is
+/// `NotKept` with default settings.
 pub fn load(path: &Path) -> (Settings, Loaded) {
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (Settings::default(), Loaded::Fresh),
-        // Present but unreadable (a folder, no access): treat as damaged; there is nothing to copy.
-        Err(_) => return (Settings::default(), Loaded::Damaged),
+        // Present but unreadable (a folder, no access): there is nothing to copy.
+        Err(_) => return (Settings::default(), Loaded::NotKept),
     };
     let (settings, loaded) = match std::str::from_utf8(&bytes) {
         Ok(text) => parse(text),
         Err(_) => (Settings::default(), Loaded::Damaged),
     };
-    if matches!(loaded, Loaded::Partial(_) | Loaded::Damaged) {
-        let _ = std::fs::write(with_suffix(path, ".bad"), &bytes);
+    if matches!(loaded, Loaded::Partial(_) | Loaded::Damaged)
+        && std::fs::write(with_suffix(path, ".bad"), &bytes).is_err()
+    {
+        return (Settings::default(), Loaded::NotKept);
     }
     (settings, loaded)
 }
