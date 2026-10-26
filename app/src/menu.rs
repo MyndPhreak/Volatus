@@ -51,13 +51,37 @@ pub enum Prepared {
 
 /// The path of node `n` and its disk check. `Ready` only when the disk holds a folder for a
 /// folder node, or a file for a file node; anything else, an error included, is `Changed`.
+/// A path whose names Windows would change (`keeps_names`) is `Changed` before any disk read.
 pub fn prepare(tree: &Tree, n: NodeId, disk: impl Fn(&Path) -> Disk) -> Prepared {
     let path = tree.path(n);
+    if !keeps_names(tree, n, &path) {
+        return Prepared::Changed;
+    }
     let before = disk(&path);
     match (&before, tree.node(n).is_dir) {
         (Disk::Dir, true) | (Disk::File(_), false) => Prepared::Ready { path, before },
         _ => Prepared::Changed,
     }
+}
+
+/// True when Windows names node `n` by `path` (`tree.path(n)`) with the names the scan read: every
+/// name below the root is `plain_name`, and `std::path::absolute` (what the disk check and the
+/// shell get) ends in those same names. The root is as typed, so it is not compared.
+fn keeps_names(tree: &Tree, n: NodeId, path: &Path) -> bool {
+    let mut names = Vec::new();
+    let mut cur = n;
+    while let Some(parent) = tree.node(cur).parent {
+        names.push(tree.name(cur));
+        cur = parent;
+    }
+    let Ok(full) = std::path::absolute(path) else { return false };
+    names.iter().all(|name| plain_name(name)) && full.components().rev().take(names.len()).map(|c| c.as_os_str()).eq(names.iter().map(std::ffi::OsStr::new))
+}
+
+/// False for a name Windows changes in a plain path: one that ends in `.` or ` ` (dropped, so "a."
+/// names its twin "a"), or holds U+FFFD (a name the scan made lossy cannot be told from a real one).
+pub fn plain_name(name: &str) -> bool {
+    !name.ends_with(['.', ' ']) && !name.contains('\u{FFFD}')
 }
 
 /// True when a menu may open: a finished scan whose data is loaded.

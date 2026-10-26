@@ -19,8 +19,8 @@
 
 use crate::menu::{Anchor, Cmd, Item, SHELL_FIRST, SHELL_LAST};
 use std::cell::{Cell, RefCell};
-use std::path::Path;
-use windows::Win32::Foundation::{E_ABORT, E_FAIL, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use std::path::{Component, Path};
+use windows::Win32::Foundation::{E_ABORT, E_FAIL, E_INVALIDARG, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{ClientToScreen, ScreenToClient};
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoTaskMemFree};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, GetKeyState, SetFocus, VIRTUAL_KEY};
@@ -70,8 +70,13 @@ impl Drop for Pidl {
 
 /// The id list of `path` (the plain path, never `\\?\`). The shell takes no `/`, `.` or `..`, which
 /// a scan root typed on the command line can have: `path` is made absolute first, as Windows does
-/// for the disk check (`menu::read_disk`), so both name the same item.
+/// for the disk check (`menu::read_disk`), so both name the same item. A name that is not
+/// `menu::plain_name` is refused (`E_INVALIDARG`): the shell would name another item ("a." gives "a").
 fn parse(path: &Path) -> windows::core::Result<Pidl> {
+    let plain = |c: Component| !matches!(c, Component::Normal(name) if !name.to_str().is_some_and(crate::menu::plain_name));
+    if !path.components().all(plain) {
+        return Err(E_INVALIDARG.into());
+    }
     let path = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
     let mut pidl = std::ptr::null_mut();
     // SAFETY: the name outlives the call; the result is owned by `Pidl`.
