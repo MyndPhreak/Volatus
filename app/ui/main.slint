@@ -2,7 +2,10 @@ import { Button, ProgressIndicator, Palette, ListView } from "std-widgets.slint"
 import { Crumb, CrumbBar, FileLabel, FrameLabel, Hover, Keys, LabelKind, Placed, TreemapView, ZoomFrame, ZoomMove } from "treemap.slint";
 import { Glass, GlassPanel } from "theme.slint";
 import { DriveButton, StartScreen } from "start.slint";
+import { SettingsButton, SettingsFlyout } from "settings.slint";
 export { Crumb, FileLabel, FrameLabel, Hover, DriveButton, LabelKind, Placed, ZoomFrame, ZoomMove }
+// The host writes `Palette.color-scheme` to apply the theme setting.
+export { Palette }
 
 /// One visible line of the file tree. Text is formatted by the host.
 export struct TreeRow {
@@ -89,7 +92,8 @@ export component MainWindow inherits Window {
     // The window must start transparent so the Mica backdrop shows through (set at window creation).
     // If Mica is not available, the host sets `mica` to false and the Fluent palette fills the window.
     in property <bool> mica: true;
-    /// The system theme is dark. The host draws the treemap for it.
+    /// The window is dark (the host sets `Palette.color-scheme` from the theme setting). The host
+    /// draws the treemap for it.
     out property <bool> dark: Palette.color-scheme == ColorScheme.dark;
     changed dark => { root.theme-changed(); }
     background: root.mica ? transparent : Palette.background;
@@ -172,6 +176,20 @@ export component MainWindow inherits Window {
     // Elevation
     in property <bool> show-elevate;
     in property <string> elevate-note;
+
+    // Settings
+    /// The settings flyout is open. The gear and Esc change it.
+    in-out property <bool> settings-open;
+    /// The chosen theme: 0 Follow Windows, 1 Light, 2 Dark.
+    in property <int> theme-choice;
+    /// The chosen unit of sizes: 0 Dynamic, 1 Byte, 2 KB, 3 MB, 4 GB, 5 TB.
+    in property <int> unit-choice;
+    /// Why the settings are not saved, or "".
+    in property <string> settings-error;
+    /// A theme was chosen in the flyout. The argument is its index, as in `theme-choice`.
+    callback theme-chosen(int);
+    /// A unit was chosen in the flyout. The argument is its index, as in `unit-choice`.
+    callback unit-chosen(int);
 
     /// A drive button was used. The argument is the drive root, such as "C:\".
     callback scan-drive(string);
@@ -323,6 +341,8 @@ export component MainWindow inherits Window {
                     accessible-role: text;
                 }
             }
+            // The gear sits over this room, so the summary text never goes under it.
+            Rectangle { width: 40px; }
         }
         Rectangle {
             height: 3px;
@@ -600,5 +620,28 @@ export component MainWindow inherits Window {
                 }
             }
         }
+    }
+
+    // The flyout, over the right edge under the top bar, and the gear, above both screens.
+    if root.settings-open : SettingsFlyout {
+        x: root.width - Glass.margin - self.width;
+        y: Glass.margin + 52px + Glass.gap;
+        theme-choice: root.theme-choice;
+        unit-choice: root.unit-choice;
+        error: root.settings-error;
+        theme-chosen(i) => { root.theme-chosen(i); }
+        unit-chosen(i) => { root.unit-chosen(i); }
+        close => {
+            root.settings-open = false;
+            gear.take-focus();
+        }
+    }
+    // Centred in the 40 px room at the right end of the top bar. On the start screen it stays
+    // right of the scroll bar and of the centred drive list.
+    gear := SettingsButton {
+        x: root.width - Glass.margin - 36px;
+        y: Glass.margin + (52px - self.height) / 2;
+        open: root.settings-open;
+        clicked => { root.settings-open = !root.settings-open; }
     }
 }

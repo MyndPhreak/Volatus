@@ -1,9 +1,6 @@
 //! The user's settings: the values, the tolerant JSON load and the atomic save.
 //! The file is `%APPDATA%\Volatus\settings.json`. No test touches the real one.
 
-// Unused until the settings window is wired up; Task 4 removes the allow.
-#![allow(dead_code)]
-
 use crate::model::Unit;
 use std::path::{Path, PathBuf};
 
@@ -62,6 +59,8 @@ pub enum Part {
 }
 
 impl Part {
+    // Read by the "Show" group of the flyout (Task 5); only tests use it before that.
+    #[allow(dead_code)]
     pub const ALL: [Part; 5] = [Part::Header, Part::Tree, Part::Strip, Part::Chips, Part::Labels];
 }
 
@@ -91,6 +90,8 @@ impl Default for Settings {
 }
 
 impl Settings {
+    // Read by the "Show" group of the flyout (Task 5); only tests use it before that.
+    #[allow(dead_code)]
     pub fn shown(&self, p: Part) -> bool {
         match p {
             Part::Header => self.show_header,

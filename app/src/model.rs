@@ -180,15 +180,11 @@ impl Unit {
     pub const ALL: [Unit; 6] = [Unit::Dynamic, Unit::Byte, Unit::Kb, Unit::Mb, Unit::Gb, Unit::Tb];
 
     /// The unit at position `i` in `ALL`; an unknown index is `Dynamic`.
-    // Used by the settings dialog in Task 4; no caller before that.
-    #[allow(dead_code)]
     pub fn from_index(i: i32) -> Unit {
         usize::try_from(i).ok().and_then(|i| Unit::ALL.get(i).copied()).unwrap_or_default()
     }
 
     /// The position of this unit in `ALL`.
-    // Used by the settings dialog in Task 4; no caller before that.
-    #[allow(dead_code)]
     pub fn index(self) -> i32 {
         Unit::ALL.iter().position(|&u| u == self).unwrap_or(0) as i32
     }

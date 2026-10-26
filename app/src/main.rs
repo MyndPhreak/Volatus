@@ -90,7 +90,6 @@ struct RowModel {
     notify: ModelNotify,
     /// The unit of the size column. Kept here, not read from the session: the list can ask for a
     /// row while the session is borrowed.
-    #[allow(dead_code)] // Red stub; read from "Implement the settings window".
     unit: Cell<Unit>,
 }
 
@@ -114,7 +113,7 @@ impl Model for RowModel {
         let tree = &data.tree;
         let node = tree.node(row.node);
         let parent_size = node.parent.map_or(node.size, |p| tree.node(p).size);
-        let (name, size) = (model::display_name(tree.name(row.node)), format_size(node.size, current_unit()));
+        let (name, size) = (model::display_name(tree.name(row.node)), format_size(node.size, self.unit.get()));
         let (percent, files) = (tree_view::format_percent(node.size, parent_size), data.counts[row.node.0 as usize]);
         Some(TreeRow {
             spoken: tree_view::row_spoken(&name, &size, &percent, files).into(),
@@ -204,21 +203,17 @@ struct Session {
     /// The checks after a menu action that are still to come. At most one; a new menu or scan drops it.
     follow: Option<menu::Follow>,
     /// The user's settings, as applied to the window.
-    #[allow(dead_code)] // Red stub; read from "Implement the settings window".
     settings: Settings,
     /// Where the settings are saved. `None`: they are never saved (no `APPDATA`, or the file
     /// could not be kept before a save would replace it, see `adopt_settings`).
-    #[allow(dead_code)] // Red stub; read from "Implement the settings window".
     settings_path: Option<PathBuf>,
 }
 
 /// The text the flyout shows when the settings are not saved.
-#[allow(dead_code)] // Red stub; used from "Implement the settings window".
 const SAVE_ERROR: &str = "Settings could not be saved.";
 
 /// A part of the window that shows a size, so it is synced again when the unit changes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)] // Red stub; used from "Implement the settings window".
 enum Site {
     /// The tree rows.
     Rows,
@@ -235,31 +230,125 @@ enum Site {
 }
 
 /// Every part that is synced again after a unit change (`resync_after_unit_change`).
-#[allow(dead_code)] // Red stub; used from "Implement the settings window".
 fn sites_after_unit_change() -> &'static [Site] {
-    &[]
+    &[Site::Rows, Site::Types, Site::Selection, Site::Banner, Site::Map, Site::Drives]
 }
 
 /// Puts the settings loaded from `path` into the session. A file that was not kept
 /// (`Loaded::NotKept`) is never saved over, and no path means nowhere to save: both give the
 /// text for `settings-error` at once. Else the text is "".
-#[allow(dead_code)] // Red stub; used from "Implement the settings window".
-fn adopt_settings(_s: &mut Session, _path: Option<PathBuf>, _loaded: (Settings, settings::Loaded)) -> &'static str {
-    ""
+fn adopt_settings(s: &mut Session, path: Option<PathBuf>, (settings, loaded): (Settings, settings::Loaded)) -> &'static str {
+    s.settings = settings;
+    s.settings_path = path.filter(|_| loaded != settings::Loaded::NotKept);
+    if s.settings_path.is_some() { "" } else { SAVE_ERROR }
 }
 
 /// Saves the session settings with `save`. Returns the text for `settings-error`: "" when saved,
 /// `SAVE_ERROR` when the save failed or the settings must not be saved. The settings stay as they
 /// are either way.
-#[allow(dead_code)] // Red stub; used from "Implement the settings window".
-fn persist_with(_s: &mut Session, _save: impl FnOnce(&Path, &Settings) -> std::io::Result<()>) -> &'static str {
-    ""
+fn persist_with(s: &mut Session, save: impl FnOnce(&Path, &Settings) -> std::io::Result<()>) -> &'static str {
+    let Some(path) = s.settings_path.as_deref() else {
+        return SAVE_ERROR;
+    };
+    match save(path, &s.settings) {
+        Ok(()) => "",
+        Err(e) => {
+            eprintln!("Settings could not be saved to {}: {e}", path.display());
+            SAVE_ERROR
+        }
+    }
 }
 
 /// The window is dark for `choice` when Windows is dark or not (`system_dark`).
-#[allow(dead_code)] // Red stub; used from "Implement the settings window".
-fn effective_dark(_choice: ThemeChoice, _system_dark: bool) -> bool {
-    false
+fn effective_dark(choice: ThemeChoice, system_dark: bool) -> bool {
+    choice.forced_dark().unwrap_or(system_dark)
+}
+
+/// Saves the session settings and shows in the flyout whether that worked.
+fn persist(ui: &MainWindow) {
+    let error = SESSION.with_borrow_mut(|s| persist_with(s, settings::save));
+    ui.set_settings_error(error.into());
+}
+
+/// Pushes the session settings into the flyout. The theme itself is applied by `apply_theme`,
+/// which needs the window to exist.
+fn apply_settings(ui: &MainWindow) {
+    let s = SESSION.with_borrow(|s| s.settings.clone());
+    ui.set_theme_choice(s.theme.index());
+    ui.set_unit_choice(s.unit.index());
+}
+
+/// Applies the theme setting: always writes `Palette.color-scheme` (a write cannot be undone, so
+/// Follow Windows writes the system theme too), and Mica with the same dark mode, which also sets
+/// the title bar. An unknown system theme keeps the scheme the window has. The `dark` property
+/// then follows and `theme-changed` redraws the map and the chips.
+fn apply_theme(ui: &MainWindow) {
+    use slint::winit_030::{WinitWindowAccessor, winit::window::Theme as WinitTheme};
+    let choice = SESSION.with_borrow(|s| s.settings.theme);
+    let system = ui.window().with_winit_window(|w| w.theme()).flatten().map(|t| t == WinitTheme::Dark);
+    let dark = effective_dark(choice, system.unwrap_or_else(|| ui.get_dark()));
+    let scheme = if dark { slint::language::ColorScheme::Dark } else { slint::language::ColorScheme::Light };
+    ui.global::<Palette>().set_color_scheme(scheme);
+    if ui.get_mica()
+        && let Err(e) = window_vibrancy::apply_mica(ui.window().window_handle(), Some(dark))
+    {
+        eprintln!("Mica is not available: {e}");
+        ui.set_mica(false);
+    }
+}
+
+/// Syncs every part that shows a size (`sites_after_unit_change`) after the unit changed.
+fn resync_after_unit_change(ui: &MainWindow) {
+    for site in sites_after_unit_change() {
+        match site {
+            Site::Rows => sync_rows(ui),
+            Site::Types => sync_types(ui),
+            Site::Selection => sync_selection(ui),
+            Site::Banner => show_state(ui),
+            Site::Map => relayout(ui),
+            // The start screen lists the drives again each time it shows.
+            Site::Drives if ui.get_start_screen() => refresh_drives(ui),
+            Site::Drives => {}
+        }
+    }
+}
+
+/// Wires the flyout: each choice is applied at once and saved.
+fn wire_settings(ui: &MainWindow) {
+    ui.on_theme_chosen({
+        let weak = ui.as_weak();
+        move |i| {
+            let Some(ui) = weak.upgrade() else { return };
+            let choice = ThemeChoice::from_index(i);
+            SESSION.with_borrow_mut(|s| s.settings.theme = choice);
+            ui.set_theme_choice(choice.index());
+            apply_theme(&ui);
+            persist(&ui);
+        }
+    });
+    ui.on_unit_chosen({
+        let weak = ui.as_weak();
+        move |i| {
+            let Some(ui) = weak.upgrade() else { return };
+            let unit = Unit::from_index(i);
+            SESSION.with_borrow_mut(|s| s.settings.unit = unit);
+            ui.set_unit_choice(unit.index());
+            persist(&ui);
+            resync_after_unit_change(&ui);
+        }
+    });
+}
+
+/// Says in the log how the settings file was read, when it was not read cleanly.
+fn report_load(loaded: &settings::Loaded) {
+    match loaded {
+        settings::Loaded::Fresh | settings::Loaded::Ok => {}
+        settings::Loaded::Partial(fields) => {
+            eprintln!("Settings: these fields were wrong and use their defaults: {}. The file is kept as settings.json.bad.", fields.join(", "));
+        }
+        settings::Loaded::Damaged => eprintln!("Settings: the file could not be read. Defaults are used. The file is kept as settings.json.bad."),
+        settings::Loaded::NotKept => eprintln!("Settings: the file could not be read or kept. Defaults are used and no setting is saved."),
+    }
 }
 
 /// A finished layout of folder `root`: its rects in physical pixels, its picture and its labels.
@@ -365,9 +454,11 @@ fn with_loaded<R>(f: impl FnOnce(&mut Loaded) -> R) -> Option<R> {
 
 /// Rebuilds the visible tree rows and the sort and selection markers.
 fn sync_rows(ui: &MainWindow) {
+    let unit = current_unit();
     let Some((selected, key, descending)) = with_loaded(|l| {
         let rows = tree_view::flatten(&l.data.tree, &l.data.counts, &l.view);
         let selected = l.selected.and_then(|n| tree_view::row_index(&rows, n));
+        l.model.unit.set(unit);
         l.model.set_rows(rows);
         (selected, l.view.key, l.view.descending)
     }) else {
@@ -1396,9 +1487,10 @@ fn sync_types(ui: &MainWindow) {
     ui.set_type_chips(ModelRc::new(VecModel::from(chips)));
 }
 
-/// The unit every size in the window shows in. Task 4 replaces this body with the session's setting.
+/// The unit every size in the window shows in: the session setting. Not to be called while the
+/// session is borrowed (the tree rows keep their own copy, `RowModel::unit`).
 fn current_unit() -> Unit {
-    Unit::Dynamic
+    SESSION.with_borrow(|s| s.settings.unit)
 }
 
 /// The window's form of chip `c`, in its tile colour in `theme`.
@@ -1939,7 +2031,15 @@ fn main() {
     attach_parent_console();
     let args = cli::parse_args(std::env::args().skip(1));
     apply_args(&args);
+    // The settings are read before the first size is formatted (the banner, the drive cards).
+    let path = settings::settings_path();
+    let loaded = path.as_deref().map_or((Settings::default(), settings::Loaded::Fresh), settings::load);
+    report_load(&loaded.1);
+    let settings_error = SESSION.with_borrow_mut(|s| adopt_settings(s, path, loaded));
     let ui = MainWindow::new().expect("create window");
+    ui.set_settings_error(settings_error.into());
+    apply_settings(&ui);
+    wire_settings(&ui);
     // The renderer is chosen when the window is made (winit falls back to software when OpenGL
     // cannot start), so the answer is final here. The notifier counts the frames drawn and starts
     // the folder argument's scan after the first one.
@@ -2013,13 +2113,24 @@ fn main() {
     let weak = ui.as_weak();
     slint::invoke_from_event_loop(move || {
         let Some(ui) = weak.upgrade() else { return };
-        let handle = ui.window().window_handle();
-        if let Err(e) = window_vibrancy::apply_mica(&handle, None) {
-            eprintln!("Mica is not available: {e}");
-            ui.set_mica(false);
-        }
+        apply_theme(&ui);
+        // A change of the Windows theme: winit has just set the title bar to the system theme, so
+        // the setting is applied again, after Slint has seen the event too.
+        use slint::winit_030::{EventResult, WinitWindowAccessor, winit::event::WindowEvent};
+        let weak = ui.as_weak();
+        ui.window().on_winit_window_event(move |_, event| {
+            if matches!(event, WindowEvent::ThemeChanged(_)) {
+                let weak = weak.clone();
+                Timer::single_shot(Duration::ZERO, move || {
+                    if let Some(ui) = weak.upgrade() {
+                        apply_theme(&ui);
+                    }
+                });
+            }
+            EventResult::Propagate
+        });
     })
-    .expect("queue Mica setup");
+    .expect("queue theme and Mica setup");
     // Started with a folder (also by "Restart as administrator"): scan it after the first frame,
     // so the window draws before the walker takes the CPUs. A window that never draws
     // (minimised, hidden) starts it after `LAUNCH_FALLBACK`.
