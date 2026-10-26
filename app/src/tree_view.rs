@@ -236,13 +236,13 @@ pub fn map_note(tree: &Tree, root: NodeId, rects: &[Rect], has_area: bool) -> &'
 /// The label of folder `node` on its frame: (name with a trailing `\`, size), as
 /// `("Local\\", "306.0 GB")`.
 pub fn frame_label(tree: &Tree, node: NodeId) -> (String, String) {
-    (format!("{}\\", display_name(tree.name(node))), crate::model::format_size(tree.node(node).size))
+    (format!("{}\\", display_name(tree.name(node))), crate::model::format_size(tree.node(node).size, crate::model::Unit::Dynamic))
 }
 
 /// The label of file `node` on its tile: (name, size), as `("pagefile.sys", "64.0 GB")`. The
 /// name is kept unchanged; the window cuts it with "…" when it does not fit.
 pub fn file_label(tree: &Tree, node: NodeId) -> (String, String) {
-    (display_name(tree.name(node)).into_owned(), crate::model::format_size(tree.node(node).size))
+    (display_name(tree.name(node)).into_owned(), crate::model::format_size(tree.node(node).size, crate::model::Unit::Dynamic))
 }
 
 /// Text of the crumb that stands for the folders `crumbs` leaves out.
@@ -291,7 +291,7 @@ pub fn tooltip_lines(tree: &Tree, counts: &[u64], node: NodeId) -> (String, Stri
         }
     };
     let path = display_name(&tree.path(node).to_string_lossy()).into_owned();
-    (path, format!("{}. {what}", crate::model::format_size(n.size)))
+    (path, format!("{}. {what}", crate::model::format_size(n.size, crate::model::Unit::Dynamic)))
 }
 
 /// Where a tooltip `size` long starts on one axis of a map `extent` long, for the pointer at
@@ -326,7 +326,7 @@ pub fn row_spoken(name: &str, size: &str, percent: &str, files: u64) -> String {
 /// The value of the treemap for a screen reader: the name and size of `node`, the selected node,
 /// as `"kernel32.dll, 12.0 MB"`. The name goes through `display_name`.
 pub fn map_value(tree: &Tree, node: NodeId) -> String {
-    format!("{}, {}", display_name(tree.name(node)), crate::model::format_size(tree.node(node).size))
+    format!("{}, {}", display_name(tree.name(node)), crate::model::format_size(tree.node(node).size, crate::model::Unit::Dynamic))
 }
 
 /// Order of two siblings: the chosen column, flipped if descending, then name, then id.

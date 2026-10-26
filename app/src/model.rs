@@ -164,8 +164,41 @@ pub fn shows_start(state: &ScanState) -> bool {
     !matches!(state, ScanState::Scanning { .. } | ScanState::Done(_))
 }
 
-/// Binary units, one decimal above 1 KB: `1.5 MB`.
-pub fn format_size(bytes: u64) -> String {
+/// How the window shows a size: `Dynamic` picks the unit per value, the others fix it.
+// Unused until the settings task routes the chosen unit through the window; Task 3 removes the allow.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Unit {
+    #[default]
+    Dynamic,
+    Byte,
+    Kb,
+    Mb,
+    Gb,
+    Tb,
+}
+
+#[allow(dead_code)]
+impl Unit {
+    pub const ALL: [Unit; 6] = [Unit::Dynamic, Unit::Byte, Unit::Kb, Unit::Mb, Unit::Gb, Unit::Tb];
+
+    /// The unit at position `i` in `ALL`; an unknown index is `Dynamic`.
+    pub fn from_index(_i: i32) -> Unit {
+        Unit::Dynamic
+    }
+
+    /// The position of this unit in `ALL`.
+    pub fn index(self) -> i32 {
+        0
+    }
+}
+
+/// Binary units. `Dynamic`: one decimal above 1 KB, `1.5 MB`. A fixed unit: one decimal, digits
+/// grouped, `2,048.0 GB`; a non-empty size below 0.05 of the unit is `< 0.1 GB`.
+pub fn format_size(bytes: u64, unit: Unit) -> String {
+    if unit != Unit::Dynamic {
+        return String::new();
+    }
     const UNITS: [&str; 7] = ["B", "KB", "MB", "GB", "TB", "PB", "EB"];
     if bytes < 1024 {
         return format!("{bytes} B");
@@ -386,7 +419,7 @@ pub fn banner_text(state: &ScanState, offer_elevation: bool) -> String {
             let hint = if offer_elevation && s.method == Method::Walk { " Restart as administrator to scan a whole drive faster." } else { "" };
             format!(
                 "{name}. {} in {} files and {} folders. {} skipped. {}.{hint}",
-                format_size(s.total),
+                format_size(s.total, Unit::Dynamic),
                 group_digits(s.files),
                 group_digits(s.dirs),
                 group_digits(s.skipped),
@@ -422,8 +455,69 @@ mod tests {
             (u64::MAX, "16.0 EB"),
         ];
         for (n, want) in cases {
-            assert_eq!(format_size(n), want, "input {n}");
+            assert_eq!(format_size(n, Unit::Dynamic), want, "input {n}");
         }
+    }
+
+    #[test]
+    fn format_size_dynamic_matches_the_old_values() {
+        let cases: [(u64, &str); 9] = [
+            (0, "0 B"),
+            (1023, "1023 B"),
+            (1024, "1.0 KB"),
+            (1536, "1.5 KB"),
+            (1024 * 1024, "1.0 MB"),
+            (5 * 1024 * 1024 * 1024 / 2, "2.5 GB"),
+            (1024u64.pow(4), "1.0 TB"),
+            (1024u64.pow(5), "1.0 PB"),
+            (u64::MAX, "16.0 EB"),
+        ];
+        for (n, want) in cases {
+            assert_eq!(format_size(n, Unit::Dynamic), want, "input {n}");
+        }
+    }
+
+    #[test]
+    fn format_size_fixed_units_known_values() {
+        let cases: [(u64, Unit, &str); 4] = [
+            (1536, Unit::Kb, "1.5 KB"),
+            (1024 * 1024, Unit::Mb, "1.0 MB"),
+            (2 * 1024u64.pow(4), Unit::Gb, "2,048.0 GB"),
+            (3 * 1024u64.pow(3) / 2, Unit::Mb, "1,536.0 MB"),
+        ];
+        for (n, unit, want) in cases {
+            assert_eq!(format_size(n, unit), want, "input {n} in {unit:?}");
+        }
+    }
+
+    #[test]
+    fn format_size_byte_shows_a_whole_number_with_separators() {
+        assert_eq!(format_size(1_234_567, Unit::Byte), "1,234,567 B");
+        assert_eq!(format_size(u64::MAX, Unit::Byte), "18,446,744,073,709,551,615 B");
+    }
+
+    #[test]
+    fn format_size_tiny_non_empty_file_in_a_big_unit() {
+        let cases: [(u64, Unit, &str); 4] = [
+            (1, Unit::Mb, "< 0.1 MB"),
+            (51, Unit::Kb, "< 0.1 KB"),
+            (52, Unit::Kb, "0.1 KB"),
+            (0, Unit::Mb, "0.0 MB"),
+        ];
+        for (n, unit, want) in cases {
+            assert_eq!(format_size(n, unit), want, "input {n} in {unit:?}");
+        }
+    }
+
+    #[test]
+    fn unit_index_roundtrip_and_unknown_index_is_dynamic() {
+        for (i, unit) in Unit::ALL.into_iter().enumerate() {
+            assert_eq!(unit.index(), i as i32, "{unit:?}");
+            assert_eq!(Unit::from_index(i as i32), unit, "index {i}");
+        }
+        assert_eq!(Unit::from_index(-1), Unit::Dynamic);
+        assert_eq!(Unit::from_index(6), Unit::Dynamic);
+        assert_eq!(Unit::from_index(i32::MAX), Unit::Dynamic);
     }
 
     // ---- group_digits ----

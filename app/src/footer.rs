@@ -1,6 +1,6 @@
 //! File-type footer: the chips for the biggest file types. Plain functions, no Slint types.
 
-use crate::model::{display_name, format_size};
+use crate::model::{Unit, display_name, format_size};
 use crate::tree_view::{format_percent, spoken_percent};
 use std::collections::HashMap;
 use treemap::filetype::{Category, TypeTotal, category_of_ext};
@@ -36,7 +36,7 @@ pub fn chips(totals: &[TypeTotal], total: u64, max: usize) -> Vec<Chip> {
         label,
         percent: format_percent(bytes, total),
         share: (bytes as f64 / total as f64) as f32,
-        size: format_size(bytes),
+        size: format_size(bytes, Unit::Dynamic),
         category,
     };
     let mut top: Vec<&TypeTotal> = totals.iter().filter(|t| t.bytes > 0).collect();

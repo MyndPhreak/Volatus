@@ -1,7 +1,7 @@
 //! The drives the start screen offers: ready fixed and removable drives, with their size.
 //! The Win32 calls sit behind `DriveApi`, so the rules are unit tested with a fake.
 
-use crate::model::format_size;
+use crate::model::{Unit, format_size};
 use std::os::windows::ffi::OsStrExt;
 use std::ptr::null_mut;
 use windows_sys::Win32::Storage::FileSystem::{GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW, QueryDosDeviceW};
@@ -210,7 +210,7 @@ pub fn drive_buttons(drives: &[DriveInfo]) -> Vec<DriveButton> {
             let (detail, used) = match d.space {
                 Some((total, free)) => {
                     let used = if total == 0 || free > total { 0.0 } else { ((total - free) as f64 / total as f64) as f32 };
-                    (format!("{} free of {}", format_size(free), format_size(total)), used)
+                    (format!("{} free of {}", format_size(free, Unit::Dynamic), format_size(total, Unit::Dynamic)), used)
                 }
                 None => ("Size unknown.".to_string(), 0.0),
             };
@@ -481,7 +481,7 @@ mod tests {
         let total = tb * 18 / 10;
         let free = gb * 412;
         let b = one(info('C', "", DriveKind::Fixed, Some((total, free))));
-        assert_eq!(b.detail, format!("{} free of {}", format_size(free), format_size(total)));
+        assert_eq!(b.detail, format!("{} free of {}", format_size(free, Unit::Dynamic), format_size(total, Unit::Dynamic)));
         assert!(b.detail.starts_with("412.0 GB free of 1.8 TB"), "{}", b.detail);
         assert!(b.size_known);
         let want = ((total - free) as f64 / total as f64) as f32;
