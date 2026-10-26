@@ -250,8 +250,10 @@ impl Follow {
 /// HRESULT: a cancel by the user (`user_cancelled`) changed nothing and needs no checks (`None`);
 /// any other result, an error too, gets the checks: the disk decides.
 pub fn after_pick(follow: Follow, disk: impl Fn(&Path) -> Disk, invoke: impl FnOnce() -> i32) -> Option<Follow> {
-    let _ = (follow, disk, invoke);
-    unimplemented!("after_pick")
+    if disk(&follow.path) == Disk::Gone {
+        return Some(follow);
+    }
+    (!user_cancelled(invoke())).then_some(follow)
 }
 
 /// The folder a command prompt opens in for the item at `path`: a folder itself, a file's folder.

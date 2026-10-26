@@ -251,6 +251,8 @@ thread_local! {
     static TIP_TIMER: Timer = Timer::default();
     /// Ends the time of the move of the treemap picture.
     static MOVE_TIMER: Timer = Timer::default();
+    /// Runs the next check after a menu action (`run_follow`).
+    static FOLLOW_TIMER: Timer = Timer::default();
     /// Frames the window has drawn. With `--timing` each move prints how many it took.
     static FRAMES: Cell<u64> = const { Cell::new(0) };
 }
@@ -285,6 +287,7 @@ fn show_state(ui: &MainWindow) {
     let banner = with_options(banner_text(&state, offer), &state, threads, &notices);
     ui.set_banner(append_timing(banner, line.as_deref()).into());
     ui.set_show_elevate(offer);
+    ui.set_outdated(SESSION.with_borrow(|s| rescan_shown(&state, s.outdated)));
     ui.set_scan_title(SESSION.with_borrow(|s| model::scan_title(&s.scan_root)).into());
 }
 
@@ -915,7 +918,26 @@ fn open_menu(ui: &MainWindow, src: Source, hit: Option<NodeId>, at: menu::At) {
         Ok(popup) => popup,
         Err(e) => return eprintln!("The menu cannot open: {e}"),
     };
-    popup.track(owner, window, menu::anchor(at, ui.window().scale_factor(), shell::client_origin(window)));
+    let anchor = menu::anchor(at, ui.window().scale_factor(), shell::client_origin(window));
+    let id = popup.track(owner, window, anchor);
+    match (menu::picked(id), request.prepared) {
+        (menu::Picked::Volatus(menu::Cmd::Rescan), _) => rescan(ui),
+        (menu::Picked::Shell(offset), menu::Prepared::Ready { path, before }) => {
+            let verb = popup.verb(offset);
+            let follow = menu::Follow::new(request.node, request.edits, path, menu::is_delete(verb.as_deref()), before);
+            use windows::Win32::UI::Input::KeyboardAndMouse::{VK_CONTROL, VK_SHIFT};
+            // The keys held now: Shift+Delete deletes for good, as in Explorer.
+            let mask = menu::invoke_mask(shell::key_down(VK_SHIFT), shell::key_down(VK_CONTROL));
+            let point = match anchor {
+                menu::Anchor::Point(x, y) | menu::Anchor::Below { left: x, bottom: y, .. } => (x, y),
+            };
+            if let Some(follow) = menu::after_pick(follow, menu::read_disk, || popup.invoke(offset, window, point, mask)) {
+                SESSION.with_borrow_mut(|s| s.follow = Some(follow));
+                run_follow(ui);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// The tile of the treemap (`rects`, physical pixels) under the view point (x, y) while `moving`
@@ -945,14 +967,12 @@ fn run_action(
 }
 
 /// True when the top bar offers Rescan: a finished scan found changed on disk.
-#[cfg_attr(not(test), expect(dead_code, reason = "the top bar (P4) shows Rescan from it"))]
 fn rescan_shown(state: &ScanState, outdated: bool) -> bool {
     outdated && matches!(state, ScanState::Done(_))
 }
 
 /// The folder a Rescan scans, as typed (`relaunch_path`): the shown scan's root. `None` unless a
 /// scan is finished. The options stay in the session, so the scan runs with the same ones.
-#[cfg_attr(not(test), expect(dead_code, reason = "the Rescan button (P4) calls it"))]
 fn rescan_target() -> Option<String> {
     SESSION.with_borrow(|s| matches!(s.scan.state(), ScanState::Done(_)).then(|| relaunch_path(false, &s.scan_root)))
 }
@@ -974,8 +994,52 @@ enum FollowStep {
 /// `disk`. A decision, or the last check, ends them; so does a scan that was replaced or changed
 /// since the menu (its node id would be stale).
 fn check_follow(disk: impl Fn(&std::path::Path) -> menu::Disk) -> FollowStep {
-    let _ = disk;
-    unimplemented!("check_follow")
+    SESSION.with_borrow_mut(|s| {
+        let Some(mut follow) = s.follow.take() else { return FollowStep::Done };
+        if s.loaded.as_ref().map(|l| l.edits) != Some(follow.edits) {
+            return FollowStep::Done;
+        }
+        match follow.step(&disk(&follow.path)) {
+            (menu::Outcome::Remove, _) => FollowStep::Remove(follow.node),
+            (menu::Outcome::Outdated, _) => {
+                s.outdated = true;
+                FollowStep::Outdated
+            }
+            (menu::Outcome::Wait, Some(delay)) => {
+                s.follow = Some(follow);
+                FollowStep::Again(delay)
+            }
+            _ => FollowStep::Done,
+        }
+    })
+}
+
+/// Runs the checks after a menu action (`check_follow`) until one decides: the deleted node leaves
+/// the map, or the top bar says the scan is outdated. The next check runs on `FOLLOW_TIMER`.
+fn run_follow(ui: &MainWindow) {
+    match check_follow(menu::read_disk) {
+        FollowStep::Remove(n) => removed(ui, n),
+        FollowStep::Outdated => show_state(ui),
+        FollowStep::Again(delay) => {
+            let weak = ui.as_weak();
+            FOLLOW_TIMER.with(|t| {
+                t.start(TimerMode::SingleShot, delay, move || {
+                    if let Some(ui) = weak.upgrade() {
+                        run_follow(&ui);
+                    }
+                })
+            });
+        }
+        FollowStep::Done => {}
+    }
+}
+
+/// Rescan: scans the shown scan's root again, with the same options (`rescan_target`). The new
+/// scan drops the outdated mark and the pending checks (`forget_scan`).
+fn rescan(ui: &MainWindow) {
+    if let Some(path) = rescan_target() {
+        start_scan(ui, &path);
+    }
 }
 
 /// Replaces the shown scan with a new one.
@@ -1008,7 +1072,6 @@ fn install(ui: &MainWindow, data: Arc<Data>) {
 /// ancestor and its file types off the footer totals, and drops the rects of its subtree. Returns
 /// where the selection and the treemap go; `None`, and nothing changes, for the root or a node
 /// that is already removed.
-#[cfg_attr(not(test), expect(dead_code, reason = "the context menu calls it (P4)"))]
 fn remove_node(l: &mut Loaded, n: NodeId) -> Option<AfterRemoval> {
     let tree = &l.data.tree;
     // Checked first: a call that removes nothing must not copy the data.
@@ -1069,7 +1132,6 @@ enum Removal {
 /// The session part of a deletion of `n` on disk: removes it (`remove_node`), selects its parent,
 /// shows the parent when the shown folder went with it, and drops the picture kept for a zoom and
 /// the folder a zoom out starts from. The scan root goes back to the start screen.
-#[cfg_attr(not(test), expect(dead_code, reason = "called by removed, which the context menu calls (P4)"))]
 fn apply_removal(n: NodeId) -> Removal {
     SESSION.with_borrow_mut(|s| {
         let Some(l) = s.loaded.as_mut() else { return Removal::Nothing };
@@ -1093,7 +1155,6 @@ const ROOT_GONE: &str = "The scanned folder was deleted.";
 /// Node `n` of the shown scan was deleted on disk (`apply_removal`): the tree rows, the treemap,
 /// the selection and the footer show the scan without it, or the start screen shows when it was
 /// the scan root. Nothing is scanned again. With `--timing` it prints the time it took.
-#[expect(dead_code, reason = "the context menu calls it (P4)")]
 fn removed(ui: &MainWindow, n: NodeId) {
     let started = Instant::now();
     match apply_removal(n) {
@@ -1176,7 +1237,6 @@ fn store_totals(generation: u64, data: &Arc<Data>, edits: u64, totals: Vec<TypeT
 
 /// The file types `gone` (those of a removed subtree) left the shown tree: they come off the
 /// totals. While the totals are counted, nothing comes off: that count is late (`store_totals`).
-#[cfg_attr(not(test), expect(dead_code, reason = "called by remove_node, which the context menu calls (P4)"))]
 fn drop_types(l: &mut Loaded, gone: &[TypeTotal]) {
     l.edits += 1;
     if let Some(totals) = l.totals.as_mut() {
@@ -1761,6 +1821,14 @@ fn main() {
         move |root| {
             if let Some(ui) = weak.upgrade() {
                 start_scan(&ui, &root);
+            }
+        }
+    });
+    ui.on_rescan({
+        let weak = ui.as_weak();
+        move || {
+            if let Some(ui) = weak.upgrade() {
+                rescan(&ui);
             }
         }
     });

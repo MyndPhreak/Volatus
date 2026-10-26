@@ -59,7 +59,6 @@ pub fn chips(totals: &[TypeTotal], total: u64, max: usize) -> Vec<Chip> {
 /// `totals` less the totals `gone` of a removed subtree, per extension: bytes and files go down;
 /// an extension left with no file is dropped. Sorted as `type_totals` sorts: bytes descending,
 /// then ext ascending.
-#[cfg_attr(not(test), expect(dead_code, reason = "called by remove_node, which the context menu calls (P4)"))]
 pub fn subtract(totals: &[TypeTotal], gone: &[TypeTotal]) -> Vec<TypeTotal> {
     let gone: HashMap<&str, (u64, u64)> = gone.iter().map(|g| (g.ext.as_str(), (g.bytes, g.files))).collect();
     let mut left: Vec<TypeTotal> = totals

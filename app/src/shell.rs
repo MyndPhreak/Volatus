@@ -20,22 +20,22 @@
 use crate::menu::{Anchor, Item, SHELL_FIRST, SHELL_LAST};
 use std::cell::{Cell, RefCell};
 use std::path::Path;
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{E_FAIL, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{ClientToScreen, ScreenToClient};
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoTaskMemFree};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, GetKeyState, SetFocus, VIRTUAL_KEY};
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::Shell::{
-    DefSubclassProc, GCS_VERBW, IContextMenu, IContextMenu2, IContextMenu3, IShellFolder, RemoveWindowSubclass, SHBindToParent,
+    CMINVOKECOMMANDINFO, CMINVOKECOMMANDINFOEX, DefSubclassProc, GCS_VERBW, IContextMenu, IContextMenu2, IContextMenu3, IShellFolder, RemoveWindowSubclass, SHBindToParent,
     SHParseDisplayName, SetWindowSubclass,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, GWLP_HINSTANCE, GetCursorPos, GetWindowLongPtrW,
-    HMENU, IDC_WAIT, InsertMenuW, LoadCursorW, MF_BYPOSITION, MF_GRAYED, MF_SEPARATOR, MF_STRING, RegisterClassW,
+    HMENU, IDC_WAIT, InsertMenuW, LoadCursorW, MF_BYPOSITION, MF_GRAYED, MF_SEPARATOR, MF_STRING, RegisterClassW, SW_SHOWNORMAL,
     SendMessageW, SetCursor, TPM_RETURNCMD, TPM_RIGHTBUTTON, TPM_VERTICAL, TPMPARAMS, TrackPopupMenuEx, WINDOW_EX_STYLE, WM_DRAWITEM, WM_INITMENUPOPUP,
     WM_MEASUREITEM, WM_MENUCHAR, WM_MOUSEMOVE, WM_NCDESTROY, WNDCLASSW, WS_POPUP,
 };
-use windows::core::{HSTRING, Interface, PCWSTR, PSTR, w};
+use windows::core::{HSTRING, Interface, PCSTR, PCWSTR, PSTR, w};
 
 /// Id of the subclass of the Slint window.
 const SUBCLASS_ID: usize = 1;
@@ -146,7 +146,6 @@ impl Popup {
 
     /// The canonical verb of the shell item at `offset` from `SHELL_FIRST` (`GCS_VERBW`), or `None`
     /// when the shell gives none (an error or an empty verb).
-    #[cfg_attr(not(test), expect(dead_code, reason = "P4.T3 reads the verb of the picked item"))]
     pub fn verb(&self, offset: u32) -> Option<String> {
         let cm = self.shell.as_ref()?;
         let mut buf = [0u16; 260];
@@ -176,6 +175,32 @@ impl Popup {
         ACTIVE.with_borrow_mut(|a| *a = None);
         after_menu(window);
         id
+    }
+}
+
+impl Popup {
+    /// Runs the shell item at `offset` from `SHELL_FIRST` with the window `window` as the owner of
+    /// its dialogs, the point `at` (screen) and the `fMask` `mask` (`menu::invoke_mask`). Gives
+    /// its HRESULT (`E_FAIL` with no shell menu). It returns when the item is done: a delete only
+    /// after the item is gone or the user cancelled (spike S7).
+    pub fn invoke(&self, offset: u32, window: HWND, at: (i32, i32), mask: u32) -> i32 {
+        let Some(cm) = self.shell.as_ref() else { return E_FAIL.0 };
+        // The verb as an id (MAKEINTRESOURCE): the offset in the low word of the pointer.
+        let info = CMINVOKECOMMANDINFOEX {
+            cbSize: size_of::<CMINVOKECOMMANDINFOEX>() as u32,
+            fMask: mask,
+            hwnd: window,
+            lpVerb: PCSTR(offset as usize as *const u8),
+            lpVerbW: PCWSTR(offset as usize as *const u16),
+            nShow: SW_SHOWNORMAL.0,
+            ptInvoke: POINT { x: at.0, y: at.1 },
+            ..Default::default()
+        };
+        // SAFETY: `info` is a CMINVOKECOMMANDINFOEX (its size in cbSize), as CMIC_MASK_UNICODE asks.
+        match unsafe { cm.InvokeCommand(&info as *const CMINVOKECOMMANDINFOEX as *const CMINVOKECOMMANDINFO) } {
+            Ok(()) => 0,
+            Err(e) => e.code().0,
+        }
     }
 }
 

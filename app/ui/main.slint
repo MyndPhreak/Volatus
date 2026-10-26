@@ -115,6 +115,8 @@ export component MainWindow inherits Window {
     in property <string> admin-note;
     /// A scan is finished: "New scan" is offered.
     in property <bool> show-new-scan;
+    /// The shown scan changed on disk after a menu action: the top bar offers Rescan.
+    in property <bool> outdated;
     /// The drive or folder of the shown scan, as typed, for the top bar.
     in property <string> scan-title;
 
@@ -175,6 +177,8 @@ export component MainWindow inherits Window {
     callback scan-drive(string);
     callback choose-folder();
     callback new-scan();
+    /// Scans the shown scan's folder again, with the same options.
+    callback rescan();
     callback cancel();
     callback tree-select(int);
     callback tree-toggle(int);
@@ -284,6 +288,16 @@ export component MainWindow inherits Window {
                         text: "Restart as administrator";
                         enabled: !root.scanning;
                         clicked => { root.restart-admin(); }
+                    }
+                    if root.outdated : Text {
+                        text: "Files changed after this scan.";
+                        vertical-alignment: center;
+                        color: Glass.dim;
+                        accessible-role: text;
+                    }
+                    if root.outdated : Button {
+                        text: "Rescan";
+                        clicked => { root.rescan(); }
                     }
                 }
             }
