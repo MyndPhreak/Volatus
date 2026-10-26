@@ -2496,6 +2496,49 @@ mod tests {
         }
     }
 
+    #[test]
+    fn remove_node_of_the_shown_folder_drops_every_rect() {
+        let mut l = loaded_typed();
+        l.rects = treemap::layout_framed(&l.data.tree, DOCS, 100, 100, Chrome::scaled(1.0));
+        (l.view_root, l.shown_root) = (DOCS, Some(DOCS));
+        assert!(!l.rects.is_empty());
+
+        remove_node(&mut l, DOCS);
+
+        assert!(l.rects.is_empty(), "{:?}", l.rects);
+    }
+
+    #[test]
+    fn remove_node_random_removals_on_a_real_layout_keep_exactly_the_attached_rects() {
+        let mut seed: u64 = 0x0BAD_CAFE;
+        let mut roll = |n: u64| {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 33) % n.max(1)
+        };
+        for t in 0..300 {
+            let mut l = loaded(&random_data(&mut (roll(u64::MAX) + 1)));
+            let tree = &l.data.tree;
+            let folders: Vec<NodeId> = (0..l.data.counts.len() as u32).map(NodeId).filter(|&n| tree.node(n).is_dir).collect();
+            let shown = folders[roll(folders.len() as u64) as usize];
+            l.rects = treemap::layout_framed(tree, shown, 640, 480, Chrome::scaled(1.0));
+            (l.view_root, l.shown_root) = (shown, Some(shown));
+            for k in 0..1 + roll(8) {
+                // Mostly drawn nodes, sometimes the shown folder or any node.
+                let n = match roll(4) {
+                    0 => shown,
+                    1 => NodeId(roll(l.data.counts.len() as u64) as u32),
+                    _ => l.rects.get(roll(l.rects.len() as u64) as usize).map_or(shown, |r| r.node),
+                };
+                let before = l.rects.clone();
+
+                remove_node(&mut l, n);
+
+                let want: Vec<Rect> = before.into_iter().filter(|r| l.data.tree.is_attached(r.node)).collect();
+                assert_eq!(l.rects, want, "tree {t}, removal {k} of {n:?}, shown {shown:?}");
+            }
+        }
+    }
+
     // ---- removed ----
     #[test]
     fn remove_node_of_the_root_is_none_and_changes_nothing() {
