@@ -32,14 +32,38 @@ pub struct Node {
 }
 
 /// Flat arena of nodes plus one shared name buffer.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Tree {
     pub(crate) nodes: Vec<Node>,
     pub(crate) names: String,
     pub(crate) root: NodeId,
 }
 
+/// What `Tree::remove` took out of the tree: the folder the node was in and the node's totals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Removed {
+    pub parent: NodeId,
+    /// `size` of the removed node: taken off every ancestor.
+    pub size: u64,
+    /// `allocated` of the removed node: taken off every ancestor.
+    pub allocated: u64,
+}
+
 impl Tree {
+    /// Unlinks `n` from its parent's child list and takes its `size` and `allocated` off every
+    /// ancestor, the root included. The node and its subtree stay in the arena, detached
+    /// (`is_attached` is false for each); the other children keep their order. `None`, and
+    /// nothing changes, for the root or a node that is already detached.
+    pub fn remove(&mut self, n: NodeId) -> Option<Removed> {
+        let _ = n;
+        unimplemented!("P2.T1: Tree::remove")
+    }
+
+    /// True when `n` is the root or its chain of parents reaches the root.
+    pub fn is_attached(&self, n: NodeId) -> bool {
+        let _ = n;
+        unimplemented!("P2.T1: Tree::is_attached")
+    }
     pub fn root(&self) -> NodeId {
         self.root
     }
@@ -265,4 +289,122 @@ pub fn scan_with(
     let route = route(whole_volume, opts.method);
     let for_mft = progress.clone();
     scan_routed(root, progress, cancel, opts, route, || mft::scan(root, &for_mft, cancel, opts.chunk))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{NodeId, Removed, Tree};
+    use crate::rollup::{RawEntry, rollup};
+
+    // root(0)
+    //   a(1)      a1(4)=100/104  a2(5)=50/56  sub(6){ s1(7)=30/32 }
+    //   b(2)      b1(8)=400/400
+    //   c(3)=10/16 (file)
+    // Node ids follow the entry order (every entry is reachable).
+    fn sample() -> Tree {
+        let e = |id: u64, parent: u64, name: &str, size: u64, allocated: u64, is_dir: bool| RawEntry {
+            id,
+            parent,
+            name: name.into(),
+            size,
+            allocated,
+            is_dir,
+        };
+        let entries = vec![
+            e(0, 0, "root", 0, 0, true),
+            e(1, 0, "a", 0, 0, true),
+            e(2, 0, "b", 0, 0, true),
+            e(3, 0, "c", 10, 16, false),
+            e(4, 1, "a1", 100, 104, false),
+            e(5, 1, "a2", 50, 56, false),
+            e(6, 1, "sub", 0, 0, true),
+            e(7, 6, "s1", 30, 32, false),
+            e(8, 2, "b1", 400, 400, false),
+        ];
+        rollup(0, entries).unwrap().tree
+    }
+
+    const ROOT: NodeId = NodeId(0);
+    const A: NodeId = NodeId(1);
+    const B: NodeId = NodeId(2);
+    const C: NodeId = NodeId(3);
+    const A1: NodeId = NodeId(4);
+    const A2: NodeId = NodeId(5);
+    const SUB: NodeId = NodeId(6);
+    const S1: NodeId = NodeId(7);
+    const B1: NodeId = NodeId(8);
+
+    fn kids(tree: &Tree, n: NodeId) -> Vec<NodeId> {
+        tree.children(n).collect()
+    }
+
+    fn totals(tree: &Tree, n: NodeId) -> (u64, u64) {
+        (tree.node(n).size, tree.node(n).allocated)
+    }
+
+    #[test]
+    fn remove_first_middle_or_last_child_unlinks_it_and_keeps_the_others_in_order() {
+        let cases = [(A1, vec![A2, SUB]), (A2, vec![A1, SUB]), (SUB, vec![A1, A2])];
+        for (gone, want) in cases {
+            let mut tree = sample();
+
+            tree.remove(gone);
+
+            assert_eq!(kids(&tree, A), want, "removed {gone:?}");
+        }
+    }
+
+    #[test]
+    fn remove_subtracts_size_and_allocated_from_every_ancestor_root_included() {
+        let mut tree = sample();
+
+        let removed = tree.remove(S1);
+
+        assert_eq!(removed, Some(Removed { parent: SUB, size: 30, allocated: 32 }));
+        assert_eq!([totals(&tree, SUB), totals(&tree, A), totals(&tree, ROOT)], [(0, 0), (150, 160), (560, 576)]);
+    }
+
+    #[test]
+    fn remove_of_a_folder_detaches_every_node_under_it_and_siblings_stay_attached() {
+        let mut tree = sample();
+
+        tree.remove(A);
+
+        let attached: Vec<bool> = [A, A1, A2, SUB, S1, B, B1, C, ROOT].iter().map(|&n| tree.is_attached(n)).collect();
+        assert_eq!(attached, [false, false, false, false, false, true, true, true, true]);
+    }
+
+    #[test]
+    fn remove_of_the_root_or_a_detached_node_is_none_and_changes_nothing() {
+        for gone in [ROOT, SUB, S1] {
+            let mut tree = sample();
+            tree.remove(A);
+            let before = format!("{tree:?}");
+
+            let removed = tree.remove(gone);
+
+            assert_eq!((removed, format!("{tree:?}")), (None, before), "removed {gone:?}");
+        }
+    }
+
+    #[test]
+    fn remove_child_then_its_parent_takes_only_the_parent_remaining_size_off_the_ancestors() {
+        let mut tree = sample();
+        tree.remove(A1);
+
+        let removed = tree.remove(A);
+
+        assert_eq!(removed, Some(Removed { parent: ROOT, size: 80, allocated: 88 }));
+        assert_eq!(totals(&tree, ROOT), (410, 416));
+    }
+
+    #[test]
+    fn path_of_a_surviving_node_is_unchanged_after_a_removal() {
+        let mut tree = sample();
+        let before = [tree.path(B1), tree.path(C), tree.path(S1)];
+
+        tree.remove(A2);
+
+        assert_eq!([tree.path(B1), tree.path(C), tree.path(S1)], before);
+    }
 }

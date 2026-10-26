@@ -55,6 +55,14 @@ pub fn chips(totals: &[TypeTotal], total: u64, max: usize) -> Vec<Chip> {
     out
 }
 
+/// `totals` less the totals `gone` of a removed subtree, per extension: bytes and files go down;
+/// an extension left with no file is dropped. Sorted as `type_totals` sorts: bytes descending,
+/// then ext ascending.
+pub fn subtract(totals: &[TypeTotal], gone: &[TypeTotal]) -> Vec<TypeTotal> {
+    let _ = (totals, gone);
+    unimplemented!("P2.T2: footer::subtract")
+}
+
 /// What a screen reader says for chip `c`: ".dll, 10.5 percent, 12.3 GB".
 pub fn spoken(c: &Chip) -> String {
     format!("{}, {}, {}", c.label, spoken_percent(&c.percent), c.size)

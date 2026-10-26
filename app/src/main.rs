@@ -33,7 +33,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
-use tree_view::{Row, SortKey, ViewState};
+use tree_view::{AfterRemoval, Row, SortKey, ViewState};
 use treemap::{Chrome, Frame, Rect, Theme};
 
 slint::include_modules!();
@@ -837,6 +837,16 @@ fn install(ui: &MainWindow, data: Arc<Data>) {
     sync_rows(ui);
     relayout(ui);
     count_types(ui, data);
+}
+
+/// Removes `n` from the shown scan, as it was deleted on disk: unlinks it from the tree (in place
+/// unless a worker holds the data, `Arc::make_mut`), takes its files off the file count of every
+/// ancestor and its file types off the footer totals, and drops the rects of its subtree. Returns
+/// where the selection and the treemap go; `None`, and nothing changes, for the root or a node
+/// that is already removed.
+fn remove_node(l: &mut Loaded, n: NodeId) -> Option<AfterRemoval> {
+    let _ = (l, n);
+    unimplemented!("P2.T3: remove_node")
 }
 
 /// Counts the file types of the scan for the footer on its own worker thread, started after the
