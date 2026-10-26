@@ -190,6 +190,20 @@ export component MainWindow inherits Window {
     callback theme-chosen(int);
     /// A unit was chosen in the flyout. The argument is its index, as in `unit-choice`.
     callback unit-chosen(int);
+    /// The parts of the window that show. The host writes them from the settings.
+    in property <bool> show-header: true;
+    in property <bool> show-tree: true;
+    in property <bool> show-strip: true;
+    in property <bool> show-chips: true;
+    in property <bool> show-labels: true;
+    /// Height of the footer panel (the host's `footer_height`): 0 hides it.
+    in property <length> footer-height: 48px;
+    /// A part was shown (true) or hidden (false) in the flyout. The first argument is its index in
+    /// the host's `Part::ALL`: 0 header, 1 folder tree, 2 file types strip, 3 file type chips,
+    /// 4 tile labels.
+    callback part-toggled(int, bool);
+    /// A row of the folder tree has the keyboard focus.
+    out property <bool> tree-has-focus: tree-focus.has-focus;
 
     /// A drive button was used. The argument is the drive root, such as "C:\".
     callback scan-drive(string);
@@ -249,6 +263,11 @@ export component MainWindow inherits Window {
     /// The move of the picture over the treemap starts now.
     public function start-zoom() {
         map.start-zoom();
+    }
+
+    /// Gives the map the keyboard focus.
+    public function focus-map() {
+        map.focus-map();
     }
 
     /// Scrolls the file tree so row `i` is inside the view.
@@ -338,7 +357,9 @@ export component MainWindow inherits Window {
                     horizontal-stretch: 1;
                     alignment: center;
                     padding-left: 4px;
+                    // "Header" hides only these two texts; the bar keeps its height and buttons.
                     Text {
+                        visible: root.show-header;
                         text: root.scan-title;
                         font-weight: 600;
                         overflow: elide;
@@ -346,6 +367,7 @@ export component MainWindow inherits Window {
                     }
                     // Two lines at most, so the timing line still shows in a narrow window.
                     Text {
+                        visible: root.show-header;
                         text: root.banner;
                         font-size: 12px;
                         max-height: 32px;
@@ -375,14 +397,19 @@ export component MainWindow inherits Window {
             }
 
             HorizontalLayout {
-                spacing: Glass.gap;
+                // No gap beside a hidden sidebar: the map takes its room.
+                spacing: root.show-tree ? Glass.gap : 0px;
                 // Sidebar: the file tree. Each pane has `preferred-width: 0px`, so the free space is
                 // shared 27 : 73 (a layout cannot take a width from the window width itself); the
-                // sidebar never goes under 340 px.
+                // sidebar never goes under 340 px. Hidden, it stays in the tree with no width (not
+                // `if`), so the list keeps its scroll position.
                 GlassPanel {
-                    horizontal-stretch: 27;
+                    visible: root.show-tree;
+                    horizontal-stretch: root.show-tree ? 27 : 0;
                     preferred-width: 0px;
-                    min-width: 340px;
+                    min-width: root.show-tree ? 340px : 0px;
+                    // A length has no "no limit" value, so shown it gets one that no screen reaches.
+                    max-width: root.show-tree ? 100000px : 0px;
                     VerticalLayout {
                         padding: 4px;
                         // The right padding keeps the last header over its column: the rows leave
@@ -536,8 +563,9 @@ export component MainWindow inherits Window {
                             source: root.treemap;
                             note: root.map-note;
                             value: root.map-value;
-                            labels: root.labels;
-                            file-labels: root.file-labels;
+                            // "Tile labels" hides the names on tiles and frames; hover and tooltips stay.
+                            labels: root.show-labels ? root.labels : [];
+                            file-labels: root.show-labels ? root.file-labels : [];
                             layout-width: root.layout-width;
                             layout-height: root.layout-height;
                             has-selection: root.has-selection;
@@ -576,10 +604,13 @@ export component MainWindow inherits Window {
             // File-type footer, the full width: a strip with one part per type and the chips under
             // it, in the tile colours. Always there and always the same height, so the map keeps its
             // size when a scan is shown or the chips arrive (a size change would lay the map out a
-            // second time).
-            GlassPanel {
-                height: 48px;
+            // second time). It changes size only when the strip and the chips are both hidden or
+            // shown (the host's `footer_height`); then it leaves the layout, with its gap.
+            if root.footer-height > 0 : GlassPanel {
+                height: root.footer-height;
                 VerticalLayout {
+                    // With one row hidden, the other stays in the middle of the panel.
+                    alignment: center;
                     padding-left: 10px;
                     padding-right: 10px;
                     padding-top: 8px;
@@ -593,7 +624,7 @@ export component MainWindow inherits Window {
                         color: Glass.dim;
                         accessible-role: text;
                     }
-                    if !root.types-counting && root.type-chips.length > 0 : Rectangle {
+                    if root.show-strip && !root.types-counting && root.type-chips.length > 0 : Rectangle {
                         height: 10px;
                         border-radius: 3px;
                         clip: true;
@@ -607,7 +638,7 @@ export component MainWindow inherits Window {
                             }
                         }
                     }
-                    if !root.types-counting && root.type-chips.length > 0 : HorizontalLayout {
+                    if root.show-chips && !root.types-counting && root.type-chips.length > 0 : HorizontalLayout {
                         height: 16px;
                         spacing: 12px;
                         alignment: start;
@@ -643,8 +674,10 @@ export component MainWindow inherits Window {
             theme-choice: root.theme-choice;
             unit-choice: root.unit-choice;
             error: root.settings-error;
+            shown: [root.show-header, root.show-tree, root.show-strip, root.show-chips, root.show-labels];
             theme-chosen(i) => { root.theme-chosen(i); }
             unit-chosen(i) => { root.unit-chosen(i); }
+            part-toggled(i, on) => { root.part-toggled(i, on); }
             close => {
                 root.settings-open = false;
                 gear.take-focus();

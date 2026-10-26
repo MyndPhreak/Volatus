@@ -59,8 +59,7 @@ pub enum Part {
 }
 
 impl Part {
-    // Read by the "Show" group of the flyout (Task 5); only tests use it before that.
-    #[allow(dead_code)]
+    /// The order of the window's `show-*` properties and of `part-toggled`'s index.
     pub const ALL: [Part; 5] = [Part::Header, Part::Tree, Part::Strip, Part::Chips, Part::Labels];
 }
 
@@ -90,8 +89,6 @@ impl Default for Settings {
 }
 
 impl Settings {
-    // Read by the "Show" group of the flyout (Task 5); only tests use it before that.
-    #[allow(dead_code)]
     pub fn shown(&self, p: Part) -> bool {
         match p {
             Part::Header => self.show_header,

@@ -266,8 +266,6 @@ fn effective_dark(choice: ThemeChoice, system_dark: bool) -> bool {
 
 /// Where the keyboard focus is, as far as hiding a part cares.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-// Task 5 green wires it.
-#[allow(dead_code)]
 enum Focus {
     /// A row of the folder tree.
     Tree,
@@ -278,34 +276,41 @@ enum Focus {
 }
 
 /// Height of the footer panel, in logical pixels: 0 when the strip and the chips are both hidden.
-// Task 5 green wires it.
-#[allow(dead_code)]
-fn footer_height(_strip: bool, _chips: bool) -> f32 {
-    48.0
+fn footer_height(strip: bool, chips: bool) -> f32 {
+    if strip || chips { 48.0 } else { 0.0 }
 }
 
 /// Where the focus goes when `part` is hidden while the focus is at `focus`. A hidden tree must not
 /// keep the focus: it goes to the map, so the arrow keys still move the selection.
-// Task 5 green wires it.
-#[allow(dead_code)]
-fn focus_after_hide(_part: Part, focus: Focus) -> Focus {
-    focus
+fn focus_after_hide(part: Part, focus: Focus) -> Focus {
+    match (part, focus) {
+        (Part::Tree, Focus::Tree) => Focus::Map,
+        _ => focus,
+    }
 }
 
 /// The values of the window's `show-header`, `show-tree`, `show-strip`, `show-chips` and
 /// `show-labels`, in `Part::ALL` order.
-// Task 5 green wires it.
-#[allow(dead_code)]
-fn show_flags(_s: &Settings) -> [bool; 5] {
-    [true; 5]
+fn show_flags(s: &Settings) -> [bool; 5] {
+    Part::ALL.map(|p| s.shown(p))
 }
 
 /// Shows or hides `part` in the session settings, then saves them with `save`. Returns the text
 /// for `settings-error`, as `persist_with` does.
-// Task 5 green wires it.
-#[allow(dead_code)]
-fn toggle_part_with(_s: &mut Session, _part: Part, _on: bool, _save: impl FnOnce(&Path, &Settings) -> std::io::Result<()>) -> &'static str {
-    ""
+fn toggle_part_with(s: &mut Session, part: Part, on: bool, save: impl FnOnce(&Path, &Settings) -> std::io::Result<()>) -> &'static str {
+    s.settings.set_shown(part, on);
+    persist_with(s, save)
+}
+
+/// Writes the five `show-*` properties and the footer height from the session settings.
+fn apply_shown(ui: &MainWindow) {
+    let [header, tree, strip, chips, labels] = SESSION.with_borrow(|s| show_flags(&s.settings));
+    ui.set_show_header(header);
+    ui.set_show_tree(tree);
+    ui.set_show_strip(strip);
+    ui.set_show_chips(chips);
+    ui.set_show_labels(labels);
+    ui.set_footer_height(footer_height(strip, chips));
 }
 
 /// Saves the session settings and shows in the flyout whether that worked.
@@ -320,6 +325,7 @@ fn apply_settings(ui: &MainWindow) {
     let s = SESSION.with_borrow(|s| s.settings.clone());
     ui.set_theme_choice(s.theme.index());
     ui.set_unit_choice(s.unit.index());
+    apply_shown(ui);
 }
 
 /// Applies the theme setting: always writes `Palette.color-scheme` (a write cannot be undone, so
@@ -379,6 +385,22 @@ fn wire_settings(ui: &MainWindow) {
             ui.set_unit_choice(unit.index());
             persist(&ui);
             resync_after_unit_change(&ui);
+        }
+    });
+    // A part shown or hidden: the layout change reaches the map through `treemap-resized`.
+    ui.on_part_toggled({
+        let weak = ui.as_weak();
+        move |i, on| {
+            let Some(ui) = weak.upgrade() else { return };
+            let Some(part) = usize::try_from(i).ok().and_then(|i| Part::ALL.get(i).copied()) else { return };
+            let error = SESSION.with_borrow_mut(|s| toggle_part_with(s, part, on, settings::save));
+            ui.set_settings_error(error.into());
+            apply_shown(&ui);
+            let focus = if ui.get_tree_has_focus() { Focus::Tree } else { Focus::Other };
+            let next = if on { focus } else { focus_after_hide(part, focus) };
+            if next != focus && next == Focus::Map {
+                ui.invoke_focus_map();
+            }
         }
     });
 }

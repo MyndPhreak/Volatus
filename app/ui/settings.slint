@@ -51,7 +51,8 @@ component Choice inherits Rectangle {
     in property <string> text;
     in property <bool> selected;
     callback chosen();
-    height: 28px;
+    // 24 px, not 28: with the "Show" group the flyout must fit a window of the 600 px minimum height.
+    height: 24px;
     border-radius: 4px;
     background: touch.has-hover ? Palette.alternate-background : transparent;
     border-width: focus.has-focus ? 2px : 0px;
@@ -106,13 +107,76 @@ component Choice inherits Rectangle {
     }
 }
 
+/// One part of the window that shows or not: a switch and the part's name.
+component PartSwitch inherits Rectangle {
+    in property <string> text;
+    in property <bool> on;
+    /// The user changed the switch. The argument is the new value.
+    callback toggled(bool);
+    height: 24px;
+    border-radius: 4px;
+    background: touch.has-hover ? Palette.alternate-background : transparent;
+    border-width: focus.has-focus ? 2px : 0px;
+    border-color: Palette.accent-background;
+    focus := FocusScope {
+        accessible-role: switch;
+        accessible-label: root.text;
+        accessible-checkable: true;
+        accessible-checked: root.on;
+        accessible-action-default => { root.toggled(!root.on); }
+        key-pressed(event) => {
+            if (event.text == Key.Return || event.text == " ") {
+                root.toggled(!root.on);
+                return accept;
+            }
+            return reject;
+        }
+        HorizontalLayout {
+            padding-left: 8px;
+            padding-right: 8px;
+            spacing: 8px;
+            VerticalLayout {
+                alignment: center;
+                // The track, and the knob at its right end when the part shows.
+                Rectangle {
+                    width: 28px;
+                    height: 14px;
+                    border-radius: 7px;
+                    border-width: 1px;
+                    border-color: root.on ? Palette.accent-background : Glass.dim;
+                    background: root.on ? Palette.accent-background : transparent;
+                    Rectangle {
+                        x: root.on ? parent.width - self.width - 3px : 3px;
+                        width: 8px;
+                        height: 8px;
+                        border-radius: 4px;
+                        background: root.on ? Palette.accent-foreground : Glass.dim;
+                    }
+                }
+            }
+            Text {
+                text: root.text;
+                vertical-alignment: center;
+                overflow: elide;
+                accessible-role: none;
+            }
+        }
+        touch := TouchArea {
+            clicked => {
+                focus.focus();
+                root.toggled(!root.on);
+            }
+        }
+    }
+}
+
 /// The name of a group of choices.
 component GroupTitle inherits Text {
     font-weight: 600;
     accessible-role: text;
 }
 
-/// The settings flyout: the theme and the unit of sizes. It takes the keyboard focus when it
+/// The settings flyout: the theme, the unit of sizes and the parts that show. It takes the keyboard focus when it
 /// opens; Esc closes it.
 export component SettingsFlyout inherits GlassPanel {
     /// The chosen theme: 0 Follow Windows, 1 Light, 2 Dark (the host's `ThemeChoice` order).
@@ -121,8 +185,13 @@ export component SettingsFlyout inherits GlassPanel {
     in property <int> unit-choice;
     /// Why the settings are not saved, or "".
     in property <string> error;
+    /// Which parts show, in the host's `Part::ALL` order: header, folder tree, file types strip,
+    /// file type chips, tile labels.
+    in property <[bool]> shown;
     callback theme-chosen(int);
     callback unit-chosen(int);
+    /// Part `i` (an index in `shown`) was shown (true) or hidden (false).
+    callback part-toggled(int, bool);
     callback close();
 
     init => {
@@ -165,6 +234,13 @@ export component SettingsFlyout inherits GlassPanel {
                 text: name;
                 selected: i == root.unit-choice;
                 chosen => { root.unit-chosen(i); }
+            }
+            Rectangle { height: 6px; }
+            GroupTitle { text: "Show"; }
+            for name[i] in ["Header", "Folder tree", "File types strip", "File type chips", "Tile labels"] : PartSwitch {
+                text: name;
+                on: root.shown[i];
+                toggled(on) => { root.part-toggled(i, on); }
             }
             if root.error != "" : Text {
                 text: root.error;
