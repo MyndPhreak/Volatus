@@ -20,6 +20,7 @@ mod model;
 mod motion;
 mod nav;
 mod purge;
+mod recycle;
 mod shell;
 mod settings;
 mod tip;
