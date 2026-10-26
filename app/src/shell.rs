@@ -162,7 +162,7 @@ impl Popup {
     pub fn track(&self, owner: HWND, window: HWND, at: Anchor) -> u32 {
         let handlers = self.shell.as_ref().map(|cm| Handlers { cm2: cm.cast().ok(), cm3: cm.cast().ok() });
         ACTIVE.with_borrow_mut(|a| *a = handlers);
-        let Anchor::Point(x, y) = at;
+        let Anchor::Point(x, y) = at else { unimplemented!("a menu under a box") };
         // SAFETY: the menu and the owner live for the call.
         let id = unsafe { TrackPopupMenuEx(self.menu, (TPM_RETURNCMD | TPM_RIGHTBUTTON).0, x, y, owner, None) }.0 as u32;
         ACTIVE.with_borrow_mut(|a| *a = None);

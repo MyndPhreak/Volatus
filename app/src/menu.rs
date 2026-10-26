@@ -253,6 +253,25 @@ pub fn terminal_folder(path: &Path, is_dir: bool) -> PathBuf {
 pub enum Anchor {
     /// Its top-left corner is at the pointer.
     Point(i32, i32),
+    /// Under a box the menu must not cover (a key opened it, for the item in the box): its left,
+    /// top, right and bottom edges.
+    Below { left: i32, top: i32, right: i32, bottom: i32 },
+}
+
+/// Where a menu was asked for in the window, in logical pixels.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum At {
+    /// A right-click at this point.
+    Pointer(f32, f32),
+    /// A key, for the item in the box at (x, y) of this width and height.
+    Box(f32, f32, f32, f32),
+}
+
+/// The screen anchor of the menu asked for `at`, for a window of `scale` whose client origin is at
+/// `origin` on the screen (`screen_point`).
+pub fn anchor(at: At, scale: f32, origin: (i32, i32)) -> Anchor {
+    let _ = (at, scale, origin);
+    unimplemented!("anchor")
 }
 
 /// The screen point, in physical pixels, of the window point `window` in logical pixels, for a
@@ -698,6 +717,19 @@ mod tests {
     #[test]
     fn terminal_folder_of_a_drive_root_is_the_drive_root() {
         assert_eq!(terminal_folder(Path::new("C:\\"), true), PathBuf::from("C:\\"));
+    }
+
+    // ---- anchor ----
+    #[test]
+    fn anchor_of_a_pointer_is_its_screen_point() {
+        assert_eq!(anchor(At::Pointer(10.0, 20.0), 1.5, (100, -50)), Anchor::Point(115, -20));
+    }
+
+    #[test]
+    fn anchor_of_a_box_is_its_screen_rect() {
+        let got = anchor(At::Box(10.0, 20.0, 30.0, 40.0), 2.0, (100, 50));
+
+        assert_eq!(got, Anchor::Below { left: 120, top: 90, right: 180, bottom: 170 });
     }
 
     // ---- screen_point ----
