@@ -21,7 +21,7 @@ embed-resource = "3"
 
 # Elevation: IsUserAnAdmin and ShellExecuteW "runas". Same crate and version as `scan`, so no new code in the build.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_Debug", "Win32_System_WindowsProgramming", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Diagnostics_Debug", "Win32_System_WindowsProgramming", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 # tests/wix.rs and the menu round trip in cli.rs read the installer source (already in the lock through Slint).
 # tests/release.rs reads the release-please files and app/Cargo.toml (both crates already in the lock).
