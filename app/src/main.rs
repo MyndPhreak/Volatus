@@ -129,8 +129,6 @@ struct Loaded {
     rects: Vec<Rect>,
     /// The folder of the shown picture and its `rects`; `None` before the first one.
     shown_root: Option<NodeId>,
-    /// Footer chips of the whole scan; `None` while the file types are counted.
-    chips: Option<Vec<footer::Chip>>,
     /// File-type totals of the shown tree: the count less every removal since. `None` while the
     /// file types are counted.
     totals: Option<Vec<TypeTotal>>,
@@ -837,7 +835,6 @@ fn install(ui: &MainWindow, data: Arc<Data>) {
             view_root: root,
             rects: Vec::new(),
             shown_root: None,
-            chips: None,
             totals: None,
             edits: 0,
         });
@@ -861,33 +858,28 @@ fn remove_node(l: &mut Loaded, n: NodeId) -> Option<AfterRemoval> {
 /// Counts the file types of the scan for the footer on its own worker thread, started after the
 /// layout worker of the first treemap, which does not wait for it. Until it ends the footer
 /// says "Counting file types.".
-/// The result is dropped if a newer scan started or the scan was cancelled meanwhile.
+/// The result is dropped if a newer scan started or the scan was cancelled meanwhile, and counted
+/// again for the changed tree if a removal happened meanwhile (`store_totals`).
 fn count_types(ui: &MainWindow, data: Arc<Data>) {
-    let generation = SESSION.with_borrow(|s| s.scan.generation());
+    let (generation, edits) = SESSION.with_borrow(|s| (s.scan.generation(), s.loaded.as_ref().map_or(0, |l| l.edits)));
     sync_types(ui);
     let weak = ui.as_weak();
     std::thread::spawn(move || {
-        let root = data.tree.root();
-        let totals = treemap::filetype::type_totals(&data.tree, root);
-        let chips = footer::chips(&totals, data.tree.node(root).size, FOOTER_CHIPS);
+        let totals = treemap::filetype::type_totals(&data.tree, data.tree.root());
         // Err means the event loop has stopped: nothing left to update.
         let _ = slint::invoke_from_event_loop(move || {
             let Some(ui) = weak.upgrade() else { return };
-            if store_chips(generation, &data, chips) {
-                sync_types(&ui);
+            match store_totals(generation, &data, edits, totals) {
+                Stored::Kept => sync_types(&ui),
+                Stored::Recount => {
+                    if let Some(now) = with_loaded(|l| l.data.clone()) {
+                        count_types(&ui, now);
+                    }
+                }
+                Stored::Late => {}
             }
         });
     });
-}
-
-/// Keeps the footer `chips` counted for `data` of scan `generation`. `false`, and nothing kept, for a
-/// late result: of an older scan, or for data the window no longer shows (`ScanControl::reset`
-/// keeps the generation, so the generation alone does not tell).
-fn store_chips(generation: u64, data: &Arc<Data>, chips: Vec<footer::Chip>) -> bool {
-    SESSION.with_borrow_mut(|s| {
-        let shown = s.scan.is_current(generation).then_some(s.loaded.as_mut()).flatten();
-        shown.filter(|l| Arc::ptr_eq(&l.data, data)).map(|l| l.chips = Some(chips)).is_some()
-    })
 }
 
 /// What `store_totals` did with file-type totals that landed.
@@ -902,30 +894,45 @@ enum Stored {
 }
 
 /// Keeps the file-type `totals` counted for `data` of scan `generation` after `edits` removals.
-/// A result of an older scan or for data the window no longer shows is `Late`; one counted before
-/// a later removal is `Recount`. Only `Kept` keeps them.
+/// A result of an older scan or for data the window no longer shows is `Late` (`ScanControl::reset`
+/// keeps the generation, so the generation alone does not tell); one counted before a later
+/// removal is `Recount`. Only `Kept` keeps them.
 fn store_totals(generation: u64, data: &Arc<Data>, edits: u64, totals: Vec<TypeTotal>) -> Stored {
-    let _ = (generation, data, edits, totals);
-    unimplemented!("P2.T2: store_totals")
+    SESSION.with_borrow_mut(|s| {
+        let Some(l) = s.scan.is_current(generation).then_some(s.loaded.as_mut()).flatten() else {
+            return Stored::Late;
+        };
+        if l.edits != edits {
+            Stored::Recount
+        } else if !Arc::ptr_eq(&l.data, data) {
+            Stored::Late
+        } else {
+            l.totals = Some(totals);
+            Stored::Kept
+        }
+    })
 }
 
 /// The file types `gone` (those of a removed subtree) left the shown tree: they come off the
 /// totals. While the totals are counted, nothing comes off: that count is late (`store_totals`).
+#[cfg_attr(not(test), expect(dead_code, reason = "called by remove_node, which the context menu calls (P4)"))]
 fn drop_types(l: &mut Loaded, gone: &[TypeTotal]) {
-    let _ = (l, gone);
-    unimplemented!("P2.T2: drop_types")
+    l.edits += 1;
+    if let Some(totals) = l.totals.as_mut() {
+        *totals = footer::subtract(totals, gone);
+    }
 }
 
 /// The footer chips of the shown tree, from its totals; `None` while they are counted.
 fn chips_of(l: &Loaded) -> Option<Vec<footer::Chip>> {
-    let _ = l;
-    unimplemented!("P2.T2: chips_of")
+    let tree = &l.data.tree;
+    l.totals.as_ref().map(|t| footer::chips(t, tree.node(tree.root()).size, FOOTER_CHIPS))
 }
 
 /// Pushes the footer chips into the window, in the tile colours of the current theme.
 fn sync_types(ui: &MainWindow) {
     let theme = if ui.get_dark() { Theme::Dark } else { Theme::Light };
-    let (counting, chips) = with_loaded(|l| match &l.chips {
+    let (counting, chips) = with_loaded(|l| match chips_of(l) {
         None => (true, Vec::new()),
         Some(chips) => (false, chips.iter().map(|c| type_chip(c, theme)).collect()),
     })
@@ -1537,7 +1544,7 @@ mod tests {
     use super::{
         Data, FILE_LABEL_TWO_LINES, FileLabel, FrameLabel, Hover, LABEL_CAP, ZoomFrame, ZoomMove, frame_at,
         Loaded, RowModel, SESSION, file_labels, frame_labels, glow_drawn, hover_of, map_labels, note_hover, restart_admin,
-        store_chips, Move, picture_point, zoom_frame_at, take_launch_path, forget_scan, gate_hover, left_map,
+        Move, picture_point, zoom_frame_at, take_launch_path, forget_scan, gate_hover, left_map,
         shows_start_at_launch, relaunch_path, LabelKind, LogicalBox, Placed, place_label, stretch,
         apply_args, FOOTER_CHIPS, Stored, chips_of, drop_types, store_totals,
     };
@@ -1548,7 +1555,6 @@ mod tests {
     use slint::SetRenderingNotifierError;
     use scan::{NodeId, Tree};
     use treemap::{FILE_LABEL_MIN_HEIGHT, FILE_LABEL_MIN_WIDTH, Theme};
-    use crate::footer::Chip;
     use crate::model::{Event, Summary};
     use crate::tree_view::ViewState;
     use scan::Method;
@@ -2112,14 +2118,13 @@ mod tests {
             view_root: root,
             rects: Vec::new(),
             shown_root: None,
-            chips: None,
             totals: None,
             edits: 0,
         }
     }
 
-    fn chips() -> Vec<Chip> {
-        vec![Chip { label: ".txt".into(), percent: "100.0%".into(), share: 1.0, size: "10 B".into(), category: Category::Document }]
+    fn totals() -> Vec<TypeTotal> {
+        vec![TypeTotal { ext: "txt".into(), bytes: 10, files: 1 }]
     }
 
     fn summary() -> Summary {
@@ -2144,32 +2149,28 @@ mod tests {
         })
     }
 
-    fn kept_chips() -> Option<Vec<Chip>> {
-        SESSION.with_borrow(|s| s.loaded.as_ref().and_then(|l| l.chips.clone()))
-    }
-
     #[test]
-    fn store_chips_result_of_the_shown_scan_is_kept() {
+    fn store_totals_result_of_the_shown_scan_is_kept() {
         let d = data();
         let generation = show_finished_scan(&d);
-        assert!(store_chips(generation, &d, chips()));
-        assert_eq!(kept_chips(), Some(chips()));
+        assert_eq!(store_totals(generation, &d, 0, totals()), Stored::Kept);
+        assert_eq!(kept_totals(), Some(totals()));
     }
 
     #[test]
-    fn store_chips_late_result_after_reset_is_dropped() {
+    fn store_totals_late_result_after_reset_is_dropped() {
         let d = data();
         let generation = show_finished_scan(&d);
         SESSION.with_borrow_mut(|s| {
             assert!(s.scan.reset());
             s.loaded = None;
         });
-        assert!(!store_chips(generation, &d, chips()));
-        assert_eq!(kept_chips(), None);
+        assert_eq!(store_totals(generation, &d, 0, totals()), Stored::Late);
+        assert_eq!(kept_totals(), None);
     }
 
     #[test]
-    fn store_chips_late_result_of_a_scan_before_cancel_and_new_scan_is_dropped() {
+    fn store_totals_late_result_of_a_scan_before_cancel_and_new_scan_is_dropped() {
         let old = data();
         let old_generation = show_finished_scan(&old);
         let new = data();
@@ -2182,36 +2183,36 @@ mod tests {
             assert!(s.scan.apply(generation2, Event::Finished(summary())));
             s.loaded = Some(loaded(&new));
         });
-        assert!(!store_chips(old_generation, &old, chips()));
-        assert_eq!(kept_chips(), None);
+        assert_eq!(store_totals(old_generation, &old, 0, totals()), Stored::Late);
+        assert_eq!(kept_totals(), None);
     }
 
     #[test]
-    fn store_chips_late_result_for_other_data_of_the_same_generation_is_dropped() {
+    fn store_totals_late_result_for_other_data_of_the_same_generation_is_dropped() {
         // reset keeps the generation: the scan id alone cannot tell old data from new data.
         let shown = data();
         let late = data();
         let generation = show_finished_scan(&shown);
-        assert!(!store_chips(generation, &late, chips()));
-        assert_eq!(kept_chips(), None);
+        assert_eq!(store_totals(generation, &late, 0, totals()), Stored::Late);
+        assert_eq!(kept_totals(), None);
     }
 
     #[test]
-    fn store_chips_result_of_an_older_scan_for_the_shown_data_is_dropped() {
+    fn store_totals_result_of_an_older_scan_for_the_shown_data_is_dropped() {
         let d = data();
         let generation = show_finished_scan(&d);
-        assert!(!store_chips(generation - 1, &d, chips()));
-        assert_eq!(kept_chips(), None);
+        assert_eq!(store_totals(generation - 1, &d, 0, totals()), Stored::Late);
+        assert_eq!(kept_totals(), None);
     }
 
     #[test]
-    fn store_chips_same_data_after_a_theme_change_is_still_kept() {
-        // A theme change does not replace the data or the scan: the chips (categories) are theme free.
+    fn store_totals_same_data_after_a_theme_change_is_still_kept() {
+        // A theme change does not replace the data or the scan: the totals are theme free.
         let d = data();
         let generation = show_finished_scan(&d);
-        assert!(store_chips(generation, &d, chips()));
-        assert!(store_chips(generation, &d, chips()));
-        assert_eq!(kept_chips(), Some(chips()));
+        assert_eq!(store_totals(generation, &d, 0, totals()), Stored::Kept);
+        assert_eq!(store_totals(generation, &d, 0, totals()), Stored::Kept);
+        assert_eq!(kept_totals(), Some(totals()));
     }
 
     // ---- footer totals after a removal ----

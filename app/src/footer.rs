@@ -2,6 +2,7 @@
 
 use crate::model::{display_name, format_size};
 use crate::tree_view::{format_percent, spoken_percent};
+use std::collections::HashMap;
 use treemap::filetype::{Category, TypeTotal, category_of_ext};
 
 /// One chip of the footer: a file type, its share of the scan and its tile category.
@@ -58,9 +59,19 @@ pub fn chips(totals: &[TypeTotal], total: u64, max: usize) -> Vec<Chip> {
 /// `totals` less the totals `gone` of a removed subtree, per extension: bytes and files go down;
 /// an extension left with no file is dropped. Sorted as `type_totals` sorts: bytes descending,
 /// then ext ascending.
+#[cfg_attr(not(test), expect(dead_code, reason = "called by remove_node, which the context menu calls (P4)"))]
 pub fn subtract(totals: &[TypeTotal], gone: &[TypeTotal]) -> Vec<TypeTotal> {
-    let _ = (totals, gone);
-    unimplemented!("P2.T2: footer::subtract")
+    let gone: HashMap<&str, (u64, u64)> = gone.iter().map(|g| (g.ext.as_str(), (g.bytes, g.files))).collect();
+    let mut left: Vec<TypeTotal> = totals
+        .iter()
+        .filter_map(|t| {
+            let (bytes, files) = gone.get(t.ext.as_str()).copied().unwrap_or_default();
+            let files = t.files.saturating_sub(files);
+            (files > 0).then(|| TypeTotal { ext: t.ext.clone(), bytes: t.bytes.saturating_sub(bytes), files })
+        })
+        .collect();
+    left.sort_unstable_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.ext.cmp(&b.ext)));
+    left
 }
 
 /// What a screen reader says for chip `c`: ".dll, 10.5 percent, 12.3 GB".
