@@ -22,3 +22,21 @@ embed-resource = "3"
 # Elevation: IsUserAnAdmin and ShellExecuteW "runas". Same crate and version as `scan`, so no new code in the build.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_Debug", "Win32_System_WindowsProgramming", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+
+# tests/wix.rs and the menu round trip in cli.rs read the installer source (already in the lock through Slint).
+# tests/release.rs reads the release-please files and app/Cargo.toml (both crates already in the lock).
+[dev-dependencies]
+roxmltree = "0.21.1"
+serde_json = "1.0.154"
+toml = "1.1.8"
+
+# The installer: `cargo wix -p app` (WiX Toolset v3) builds wix/main.wxs into
+# target/wix/volatus-<version>-x86_64.msi (.github/scripts/build-msi.ps1 does every step).
+# ICE43 and ICE57 assume a per-user install (a Start menu shortcut in a component keyed by a file
+# in Program Files); this one is per-machine (ALLUSERS=1), where the Start menu folder is the
+# machine's. Re-check both suppressions whenever main.wxs's components change: they hide every
+# ICE43/ICE57 finding, not only these ones. ICE69 is not suppressed (tests/wix.rs
+# ice69_is_not_suppressed): the Explorer menu names the exe as [INSTALLFOLDER]volatus.exe.
+[package.metadata.wix]
+name = "volatus"
+linker-args = ["-sice:ICE43", "-sice:ICE57"]

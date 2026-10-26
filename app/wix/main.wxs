@@ -1,0 +1,239 @@
+<?xml version="1.0" encoding="windows-1252"?>
+<!--
+  Volatus's installer (WiX Toolset v3), built from the repository root with cargo-wix:
+  `cargo wix -p app` (add `-b <WiX bin folder>` when WiX isn't on PATH or in %WIX%), or
+  .github/scripts/build-msi.ps1, which writes target\wix\volatus-<version>-x86_64.msi. cargo-wix
+  passes Version (the app package's version) and CargoTargetBinDir, and links WixUIExtension and
+  WixUtilExtension; app/Cargo.toml's [package.metadata.wix] adds the rest. Files next to this one
+  are found through $(sys.SOURCEFILEDIR), so the build works from any folder.
+
+  Per-machine, to C:\Program Files\Volatus, with a Start menu shortcut. Every release is a major
+  upgrade (a new ProductCode, the fixed UpgradeCode below) that replaces the installed version in
+  place; downgrades are refused. Uninstall removes everything this file installs.
+
+  The installer never runs volatus.exe to do its work. Before anything is replaced or removed, a
+  running Volatus is asked to close (WM_CLOSE); a copy that stays open gets Windows' Files in Use
+  dialog. No forced kill and no reboot prompt. app/tests/wix.rs checks this file;
+  .github/scripts/check-msi.ps1 checks the built MSI's tables.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi" xmlns:util="http://schemas.microsoft.com/wix/UtilExtension">
+  <Product
+      Id="*"
+      Name="Volatus"
+      UpgradeCode="FB5B570F-DD29-49B8-A6AE-35855278CAE6"
+      Manufacturer="MyndPhreak"
+      Language="1033"
+      Codepage="1252"
+      Version="$(var.Version)">
+
+    <Package
+        Id="*"
+        Keywords="Installer"
+        Description="Volatus shows what uses the space on a drive"
+        Manufacturer="MyndPhreak"
+        InstallerVersion="500"
+        Languages="1033"
+        Compressed="yes"
+        InstallScope="perMachine"
+        InstallPrivileges="elevated"
+        Platform="x64"
+        SummaryCodepage="1252"/>
+
+    <!-- Inside the install transaction: a failed upgrade rolls back to the old version. -->
+    <MajorUpgrade
+        Schedule="afterInstallInitialize"
+        AllowSameVersionUpgrades="yes"
+        DowngradeErrorMessage="A newer version of [ProductName] is installed. To install this version, remove the newer version first."/>
+
+    <!-- VersionNT is 603 on Windows 8.1, 10 and 11; CurrentMajorVersionNumber exists from Windows
+         10 on. 32-bit Windows is refused by the x64 package itself. ARM64 Windows runs this x64
+         build under emulation (allowed, not tested). -->
+    <Property Id="VOLATUS_WIN10">
+      <RegistrySearch Id="WindowsMajorVersionSearch" Root="HKLM" Win64="yes" Type="raw"
+          Key="SOFTWARE\Microsoft\Windows NT\CurrentVersion" Name="CurrentMajorVersionNumber"/>
+    </Property>
+    <Condition Message="Volatus needs 64-bit Windows 10 or newer.">Installed OR VOLATUS_WIN10</Condition>
+
+    <Media Id="1" Cabinet="media1.cab" EmbedCab="yes" DiskPrompt="CD-ROM #1"/>
+    <Property Id="DiskPrompt" Value="Volatus Installation"/>
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLFOLDER" Name="Volatus">
+          <Component Id="VolatusExe" Guid="*" Win64="yes">
+            <File
+                Id="VolatusExe"
+                Name="volatus.exe"
+                DiskId="1"
+                Source="$(var.CargoTargetBinDir)\volatus.exe"
+                KeyPath="yes">
+              <!-- Not advertised: it starts the exe directly (no Windows Installer check on each
+                   start). -->
+              <Shortcut
+                  Id="VolatusShortcut"
+                  Name="Volatus"
+                  Description="See what uses the space on a drive"
+                  Directory="ProgramMenuFolder"
+                  WorkingDirectory="INSTALLFOLDER"
+                  Advertise="no"/>
+            </File>
+          </Component>
+
+          <!-- The Explorer menu, "Scan with Volatus" on a folder, a folder's background and a
+               drive, for every user (HKLM). %1 is the folder or drive; %V is the folder whose
+               background was right-clicked. A drive's %1 is C:\, which reaches volatus.exe as
+               C:" (the backslash escapes the quote); the argument parser repairs it (cli.rs).
+               ForceDeleteOnUninstall removes each Volatus key with its command key, and only
+               those keys. Fixed GUIDs: a component's GUID stays with its key path. -->
+          <Component Id="MenuDirectory" Guid="41C7BA3F-1D39-478A-9629-C08E1CBCD053" Win64="yes">
+            <RegistryKey Root="HKLM" Key="Software\Classes\Directory\shell\Volatus"
+                ForceCreateOnInstall="yes" ForceDeleteOnUninstall="yes">
+              <RegistryValue Type="string" Value="Scan with Volatus" KeyPath="yes"/>
+              <RegistryValue Type="string" Name="Icon" Value="[INSTALLFOLDER]volatus.exe,0"/>
+              <RegistryKey Key="command">
+                <RegistryValue Type="string" Value="&quot;[INSTALLFOLDER]volatus.exe&quot; &quot;%1&quot;"/>
+              </RegistryKey>
+            </RegistryKey>
+          </Component>
+          <Component Id="MenuBackground" Guid="D1D6A47D-523E-4BCD-9A37-4B6E4BF365D8" Win64="yes">
+            <RegistryKey Root="HKLM" Key="Software\Classes\Directory\Background\shell\Volatus"
+                ForceCreateOnInstall="yes" ForceDeleteOnUninstall="yes">
+              <RegistryValue Type="string" Value="Scan with Volatus" KeyPath="yes"/>
+              <RegistryValue Type="string" Name="Icon" Value="[INSTALLFOLDER]volatus.exe,0"/>
+              <RegistryKey Key="command">
+                <RegistryValue Type="string" Value="&quot;[INSTALLFOLDER]volatus.exe&quot; &quot;%V&quot;"/>
+              </RegistryKey>
+            </RegistryKey>
+          </Component>
+          <Component Id="MenuDrive" Guid="C057D819-1438-463A-BCFC-19B8B087E8D4" Win64="yes">
+            <RegistryKey Root="HKLM" Key="Software\Classes\Drive\shell\Volatus"
+                ForceCreateOnInstall="yes" ForceDeleteOnUninstall="yes">
+              <RegistryValue Type="string" Value="Scan with Volatus" KeyPath="yes"/>
+              <RegistryValue Type="string" Name="Icon" Value="[INSTALLFOLDER]volatus.exe,0"/>
+              <RegistryKey Key="command">
+                <RegistryValue Type="string" Value="&quot;[INSTALLFOLDER]volatus.exe&quot; &quot;%1&quot;"/>
+              </RegistryKey>
+            </RegistryKey>
+          </Component>
+        </Directory>
+      </Directory>
+      <Directory Id="ProgramMenuFolder"/>
+    </Directory>
+
+    <Feature Id="Main" Title="Volatus" Level="1" Absent="disallow" AllowAdvertise="no">
+      <ComponentRef Id="VolatusExe"/>
+      <!-- On by default; the options page can leave it out. Its state (in or out) is kept across
+           major upgrades (MajorUpgrade migrates feature states). A child of Main: its command
+           names Main's exe ([INSTALLFOLDER]volatus.exe), so the exe is always there with it. -->
+      <Feature Id="ExplorerMenu" Title="Explorer menu" Level="1" AllowAdvertise="no">
+        <!-- EXPLORERMENU=0 on the command line (also with /qn) leaves the menu out. First install
+             or upgrade only: a level of 0 on an installed feature would keep its keys at
+             uninstall. -->
+        <Condition Level="0">NOT Installed AND EXPLORERMENU = "0"</Condition>
+        <ComponentRef Id="MenuDirectory"/>
+        <ComponentRef Id="MenuBackground"/>
+        <ComponentRef Id="MenuDrive"/>
+      </Feature>
+    </Feature>
+    <!-- The options page's checkbox: ticked unless the user clears it. Secure, so what the dialog
+         sets reaches the elevated part of the install. -->
+    <Property Id="EXPLORERMENU" Value="1" Secure="yes"/>
+
+    <!-- Installed apps: the exe's icon, links, and nothing to change after install. -->
+    <Icon Id="volatus.ico" SourceFile="$(sys.SOURCEFILEDIR)..\assets\volatus.ico"/>
+    <Property Id="ARPPRODUCTICON" Value="volatus.ico"/>
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/MyndPhreak/Volatus"/>
+    <Property Id="ARPHELPLINK" Value="https://github.com/MyndPhreak/Volatus/issues"/>
+    <Property Id="ARPNOMODIFY" Value="1"/>
+
+    <!-- A running Volatus is sent WM_CLOSE and given 5 s (the default Timeout) to exit.
+         RebootPrompt="no": its default (yes) makes the step schedule a deferred action at run
+         time, which fails this early (WiX CloseApps.cpp), and Volatus never needs a reboot. An
+         elevated copy can't receive WM_CLOSE from setup (UIPI); Files in Use names it instead. -->
+    <util:CloseApplication Id="CloseVolatus" Target="volatus.exe" CloseMessage="yes" RebootPrompt="no"/>
+    <InstallExecuteSequence>
+      <!-- WixUtilExtension puts it before InstallFiles, after RemoveExistingProducts has already
+           met the locked exe. Before InstallValidate, the files are free when Windows checks
+           them. The id has no platform suffix in this x64 MSI (captured from the built MSI). -->
+      <Custom Action="WixCloseApplications" Before="InstallValidate"/>
+    </InstallExecuteSequence>
+
+    <!-- "Launch Volatus" on the last page, unticked: WixShellExec from setup's own window, so
+         Volatus starts as the user who started setup (not elevated after a double-click). -->
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch Volatus"/>
+    <Property Id="WixShellExecTarget" Value="[#VolatusExe]"/>
+    <CustomAction Id="LaunchVolatus" BinaryKey="WixCA" DllEntry="WixShellExec" Impersonate="yes"/>
+
+    <WixVariable Id="WixUILicenseRtf" Value="$(sys.SOURCEFILEDIR)License.rtf"/>
+
+    <UI Id="VolatusUI">
+      <TextStyle Id="WixUI_Font_Normal" FaceName="Tahoma" Size="8"/>
+      <TextStyle Id="WixUI_Font_Bigger" FaceName="Tahoma" Size="12"/>
+      <TextStyle Id="WixUI_Font_Title" FaceName="Tahoma" Size="9" Bold="yes"/>
+      <Property Id="DefaultUIFont" Value="WixUI_Font_Normal"/>
+      <Property Id="WixUI_Mode" Value="Minimal"/>
+
+      <DialogRef Id="ErrorDlg"/>
+      <DialogRef Id="FatalError"/>
+      <DialogRef Id="FilesInUse"/>
+      <DialogRef Id="MsiRMFilesInUse"/>
+      <DialogRef Id="PrepareDlg"/>
+      <DialogRef Id="ProgressDlg"/>
+      <DialogRef Id="ResumeDlg"/>
+      <DialogRef Id="UserExit"/>
+      <DialogRef Id="WelcomeDlg"/>
+      <DialogRef Id="LicenseAgreementDlg"/>
+      <DialogRef Id="MaintenanceWelcomeDlg"/>
+      <DialogRef Id="MaintenanceTypeDlg"/>
+      <DialogRef Id="VerifyReadyDlg"/>
+      <DialogRef Id="ExitDialog"/>
+
+      <!-- The Explorer menu choice, first install only (an upgrade keeps the feature as it is). -->
+      <Dialog Id="OptionsDlg" Width="370" Height="270" Title="[ProductName] Setup">
+        <Control Id="BannerBitmap" Type="Bitmap" X="0" Y="0" Width="370" Height="44" TabSkip="no" Text="!(loc.InstallDirDlgBannerBitmap)"/>
+        <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="370" Height="0"/>
+        <Control Id="Title" Type="Text" X="15" Y="6" Width="200" Height="15" Transparent="yes" NoPrefix="yes"
+            Text="{\WixUI_Font_Title}Options"/>
+        <Control Id="Description" Type="Text" X="25" Y="23" Width="280" Height="15" Transparent="yes" NoPrefix="yes"
+            Text="To change this option later, remove Volatus and install it again."/>
+
+        <Control Id="ExplorerMenu" Type="CheckBox" X="20" Y="54" Width="330" Height="17" Property="EXPLORERMENU" CheckBoxValue="1"
+            Text="Add Scan with Volatus to the Explorer menu"/>
+        <Control Id="ExplorerMenuNote" Type="Text" X="36" Y="71" Width="320" Height="30" NoPrefix="yes"
+            Text="Right-click a folder, the background of a folder or a drive in File Explorer to scan it. On Windows 11, the entry is in Show more options."/>
+
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0"/>
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="!(loc.WixUIBack)"/>
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="!(loc.WixUINext)"/>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="!(loc.WixUICancel)">
+          <Publish Event="SpawnDialog" Value="CancelDlg">1</Publish>
+        </Control>
+      </Dialog>
+
+      <!-- First install: Welcome, License, Options, Ready. An upgrade or maintenance skips License
+           and Options. -->
+      <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="LicenseAgreementDlg">NOT Installed AND NOT WIX_UPGRADE_DETECTED</Publish>
+      <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="VerifyReadyDlg">Installed OR WIX_UPGRADE_DETECTED</Publish>
+      <Publish Dialog="LicenseAgreementDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg">1</Publish>
+      <Publish Dialog="LicenseAgreementDlg" Control="Next" Event="NewDialog" Value="OptionsDlg">LicenseAccepted = "1" AND NOT Installed AND NOT WIX_UPGRADE_DETECTED</Publish>
+      <Publish Dialog="OptionsDlg" Control="Back" Event="NewDialog" Value="LicenseAgreementDlg">1</Publish>
+      <!-- The checkbox sets the feature's request state before the page changes. -->
+      <Publish Dialog="OptionsDlg" Control="Next" Event="AddLocal" Value="ExplorerMenu" Order="1">EXPLORERMENU</Publish>
+      <Publish Dialog="OptionsDlg" Control="Next" Event="Remove" Value="ExplorerMenu" Order="2">NOT EXPLORERMENU</Publish>
+      <Publish Dialog="OptionsDlg" Control="Next" Event="NewDialog" Value="VerifyReadyDlg" Order="3">1</Publish>
+
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="OptionsDlg" Order="1">NOT Installed AND NOT WIX_UPGRADE_DETECTED</Publish>
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg" Order="2">(NOT Installed AND WIX_UPGRADE_DETECTED) OR (Installed AND PATCH)</Publish>
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="MaintenanceTypeDlg" Order="3">Installed AND NOT PATCH</Publish>
+
+      <Publish Dialog="MaintenanceWelcomeDlg" Control="Next" Event="NewDialog" Value="MaintenanceTypeDlg">1</Publish>
+      <Publish Dialog="MaintenanceTypeDlg" Control="RepairButton" Event="NewDialog" Value="VerifyReadyDlg">1</Publish>
+      <Publish Dialog="MaintenanceTypeDlg" Control="RemoveButton" Event="NewDialog" Value="VerifyReadyDlg">1</Publish>
+      <Publish Dialog="MaintenanceTypeDlg" Control="Back" Event="NewDialog" Value="MaintenanceWelcomeDlg">1</Publish>
+
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchVolatus" Order="1">WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND NOT Installed</Publish>
+      <Publish Dialog="ExitDialog" Control="Finish" Event="EndDialog" Value="Return" Order="999">1</Publish>
+    </UI>
+    <UIRef Id="WixUI_Common"/>
+  </Product>
+</Wix>

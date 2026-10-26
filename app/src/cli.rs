@@ -53,7 +53,9 @@ pub fn parse_args_with<I: IntoIterator<Item = String>>(args: I, logical: usize) 
     let mut args = args.into_iter().peekable();
     while let Some(arg) = args.next() {
         let Some(option) = arg.strip_prefix("--").filter(|_| !flags_ended) else {
-            out.path.get_or_insert(arg);
+            if out.path.is_none() {
+                out.path = Some(repair_folder(arg));
+            }
             continue;
         };
         if option.is_empty() {
@@ -85,6 +87,15 @@ pub fn parse_args_with<I: IntoIterator<Item = String>>(args: I, logical: usize) 
         }
     }
     out
+}
+
+/// Explorer passes `"C:\"` as `%1`; the rules of `CommandLineToArgvW` turn that into `C:"`. A quote is
+/// not allowed in a Windows path, so one `"` as the last character is that mistake: it becomes `\`.
+fn repair_folder(arg: String) -> String {
+    match arg.strip_suffix('"') {
+        Some(rest) if !rest.is_empty() && !rest.contains('"') => format!("{rest}\\"),
+        _ => arg,
+    }
 }
 
 /// `Some(None)` for `auto`: the default choice of scanner.
@@ -170,6 +181,122 @@ mod tests {
     #[test]
     fn parse_args_empty_path_is_kept() {
         assert_eq!(parse(&[""]), args(false, Some("")));
+    }
+
+    // ---- stray quote on the folder ----
+    const UNI: &str = "C:\\caf\u{e9} \u{4e2d}\u{6587}";
+
+    #[test]
+    fn parse_args_drive_root_with_a_stray_quote_is_repaired() {
+        assert_eq!(parse(&["C:\""]).path.as_deref(), Some("C:\\"));
+        assert_eq!(parse(&["D:\""]).path.as_deref(), Some("D:\\"));
+    }
+
+    #[test]
+    fn parse_args_folder_with_a_stray_quote_is_repaired() {
+        assert_eq!(parse(&["C:\\Some Dir\""]).path.as_deref(), Some("C:\\Some Dir\\"));
+        assert_eq!(parse(&[&format!("{UNI}\"")]).path.as_deref(), Some(format!("{UNI}\\").as_str()));
+        assert_eq!(parse(&["\\\\server\\share\""]).path.as_deref(), Some("\\\\server\\share\\"));
+    }
+
+    #[test]
+    fn parse_args_quote_in_the_middle_is_unchanged() {
+        assert_eq!(parse(&["C:\\a\"b"]).path.as_deref(), Some("C:\\a\"b"));
+    }
+
+    #[test]
+    fn parse_args_lone_quote_is_unchanged() {
+        assert_eq!(parse(&["\""]).path.as_deref(), Some("\""));
+    }
+
+    #[test]
+    fn parse_args_two_quotes_are_unchanged() {
+        assert_eq!(parse(&["C:\"\""]).path.as_deref(), Some("C:\"\""));
+    }
+
+    #[test]
+    fn parse_args_repaired_folder_keeps_the_flags_after_it() {
+        let a = parse(&["C:\"", "--timing"]);
+        assert_eq!((a.path.as_deref(), a.flags.timing, a.notices.len()), (Some("C:\\"), true, 0));
+    }
+
+    #[test]
+    fn parse_args_repairs_the_folder_after_the_separator() {
+        let a = parse(&["--timing", "--", "C:\""]);
+        assert_eq!((a.path.as_deref(), a.flags.timing), (Some("C:\\"), true));
+    }
+
+    #[test]
+    fn parse_args_repair_applies_to_the_first_folder_only() {
+        assert_eq!(parse(&["C:\"", "D:\""]).path.as_deref(), Some("C:\\"));
+    }
+
+    #[test]
+    fn parse_args_folders_without_a_quote_are_identical() {
+        let folders = [
+            "C:\\", "C:\\Data", "C:\\Data\\", "D:", "\\\\server\\share", "\\\\server\\share\\x", UNI, "C:\\My Files\\Data",
+            "relative\\dir", ".",
+        ];
+        for folder in folders {
+            assert_eq!(parse(&[folder]).path.as_deref(), Some(folder), "folder {folder}");
+        }
+    }
+
+    #[test]
+    fn menu_command_lines_pass_the_folder_through_the_real_argv_split() {
+        use crate::elevate::tests::argv;
+        let exe = "C:\\Program Files\\Volatus\\volatus.exe";
+        let folders = ["C:\\", "D:\\", "C:\\Users\\Jo Smith\\My Files", UNI, "\\\\server\\share", "C:\\Data"];
+        for folder in folders {
+            // Explorer fills `%1` (Directory, Drive) and `%V` (Background) with the folder, inside the quotes.
+            let line = format!("\"{exe}\" \"{folder}\"");
+            let a = parse_args(argv(&line).into_iter().skip(1));
+            assert_eq!((a.path.as_deref(), a.notices.len()), (Some(folder), 0), "line {line}");
+        }
+    }
+
+    /// The three `command` values the installer writes (`wix/main.wxs`), filled in as Explorer
+    /// does, give the right-clicked folder to the parser unchanged.
+    #[test]
+    fn menu_command_lines_round_trip_through_the_parser() {
+        use crate::elevate::tests::argv;
+        let doc = roxmltree::Document::parse(include_str!("../wix/main.wxs")).unwrap();
+        let commands: Vec<(&str, &str)> = doc
+            .descendants()
+            .filter(|n| n.has_tag_name("RegistryKey") && n.attribute("Key") == Some("command"))
+            .map(|command| {
+                let verb = command.parent().and_then(|p| p.attribute("Key")).unwrap_or_default();
+                let value = command.children().find(|v| v.has_tag_name("RegistryValue") && v.attribute("Name").is_none());
+                (verb, value.and_then(|v| v.attribute("Value")).unwrap_or_default())
+            })
+            .collect();
+        assert_eq!(commands.len(), 3, "Directory, Background and Drive: {commands:?}");
+        let install_folder = "C:\\Program Files\\Volatus\\";
+        let roots = ["C:\\", "D:\\"];
+        let folders = ["C:\\", "D:\\", "C:\\My Files", UNI, "\\\\server\\share"];
+        for (verb, template) in commands {
+            let (placeholder, paths) = match verb {
+                "Software\\Classes\\Drive\\shell\\Volatus" => ("%1", &roots[..]),
+                "Software\\Classes\\Directory\\Background\\shell\\Volatus" => ("%V", &folders[..]),
+                _ => ("%1", &folders[..]),
+            };
+            assert!(template.contains(placeholder), "{verb}: {template}");
+            assert!(template.starts_with("\"[INSTALLFOLDER]volatus.exe\" "), "{verb}: {template}");
+            for path in paths {
+                let line = template.replace("[INSTALLFOLDER]", install_folder).replace(placeholder, path);
+                let a = parse_args(argv(&line).into_iter().skip(1));
+                assert_eq!((a.path.as_deref(), a.notices.len()), (Some(*path), 0), "{verb}: {line}");
+            }
+        }
+    }
+
+    #[test]
+    fn parse_args_drive_root_followed_by_a_flag_in_one_quoted_word_is_unchanged() {
+        use crate::elevate::tests::argv;
+        let words = argv("volatus.exe \"C:\\\" --timing");
+        assert_eq!(words, ["volatus.exe", "C:\" --timing"]);
+        let a = parse_args(words.into_iter().skip(1));
+        assert_eq!((a.path.as_deref(), a.flags.timing), (Some("C:\" --timing"), false));
     }
 
     // ---- options ----

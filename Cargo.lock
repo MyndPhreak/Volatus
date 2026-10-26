@@ -217,9 +217,12 @@ version = "0.1.0"
 dependencies = [
  "embed-resource",
  "rfd",
+ "roxmltree",
  "scan",
+ "serde_json",
  "slint",
  "slint-build",
+ "toml",
  "treemap",
  "window-vibrancy",
  "windows-sys 0.61.2",
