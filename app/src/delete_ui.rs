@@ -157,6 +157,14 @@ pub(crate) fn wire(ui: &MainWindow, deps: Deps) {
         sync(ui);
     })));
     ui.on_delete_rescan(with_ui(Box::new(rescan)));
+    // The window does not close while a permanent delete runs (`delete_flow::may_close_window`).
+    ui.window().on_close_requested(|| {
+        if SESSION.with_borrow(|s| delete_flow::may_close_window(&s.delete.state)) {
+            slint::CloseRequestResponse::HideWindow
+        } else {
+            slint::CloseRequestResponse::KeepWindowShown
+        }
+    });
 }
 
 #[cfg(test)]
@@ -412,6 +420,25 @@ mod tests {
         assert!(ui.get_delete().stopping);
         assert_eq!(ui.get_delete().stop_note, delete_flow::STOP_NOTE);
         assert!(JOBS.with_borrow(|j| j[0].3.load(Ordering::Relaxed)), "the job's stop flag is set");
+    }
+
+    #[test]
+    fn closing_the_window_while_a_permanent_delete_runs_keeps_it_shown_until_the_run_ends() {
+        let (ui, _dir) = window();
+        ui.invoke_tree_key("shift-delete".into());
+        click(&ui, "Delete permanently");
+        assert_eq!(step(&ui), DeleteStep::Running);
+
+        ui.window().dispatch_event(WindowEvent::CloseRequested);
+        assert!(ui.window().is_visible(), "the window stays while the permanent delete runs");
+        click(&ui, "Stop");
+        ui.window().dispatch_event(WindowEvent::CloseRequested);
+        assert!(ui.window().is_visible(), "Stop ends the run after the item in progress: still shown");
+
+        deliver(&ui, false);
+        assert_eq!(step(&ui), DeleteStep::Done);
+        ui.window().dispatch_event(WindowEvent::CloseRequested);
+        assert!(!ui.window().is_visible(), "the window closes once the run ended");
     }
 
     #[test]

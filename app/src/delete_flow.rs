@@ -148,6 +148,13 @@ pub fn tree_action(outcome: &Outcome, mode: DeleteMode, target_gone: bool) -> Tr
     }
 }
 
+/// The main window may close now. Not while a permanent delete runs: closing would end the process
+/// in the middle of the run, with no result. The run ends by itself, or soon after Stop.
+pub fn may_close_window(state: &DialogState) -> bool {
+    let _ = state;
+    true
+}
+
 /// A delete can start only while no scan runs.
 pub fn can_start(scan: &ScanState) -> bool {
     !matches!(scan, ScanState::Scanning { .. })
@@ -645,6 +652,25 @@ mod tests {
     }
 
     // ---- the state machine ----
+
+    #[test]
+    fn may_close_window_is_false_only_while_a_permanent_delete_runs() {
+        let t = info(false);
+        let running = |mode, stopping| DialogState::Running { mode, target: t.clone(), progress: RunProgress::default(), stopping };
+        let states = [
+            DialogState::Closed,
+            DialogState::Refused { text: "x".into() },
+            DialogState::Confirm { mode: DeleteMode::Permanent, target: t.clone() },
+            running(DeleteMode::RecycleBin, false),
+            running(DeleteMode::Permanent, false),
+            running(DeleteMode::Permanent, true),
+            DialogState::Done { mode: DeleteMode::Permanent, target: t.clone(), outcome: Outcome::default(), tree_action: TreeAction::Nothing },
+        ];
+
+        let got = states.each_ref().map(may_close_window);
+
+        assert_eq!(got, [true, true, true, true, false, false, true]);
+    }
 
     #[test]
     fn next_valid_transitions() {
