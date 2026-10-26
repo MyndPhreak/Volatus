@@ -267,13 +267,15 @@ impl Follow {
 }
 
 /// Runs the picked shell item, then gives the checks that follow it (`follow`, made at the pick).
-/// The disk is read again first (`disk`): when the path is gone since the menu opened, `invoke`
-/// does not run (the shell would ask to confirm, then show "Item Not Found" until it is closed:
-/// spike S7) and the checks tell what happened. Else `invoke` runs the item and gives its
-/// HRESULT: a cancel by the user (`user_cancelled`) changed nothing and needs no checks (`None`);
-/// any other result, an error too, gets the checks: the disk decides.
+/// The disk is read again first (`disk`): unless it still holds the same kind of item as at the
+/// menu (a folder, or a file of any size), `invoke` does not run and the checks tell what
+/// happened. A gone path would make the shell ask to confirm, then show "Item Not Found" until it
+/// is closed (spike S7); an item of another kind or an unreadable one is not what the menu was for.
+/// Else `invoke` runs the item and gives its HRESULT: a cancel by the user (`user_cancelled`)
+/// changed nothing and needs no checks (`None`); any other result, an error too, gets the checks:
+/// the disk decides.
 pub fn after_pick(follow: Follow, disk: impl Fn(&Path) -> Disk, invoke: impl FnOnce() -> i32) -> Option<Follow> {
-    if disk(&follow.path) == Disk::Gone {
+    if !matches!((&follow.before, disk(&follow.path)), (Disk::Dir, Disk::Dir) | (Disk::File(_), Disk::File(_))) {
         return Some(follow);
     }
     (!user_cancelled(invoke())).then_some(follow)
