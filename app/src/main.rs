@@ -937,7 +937,8 @@ fn open_menu(ui: &MainWindow, src: Source, hit: Option<NodeId>, at: menu::At) {
         menu::Prepared::Ready { path, .. } => Some(path.as_path()),
         menu::Prepared::Changed => None,
     };
-    let flags = menu::query_flags(shell::key_down(windows::Win32::UI::Input::KeyboardAndMouse::VK_SHIFT));
+    use windows::Win32::UI::Input::KeyboardAndMouse::{VK_APPS, VK_SHIFT};
+    let flags = menu::query_flags(menu::extended(at, shell::key_down(VK_SHIFT), shell::key_down(VK_APPS)));
     let popup = match shell::Popup::new(owner, path, flags, |shell_ok| menu::items(&request.prepared, request.is_dir, shell_ok)) {
         Ok(popup) => popup,
         Err(e) => return eprintln!("The menu cannot open: {e}"),

@@ -292,7 +292,7 @@ pub fn act(cmd: Cmd, path: &Path, is_dir: bool) -> Result<(), String> {
             execute(info).map_err(|e| failed("A command prompt cannot start in", &e))
         }
         Cmd::CopyPath => {
-            let copied = arboard::Clipboard::new().and_then(|mut c| c.set_text(path.to_string_lossy()));
+            let copied = arboard::Clipboard::new().and_then(|mut c| c.set_text(clip_text(path)));
             copied.map_err(|e| failed("The clipboard cannot take", &e))
         }
         Cmd::ShowFolder | Cmd::Rescan => Ok(()),
@@ -317,8 +317,8 @@ pub fn explore_on_worker(path: PathBuf, is_dir: bool, done: impl FnOnce(Result<(
 
 /// The text Copy Path puts on the clipboard for `path`: the absolute path, as Explore Folder and
 /// Command Prompt Here use it (a scan root typed as a relative path stays relative in the tree).
-fn clip_text(_path: &Path) -> String {
-    unimplemented!("clip_text")
+fn clip_text(path: &Path) -> String {
+    std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()).to_string_lossy().into_owned()
 }
 
 /// `ShellExecuteExW` of `info`, shown as a normal window.

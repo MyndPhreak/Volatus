@@ -167,8 +167,8 @@ pub fn query_flags(shift: bool) -> u32 {
 /// True when the menu asked for `at` shows the extended verbs, as Explorer does: Shift held at a
 /// right-click, or Shift with the Menu key (`menu_key`: it is down now). Shift+F10 is the normal
 /// menu: its Shift only names the key.
-pub fn extended(_at: At, _shift: bool, _menu_key: bool) -> bool {
-    unimplemented!("extended")
+pub fn extended(at: At, shift: bool, menu_key: bool) -> bool {
+    shift && (matches!(at, At::Pointer(..)) || menu_key)
 }
 
 /// `fMask` of `CMINVOKECOMMANDINFOEX`: Unicode and a point, plus the keys held at invoke.
