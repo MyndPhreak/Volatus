@@ -151,8 +151,7 @@ pub fn tree_action(outcome: &Outcome, mode: DeleteMode, target_gone: bool) -> Tr
 /// The main window may close now. Not while a permanent delete runs: closing would end the process
 /// in the middle of the run, with no result. The run ends by itself, or soon after Stop.
 pub fn may_close_window(state: &DialogState) -> bool {
-    let _ = state;
-    true
+    !matches!(state, DialogState::Running { mode: DeleteMode::Permanent, .. })
 }
 
 /// A delete can start only while no scan runs.
