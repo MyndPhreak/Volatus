@@ -10,6 +10,11 @@ use std::path::{Path, PathBuf};
 /// The `app` package's version, the one source of the release version.
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const WORKFLOW: &str = ".github/workflows/release-please.yml";
+const BUILD_SCRIPT: &str = ".github/scripts/build-msi.ps1";
+/// Negotium's WiX pin (`C:\Users\mynd\DEV\Negotium\.github\workflows\release-please.yml:13-14`),
+/// proven by its releases: the `wix314-binaries.zip` of this tag has this SHA-256.
+const WIX_TAG: &str = "wix3141rtm";
+const WIX_SHA256: &str = "6AC824E1642D6F7277D0ED7EA09411A508F6116BA6FAE0AA5F2C7DAA2FF43D31";
 
 fn repo() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("app/ has a parent").to_path_buf()
@@ -117,6 +122,88 @@ fn uses(yaml: &str) -> Vec<String> {
         .filter_map(|l| l.trim_start().trim_start_matches("- ").strip_prefix("uses:"))
         .map(|v| v.trim().to_string())
         .collect()
+}
+
+/// The script lines of every `run:` step: the inline value, or the lines of a `run: |` block.
+fn run_scripts(yaml: &str) -> Vec<&str> {
+    let lines: Vec<&str> = yaml.lines().collect();
+    let mut scripts = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        let Some(rest) = line.trim_start().trim_start_matches("- ").strip_prefix("run:") else { continue };
+        let rest = rest.trim();
+        if rest.starts_with('|') || rest.starts_with('>') {
+            scripts.extend(lines[i + 1..].iter().take_while(|l| l.trim().is_empty() || indent(l) > indent(line)).copied());
+        } else {
+            scripts.push(rest);
+        }
+    }
+    scripts
+}
+
+/// The 0-based line of `build-msi.ps1` that is exactly `wanted` (trimmed); it must be there once.
+fn script_line(script: &[&str], wanted: &str) -> usize {
+    let found: Vec<usize> = script.iter().enumerate().filter(|(_, l)| l.trim() == wanted).map(|(i, _)| i).collect();
+    assert_eq!(found.len(), 1, "{BUILD_SCRIPT} has the line `{wanted}` once");
+    found[0]
+}
+
+/// The 0-based line of `build-msi.ps1` that starts with `start` (trimmed); it must be there once.
+fn script_line_starting(script: &[&str], start: &str) -> usize {
+    let found: Vec<usize> = script.iter().enumerate().filter(|(_, l)| l.trim().starts_with(start)).map(|(i, _)| i).collect();
+    assert_eq!(found.len(), 1, "{BUILD_SCRIPT} has one line that starts with `{start}`");
+    found[0]
+}
+
+/// A `${{ }}` expression inside a script is pasted into the script text before it runs, so a tag
+/// or branch name could inject code. Values reach scripts through `env:` instead.
+#[test]
+fn no_run_step_expands_an_expression_inline() {
+    let dir = repo().join(".github/workflows");
+    let mut checked = 0;
+    for entry in std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display())) {
+        let path = entry.expect("a directory entry").path();
+        let yaml = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        let scripts = run_scripts(&yaml);
+        checked += scripts.len();
+        for line in scripts {
+            assert!(!line.contains("${{"), "{}: `{}` expands an expression in a script; pass it through env:", path.display(), line.trim());
+        }
+    }
+    assert!(checked > 0, "the workflows have run steps to check");
+}
+
+/// The WiX download is checked against Negotium's pin before it is unpacked.
+#[test]
+fn the_wix_download_is_pinned_to_negotiums_sha256() {
+    let text = read(BUILD_SCRIPT);
+    let script: Vec<&str> = text.lines().collect();
+
+    script_line(&script, &format!("$WixTag = '{WIX_TAG}'"));
+    script_line(&script, &format!("$WixSha256 = '{WIX_SHA256}'"));
+    let compare = script_line_starting(&script, "if ($actual -ne $WixSha256) { throw");
+    let unpack = script_line_starting(&script, "Expand-Archive");
+
+    assert!(compare < unpack, "the SHA-256 is compared before the archive is unpacked");
+}
+
+/// The release workflow takes the version from the tag, and build-msi refuses a version that is
+/// not the app package's, before anything is downloaded or built.
+#[test]
+fn the_tag_must_be_the_app_package_version_before_the_build() {
+    let yaml = read(WORKFLOW);
+    let jobs = release_jobs(&yaml);
+    let body: Vec<&str> = job(&jobs, "build-msi").iter().map(|l| l.trim()).collect();
+    let text = read(BUILD_SCRIPT);
+    let script: Vec<&str> = text.lines().collect();
+
+    let tag = r"if ($env:TAG -match '^v(\d+\.\d+\.\d+)$') { $version = $Matches[1] } else { throw";
+    let check = script_line(&script, "if ($package.version -ne $Version) {");
+    let download = script_line_starting(&script, "Invoke-WebRequest");
+    let build = script_line_starting(&script, "Run cargo @('build'");
+
+    assert!(body.iter().any(|l| l.starts_with(tag)), "build-msi takes X.Y.Z from the tag vX.Y.Z");
+    assert!(script[check + 1].trim().starts_with("throw "), "a version mismatch stops the script");
+    assert!(check < download && download < build, "the version is checked before the download and the build");
 }
 
 #[test]
