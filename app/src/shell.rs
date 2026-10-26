@@ -315,6 +315,12 @@ pub fn explore_on_worker(path: PathBuf, is_dir: bool, done: impl FnOnce(Result<(
     });
 }
 
+/// The text Copy Path puts on the clipboard for `path`: the absolute path, as Explore Folder and
+/// Command Prompt Here use it (a scan root typed as a relative path stays relative in the tree).
+fn clip_text(_path: &Path) -> String {
+    unimplemented!("clip_text")
+}
+
 /// `ShellExecuteExW` of `info`, shown as a normal window.
 fn execute(mut info: SHELLEXECUTEINFOW) -> windows::core::Result<()> {
     info.cbSize = size_of::<SHELLEXECUTEINFOW>() as u32;
@@ -540,6 +546,13 @@ mod tests {
         assert_ne!(thread, std::thread::current().id());
         let error = result.unwrap_err();
         assert!(error.contains(&missing.display().to_string()), "{error}");
+    }
+
+    #[test]
+    fn clip_text_of_a_path_under_a_relative_root_is_absolute() {
+        let got = clip_text(Path::new("scan\\sub\\f.txt"));
+
+        assert_eq!(got, std::env::current_dir().unwrap().join("scan\\sub\\f.txt").display().to_string());
     }
 
     #[test]

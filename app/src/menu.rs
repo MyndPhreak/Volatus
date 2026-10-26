@@ -164,6 +164,13 @@ pub fn query_flags(shift: bool) -> u32 {
     if shift { CMF_EXTENDEDVERBS } else { CMF_NORMAL }
 }
 
+/// True when the menu asked for `at` shows the extended verbs, as Explorer does: Shift held at a
+/// right-click, or Shift with the Menu key (`menu_key`: it is down now). Shift+F10 is the normal
+/// menu: its Shift only names the key.
+pub fn extended(_at: At, _shift: bool, _menu_key: bool) -> bool {
+    unimplemented!("extended")
+}
+
 /// `fMask` of `CMINVOKECOMMANDINFOEX`: Unicode and a point, plus the keys held at invoke.
 pub fn invoke_mask(shift: bool, ctrl: bool) -> u32 {
     let mut mask = CMIC_MASK_UNICODE | CMIC_MASK_PTINVOKE;
@@ -698,6 +705,26 @@ mod tests {
     #[test]
     fn query_flags_never_set_can_rename() {
         assert_eq!([query_flags(false), query_flags(true)].map(|f| f & 0x10), [0, 0]);
+    }
+
+    #[test]
+    fn extended_is_shift_at_a_right_click_and_shift_with_the_menu_key_only() {
+        let (click, key) = (At::Pointer(1.0, 2.0), At::Box(1.0, 2.0, 3.0, 4.0));
+        let cases = [
+            (click, false, false, false),
+            (click, false, true, false),
+            (click, true, false, true),
+            (click, true, true, true),
+            (key, false, false, false),
+            (key, false, true, false),
+            // Shift+F10: the Menu key is not down.
+            (key, true, false, false),
+            (key, true, true, true),
+        ];
+
+        let got: Vec<bool> = cases.iter().map(|&(at, shift, menu_key, _)| extended(at, shift, menu_key)).collect();
+
+        assert_eq!(got, cases.map(|c| c.3));
     }
 
     #[test]
