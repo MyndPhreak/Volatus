@@ -1,0 +1,318 @@
+import { Button, ListView, Palette, ProgressIndicator } from "std-widgets.slint";
+import { Glass } from "theme.slint";
+
+/// Which part of the delete dialog shows.
+export enum DeleteStep { closed, refused, confirm, running, done }
+
+/// What the delete dialog shows. All text comes from the host (`delete_flow::view`).
+export struct DeleteInfo {
+    step: DeleteStep,
+    title: string,
+    /// The permanent delete (Shift), not the Recycle Bin.
+    permanent: bool,
+    name: string,
+    path: string,
+    size: string,
+    counts: string,
+    /// What the action button does, in plain words.
+    effect: string,
+    /// For a link: only the link goes. Else "".
+    link-note: string,
+    /// Why the item cannot be deleted (refused).
+    text: string,
+    action: string,
+    /// "Cancel" while the dialog asks, "Close" after.
+    cancel: string,
+    /// Enter starts the action. False for the permanent delete: there, Cancel is the default.
+    action-default: bool,
+    /// The link that changes to the other mode.
+    switch-text: string,
+    progress-line: string,
+    /// 0 to 1, when not indeterminate.
+    progress: float,
+    indeterminate: bool,
+    /// Stop shows: the permanent delete runs.
+    can-stop: bool,
+    stopping: bool,
+    stop-note: string,
+    result: [string],
+    skips: [string],
+    rescan: bool,
+    /// The label of the "Restart as administrator" button, or "".
+    admin: string,
+}
+
+/// A text link: by mouse, Enter or Space.
+component LinkText inherits Rectangle {
+    in property <string> text;
+    callback clicked();
+
+    min-width: label.preferred-width + 8px;
+    height: label.preferred-height + 4px;
+    border-radius: 4px;
+    border-width: focus.has-focus ? 2px : 0px;
+    border-color: Palette.accent-background;
+    label := Text {
+        x: 4px;
+        y: 2px;
+        text: root.text;
+        color: touch.has-hover ? Palette.accent-background.darker(20%) : Palette.accent-background;
+        accessible-role: none;
+    }
+    focus := FocusScope {
+        accessible-role: button;
+        accessible-label: root.text;
+        accessible-action-default => { root.clicked(); }
+        key-pressed(event) => {
+            if (event.text == Key.Return || event.text == " ") {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+        touch := TouchArea {
+            mouse-cursor: pointer;
+            clicked => {
+                focus.focus();
+                root.clicked();
+            }
+        }
+    }
+}
+
+/// The delete dialog: a card over a dim layer that takes every pointer event, so nothing behind it
+/// can be used. Esc is Cancel or Close (never while a delete runs); Enter is the default button.
+export component DeleteDialog inherits Rectangle {
+    in property <DeleteInfo> info;
+    callback confirm();
+    callback cancel();
+    callback switch-mode();
+    callback stop();
+    callback rescan();
+    callback restart-admin();
+
+    background: #00000059;
+    // The layer under the card: clicks and wheel turns stop here.
+    TouchArea {
+        scroll-event(event) => { return accept; }
+    }
+    Rectangle {
+        width: min(560px, root.width - 48px);
+        height: min(card.preferred-height, root.height - 48px);
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+        border-radius: Glass.radius;
+        background: Palette.background;
+        border-width: 1px;
+        border-color: Glass.border;
+        drop-shadow-blur: 24px;
+        drop-shadow-color: #00000066;
+        // The card takes its own clicks, so a click on it does not reach the layer.
+        TouchArea { }
+        scope := FocusScope {
+            accessible-role: groupbox;
+            accessible-label: root.info.title;
+            init => { self.focus(); }
+            key-pressed(event) => {
+                if (event.text == Key.Escape) {
+                    if (root.info.step != DeleteStep.running) {
+                        root.cancel();
+                    }
+                    return accept;
+                }
+                if (event.text == Key.Return) {
+                    if (root.info.step == DeleteStep.confirm && root.info.action-default) {
+                        root.confirm();
+                    } else if (root.info.step != DeleteStep.running) {
+                        root.cancel();
+                    }
+                    return accept;
+                }
+                return reject;
+            }
+            // Before the focused button or link sees it: a held Enter or Space (a repeat) starts
+            // nothing, so only a new press can use a button.
+            capture-key-pressed(event) => {
+                if (event.repeat && (event.text == Key.Return || event.text == " ")) {
+                    return accept;
+                }
+                return reject;
+            }
+            card := VerticalLayout {
+                padding: 20px;
+                spacing: 10px;
+                Text {
+                    text: root.info.title;
+                    font-size: 16px;
+                    font-weight: 600;
+                    wrap: word-wrap;
+                    accessible-role: text;
+                }
+                if root.info.step == DeleteStep.refused : Text {
+                    text: root.info.text;
+                    wrap: word-wrap;
+                    accessible-role: text;
+                }
+                if root.info.step != DeleteStep.refused : VerticalLayout {
+                    spacing: 2px;
+                    Text {
+                        text: root.info.name;
+                        font-weight: 600;
+                        wrap: char-wrap;
+                        accessible-role: text;
+                    }
+                    Text {
+                        text: root.info.path;
+                        font-size: 12px;
+                        wrap: char-wrap;
+                        color: Glass.dim;
+                        accessible-role: text;
+                    }
+                    Text {
+                        text: root.info.size + ". " + root.info.counts;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                        color: Glass.dim;
+                        accessible-role: text;
+                    }
+                }
+
+                // Confirm: what the button does, the link note, the switch link, the buttons.
+                if root.info.step == DeleteStep.confirm : VerticalLayout {
+                    spacing: 10px;
+                    Text {
+                        text: root.info.effect;
+                        wrap: word-wrap;
+                        font-weight: root.info.permanent ? 600 : 400;
+                        color: root.info.permanent ? #d13438 : Palette.foreground;
+                        accessible-role: text;
+                    }
+                    if root.info.link-note != "" : Text {
+                        text: root.info.link-note;
+                        wrap: word-wrap;
+                        accessible-role: text;
+                    }
+                    HorizontalLayout {
+                        alignment: start;
+                        LinkText {
+                            text: root.info.switch-text;
+                            clicked => { root.switch-mode(); }
+                        }
+                    }
+                    HorizontalLayout {
+                        alignment: end;
+                        spacing: 8px;
+                        // The default button takes the focus, so Enter starts it. When the link
+                        // changes the mode, the focus goes to the new default button: Enter never
+                        // starts the action of the other mode.
+                        property <bool> action-is-default: root.info.action-default;
+                        init => {
+                            if (self.action-is-default) {
+                                action.focus();
+                            } else {
+                                cancel.focus();
+                            }
+                        }
+                        changed action-is-default => {
+                            if (self.action-is-default) {
+                                action.focus();
+                            } else {
+                                cancel.focus();
+                            }
+                        }
+                        action := Button {
+                            text: root.info.action;
+                            primary: root.info.action-default;
+                            clicked => { root.confirm(); }
+                        }
+                        cancel := Button {
+                            text: root.info.cancel;
+                            primary: !root.info.action-default;
+                            clicked => { root.cancel(); }
+                        }
+                    }
+                }
+
+                // Running: the bar, the line under it, and Stop for the permanent delete only.
+                if root.info.step == DeleteStep.running : VerticalLayout {
+                    spacing: 8px;
+                    // The Confirm buttons are gone: the dialog keeps the focus (Stop takes it below).
+                    init => { scope.focus(); }
+                    ProgressIndicator {
+                        height: 6px;
+                        progress: root.info.progress;
+                        indeterminate: root.info.indeterminate;
+                        accessible-label: "Delete progress";
+                    }
+                    Text {
+                        text: root.info.progress-line;
+                        wrap: word-wrap;
+                        accessible-role: text;
+                    }
+                    if root.info.stopping : Text {
+                        text: root.info.stop-note;
+                        wrap: word-wrap;
+                        accessible-role: text;
+                    }
+                    if root.info.can-stop : HorizontalLayout {
+                        alignment: end;
+                        init => { stop.focus(); }
+                        stop := Button {
+                            text: "Stop";
+                            enabled: !root.info.stopping;
+                            clicked => { root.stop(); }
+                        }
+                    }
+                }
+
+                // Done: the result, the skip list, then the buttons.
+                if root.info.step == DeleteStep.done : VerticalLayout {
+                    spacing: 4px;
+                    for line in root.info.result : Text {
+                        text: line;
+                        wrap: word-wrap;
+                        accessible-role: text;
+                    }
+                }
+                if root.info.step == DeleteStep.done && root.info.skips.length > 0 : Rectangle {
+                    height: min(160px, root.info.skips.length * 36px + 8px);
+                    border-radius: 4px;
+                    border-width: 1px;
+                    border-color: Glass.border;
+                    ListView {
+                        accessible-label: "Items that Volatus did not delete";
+                        for line in root.info.skips : VerticalLayout {
+                            padding: 4px;
+                            padding-right: 16px;
+                            Text {
+                                text: line;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                                accessible-role: list-item;
+                                accessible-label: line;
+                            }
+                        }
+                    }
+                }
+                if root.info.step == DeleteStep.done || root.info.step == DeleteStep.refused : HorizontalLayout {
+                    alignment: end;
+                    spacing: 8px;
+                    init => { close.focus(); }
+                    if root.info.admin != "" : Button {
+                        text: root.info.admin;
+                        clicked => { root.restart-admin(); }
+                    }
+                    if root.info.rescan : Button {
+                        text: "Scan again";
+                        clicked => { root.rescan(); }
+                    }
+                    close := Button {
+                        text: root.info.cancel;
+                        primary: true;
+                        clicked => { root.cancel(); }
+                    }
+                }
+            }
+        }
+    }
+}

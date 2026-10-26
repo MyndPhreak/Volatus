@@ -2,7 +2,7 @@
 //! helpers and treemap hit-testing. Plain functions, no Slint types, so it is unit tested.
 
 use crate::model::{Unit, display_name};
-use scan::{NodeId, Tree};
+use scan::{Detached, NodeId, Tree};
 use std::cmp::Ordering;
 use std::collections::HashSet;
 use treemap::Rect;
@@ -160,6 +160,43 @@ pub fn view_for_selection(tree: &Tree, view_root: NodeId, selected: NodeId) -> N
     tree.node(selected).parent.unwrap_or(selected)
 }
 
+/// Lowers the file count of `parent` and of each of its ancestors by `d.files`, after the delete
+/// of a node. `parent` is the node's former parent: read it BEFORE `Tree::detach`, which clears
+/// the link. The detached node's own entry is left as it was; no state may keep its id.
+pub fn counts_after_detach(counts: &mut [u64], tree: &Tree, parent: Option<NodeId>, d: &Detached) {
+    let mut cur = parent;
+    while let Some(p) = cur {
+        let c = &mut counts[p.0 as usize];
+        *c = c.saturating_sub(d.files);
+        cur = tree.node(p).parent;
+    }
+}
+
+/// The folder the treemap must show after `deleted` is removed: `deleted`'s parent if the view is
+/// `deleted` or under it, else `view_root` unchanged. Call BEFORE `Tree::detach`, which clears the
+/// parent links it walks. Store the result, so the view never keeps a detached id.
+pub fn view_for_deleted(tree: &Tree, view_root: NodeId, deleted: NodeId) -> NodeId {
+    let mut n = Some(view_root);
+    while let Some(c) = n {
+        if c == deleted {
+            return tree.node(deleted).parent.unwrap_or(view_root);
+        }
+        n = tree.node(c).parent;
+    }
+    view_root
+}
+
+/// The node to select after `deleted` is removed: its next sibling, else its previous sibling,
+/// else its parent. `None` for the scan root. Call BEFORE `Tree::detach`, which clears the sibling
+/// chain it reads. Store the result, so the selection never keeps a detached id.
+pub fn selection_after(tree: &Tree, deleted: NodeId) -> Option<NodeId> {
+    let parent = tree.node(deleted).parent?;
+    let node = tree.node(deleted);
+    // The chain is singly linked, so the previous sibling is found by walking from the first child.
+    let prev = tree.children(parent).take_while(|&c| c != deleted).last();
+    node.next_sibling.or(prev).or(Some(parent))
+}
+
 /// The node whose rect outlines `selected`: itself if drawn, else its nearest drawn folder.
 /// `None` if nothing on its chain of folders is drawn.
 pub fn outline_node(tree: &Tree, rects: &[Rect], selected: NodeId) -> Option<NodeId> {
@@ -199,23 +236,6 @@ pub fn zoom_way(tree: &Tree, shown: Option<NodeId>, rects: &[Rect], to: NodeId) 
     } else {
         ZoomWay::Still
     }
-}
-
-/// Where the selection and the treemap go after a removal (`after_removal`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AfterRemoval {
-    /// The node to select: the folder the removed node was in.
-    pub select: NodeId,
-    /// The folder the treemap must show now, or `None` to keep the shown one.
-    pub view: Option<NodeId>,
-}
-
-/// Where the selection and the treemap go after `r` was removed from `tree` (call it after
-/// `Tree::remove`) while the treemap shows `view_root`: the parent is selected; the treemap
-/// shows the parent only when the removal took the view root with it.
-pub fn after_removal(tree: &Tree, view_root: NodeId, r: &scan::Removed) -> AfterRemoval {
-    // The view root is detached only when it or one of its ancestors was removed.
-    AfterRemoval { select: r.parent, view: (!tree.is_attached(view_root)).then_some(r.parent) }
 }
 
 /// Map text for a folder with no file that has a size.
@@ -814,48 +834,6 @@ mod tests {
         assert_eq!(open_target(&t, b1), Some((b, b1)));
     }
 
-    // ---- after_removal ----
-    /// `after_removal` for the treemap at `view` after `gone` was removed from `sample()`.
-    fn removal(view: &[&str], gone: &[&str]) -> (AfterRemoval, Tree, NodeId) {
-        let mut t = sample();
-        let path = |names: &[&str]| names.iter().fold(t.root(), |n, name| find(&t, n, name));
-        let (view, gone) = (path(view), path(gone));
-        let r = t.remove(gone).unwrap();
-        (after_removal(&t, view, &r), t, gone)
-    }
-
-    #[test]
-    fn after_removal_inside_the_view_selects_the_parent_and_keeps_the_view() {
-        for gone in [&["a", "sub"][..], &["a", "sub", "s1"]] {
-            let (after, t, _) = removal(&["a"], gone);
-
-            let parent = gone[..gone.len() - 1].iter().fold(t.root(), |n, name| find(&t, n, name));
-            assert_eq!(after, AfterRemoval { select: parent, view: None }, "removed {gone:?}");
-        }
-    }
-
-    #[test]
-    fn after_removal_of_the_view_root_shows_its_parent() {
-        let (after, t, _) = removal(&["a", "sub"], &["a", "sub"]);
-
-        let a = find(&t, t.root(), "a");
-        assert_eq!(after, AfterRemoval { select: a, view: Some(a) });
-    }
-
-    #[test]
-    fn after_removal_of_an_ancestor_of_the_view_root_shows_the_ancestor_parent() {
-        let (after, t, _) = removal(&["a", "sub"], &["a"]);
-
-        assert_eq!(after, AfterRemoval { select: t.root(), view: Some(t.root()) });
-    }
-
-    #[test]
-    fn after_removal_outside_the_view_selects_the_parent_and_keeps_the_view() {
-        let (after, t, _) = removal(&["a"], &["b", "b1"]);
-
-        assert_eq!(after, AfterRemoval { select: find(&t, t.root(), "b"), view: None });
-    }
-
     // ---- view_for_selection ----
     #[test]
     fn view_for_selection_descendant_keeps_the_view() {
@@ -901,6 +879,113 @@ mod tests {
         let t = sample();
         let sub = find(&t, find(&t, t.root(), "a"), "sub");
         assert_eq!(view_for_selection(&t, sub, t.root()), t.root());
+    }
+
+    // ---- counts_after_detach ----
+    #[test]
+    fn counts_after_detach_lowers_every_ancestor_by_the_subtree_files() {
+        let mut t = sample();
+        let mut counts = file_counts(&t);
+        let a = find(&t, t.root(), "a");
+        let sub = find(&t, a, "sub");
+        let before = counts.clone();
+        let parent = t.node(sub).parent;
+        let d = t.detach(sub).unwrap();
+        counts_after_detach(&mut counts, &t, parent, &d);
+        assert_eq!(counts[a.0 as usize], before[a.0 as usize] - 1);
+        assert_eq!(counts[t.root().0 as usize], before[t.root().0 as usize] - 1);
+        // Every node still in the tree agrees with a fresh count.
+        let fresh = file_counts(&t);
+        let mut stack = vec![t.root()];
+        while let Some(n) = stack.pop() {
+            assert_eq!(counts[n.0 as usize], fresh[n.0 as usize], "{}", t.name(n));
+            stack.extend(t.children(n));
+        }
+    }
+
+    #[test]
+    fn counts_after_detach_file_under_the_root_lowers_only_the_root() {
+        let mut t = sample();
+        let mut counts = file_counts(&t);
+        let c = find(&t, t.root(), "c");
+        let a = find(&t, t.root(), "a");
+        let before = counts.clone();
+        let parent = t.node(c).parent;
+        let d = t.detach(c).unwrap();
+        counts_after_detach(&mut counts, &t, parent, &d);
+        assert_eq!(counts[t.root().0 as usize], before[t.root().0 as usize] - 1);
+        assert_eq!(counts[a.0 as usize], before[a.0 as usize]);
+    }
+
+    #[test]
+    fn counts_after_detach_no_parent_changes_nothing() {
+        let t = sample();
+        let mut counts = file_counts(&t);
+        let before = counts.clone();
+        counts_after_detach(&mut counts, &t, None, &Detached { size: 1, allocated: 1, files: 3, dirs: 0 });
+        assert_eq!(counts, before);
+    }
+
+    // ---- view_for_deleted ----
+    #[test]
+    fn view_for_deleted_view_is_the_deleted_folder_shows_its_parent() {
+        let t = sample();
+        let a = find(&t, t.root(), "a");
+        assert_eq!(view_for_deleted(&t, a, a), t.root());
+    }
+
+    #[test]
+    fn view_for_deleted_view_inside_the_deleted_folder_shows_its_parent() {
+        let t = sample();
+        let a = find(&t, t.root(), "a");
+        let sub = find(&t, a, "sub");
+        assert_eq!(view_for_deleted(&t, sub, a), t.root());
+    }
+
+    #[test]
+    fn view_for_deleted_view_elsewhere_is_unchanged() {
+        let t = sample();
+        let a = find(&t, t.root(), "a");
+        let b = find(&t, t.root(), "b");
+        assert_eq!(view_for_deleted(&t, b, a), b);
+        // The view above the deleted node is unchanged too.
+        assert_eq!(view_for_deleted(&t, t.root(), a), t.root());
+    }
+
+    // ---- selection_after ----
+    #[test]
+    fn selection_after_first_child_moves_to_the_next_sibling() {
+        let t = sample();
+        let kids: Vec<NodeId> = t.children(t.root()).collect();
+        assert_eq!(selection_after(&t, kids[0]), Some(kids[1]));
+    }
+
+    #[test]
+    fn selection_after_middle_child_moves_to_the_next_sibling() {
+        let t = sample();
+        let kids: Vec<NodeId> = t.children(t.root()).collect();
+        assert_eq!(selection_after(&t, kids[1]), Some(kids[2]));
+    }
+
+    #[test]
+    fn selection_after_last_child_moves_to_the_previous_sibling() {
+        let t = sample();
+        let kids: Vec<NodeId> = t.children(t.root()).collect();
+        assert_eq!(selection_after(&t, kids[kids.len() - 1]), Some(kids[kids.len() - 2]));
+    }
+
+    #[test]
+    fn selection_after_only_child_moves_to_the_parent() {
+        let t = sample();
+        let sub = find(&t, find(&t, t.root(), "a"), "sub");
+        let s1 = find(&t, sub, "s1");
+        assert_eq!(selection_after(&t, s1), Some(sub));
+    }
+
+    #[test]
+    fn selection_after_scan_root_is_none() {
+        let t = sample();
+        assert_eq!(selection_after(&t, t.root()), None);
     }
 
     // ---- outline_node ----

@@ -67,6 +67,15 @@ When the owner right-clicks a file or folder in Volatus (on a treemap tile, a tr
 - **State.** The outdated notice, the overlay and the pending check live in `Session`, so they survive a resize and a zoom; a rescan of the same root clears all three, and "New scan" clears them too.
 - **Terminal.** Windows Terminal (`wt.exe -d <folder>`) when it exists, else `cmd.exe`. If neither starts, a one-line banner message.
 
+## Addendum, 2026-10-26: one Delete, the Volatus Delete
+
+The owner overruled two lines of this design on 2026-10-26, when the delete branch (`docs/superpowers/specs/2026-10-25-volatus-delete-design.md`) was merged with this menu:
+
+- "No Volatus-made file operations (no own Delete)" no longer applies to Delete. The Volatus group has a **Delete** item (menu id 6). It opens the delete dialog of the delete design for the item the menu was opened on: the Recycle Bin, or the permanent delete when Shift is down at the moment the item is chosen (`GetKeyState` and `GetAsyncKeyState` must both say so). The confirm dialog and all the delete safety rules apply.
+- "No special protection against deleting system folders" no longer applies: the delete design's protected folders, UNC refusal and checks apply to that Delete.
+- The shell's own Delete is taken out of the menu: after `QueryContextMenu`, each top-level item whose canonical verb (`GCS_VERBW`) is `delete` goes, then separators left at an edge or doubled. An item whose verb Windows does not give stays. So the menu has one Delete.
+- "Delete detection" and the "overlay" are gone. A node leaves the tree only through the delete design's removal (`Tree::detach`, `scan_apply::remove_from`). A shell action that makes the item vanish marks the map outdated (Rescan).
+
 ## Open items for the owner
 
 None. The owner confirmed on 2026-10-26: (1) the `windows` crate is added as a direct dependency of the app, in the version family already in `Cargo.lock` (recorded deviation); (2) the menu ships with no runtime flag (recorded deviation).

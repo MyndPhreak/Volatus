@@ -16,8 +16,12 @@
 //! - `CoInitializeEx` (STA) gives `S_FALSE` on the UI thread (winit called `OleInitialize`): ready.
 //! - The shell gets the plain path: a `\\?\` path fails (S10) and the menu degrades.
 //! - `QueryContextMenu` can block up to about 0.8 s (S9): a wait cursor shows meanwhile.
+//!
+//! The shell's own Delete is taken out of the menu after `QueryContextMenu` (`hide_shell_delete`):
+//! Volatus has its own Delete in its group at the top (owner's decision, 2026-10-26), so the menu
+//! has one Delete. An item whose verb the shell does not give stays.
 
-use crate::menu::{Anchor, Cmd, Item, SHELL_FIRST, SHELL_LAST};
+use crate::menu::{Anchor, Cmd, Item, Picked, SHELL_FIRST, SHELL_LAST, is_delete_verb, picked, separators_to_remove};
 use std::cell::{Cell, RefCell};
 use std::path::{Component, Path, PathBuf};
 use windows::Win32::Foundation::{E_ABORT, E_FAIL, E_INVALIDARG, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
@@ -30,8 +34,9 @@ use windows::Win32::UI::Shell::{
     SEE_MASK_FLAG_NO_UI, SEE_MASK_IDLIST, SHELLEXECUTEINFOW, SHOpenFolderAndSelectItems, SHParseDisplayName, SetWindowSubclass, ShellExecuteExW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, GWLP_HINSTANCE, GetCursorPos, GetWindowLongPtrW,
-    HMENU, IDC_WAIT, InsertMenuW, LoadCursorW, MF_BYPOSITION, MF_GRAYED, MF_SEPARATOR, MF_STRING, RegisterClassW, SW_SHOWNORMAL,
+    CreatePopupMenu, CreateWindowExW, DefWindowProcW, DeleteMenu, DestroyMenu, GWLP_HINSTANCE, GetCursorPos, GetMenuItemCount,
+    GetMenuItemID, GetMenuItemInfoW, GetWindowLongPtrW, HMENU, IDC_WAIT, InsertMenuW, LoadCursorW, MENUITEMINFOW, MF_BYPOSITION,
+    MF_GRAYED, MF_SEPARATOR, MF_STRING, MFT_SEPARATOR, MIIM_FTYPE, RegisterClassW, SW_SHOWNORMAL,
     SendMessageW, SetCursor, TPM_RETURNCMD, TPM_RIGHTBUTTON, TPM_VERTICAL, TPMPARAMS, TrackPopupMenuEx, WINDOW_EX_STYLE, WM_DRAWITEM, WM_INITMENUPOPUP,
     WM_MEASUREITEM, WM_MENUCHAR, WM_MOUSEMOVE, WM_NCDESTROY, WNDCLASSW, WS_POPUP,
 };
@@ -137,8 +142,6 @@ impl Popup {
     /// The verb of each shell item of the top level, in menu order (`None`: the shell gave none).
     #[cfg(test)]
     pub fn verbs(&self) -> Vec<Option<String>> {
-        use crate::menu::{Picked, picked};
-        use windows::Win32::UI::WindowsAndMessaging::{GetMenuItemCount, GetMenuItemID};
         // SAFETY: the menu lives as long as `self`.
         let count = unsafe { GetMenuItemCount(Some(self.menu)) };
         (0..count)
@@ -149,15 +152,19 @@ impl Popup {
             .collect()
     }
 
+    /// Whether each line of the top level is a separator, in menu order.
+    #[cfg(test)]
+    pub fn separator_lines(&self) -> Vec<bool> {
+        // SAFETY: the menu lives as long as `self`.
+        let count = unsafe { GetMenuItemCount(Some(self.menu)) };
+        (0..count.max(0) as u32).map(|i| is_separator(self.menu, i)).collect()
+    }
+
     /// The canonical verb of the shell item at `offset` from `SHELL_FIRST` (`GCS_VERBW`), or `None`
     /// when the shell gives none (an error or an empty verb).
+    #[cfg(test)]
     pub fn verb(&self, offset: u32) -> Option<String> {
-        let cm = self.shell.as_ref()?;
-        let mut buf = [0u16; 260];
-        // SAFETY: the buffer holds `buf.len()` UTF-16 units, as GCS_VERBW writes.
-        unsafe { cm.GetCommandString(offset as usize, GCS_VERBW, None, PSTR(buf.as_mut_ptr().cast()), buf.len() as u32) }.ok()?;
-        let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
-        (len > 0).then(|| String::from_utf16_lossy(&buf[..len]))
+        verb_of(self.shell.as_ref()?, offset)
     }
 
     /// Shows the menu at `at` until the user picks an item or closes it, owned by `owner` (from
@@ -209,7 +216,45 @@ impl Popup {
     }
 }
 
-/// Builds the shell menu of `path` into `menu` at its top, ids `SHELL_FIRST..=SHELL_LAST`.
+/// The canonical verb of the item at `offset` from `SHELL_FIRST` of the shell menu `cm`
+/// (`GCS_VERBW`), or `None` when the shell gives none (an error or an empty verb).
+fn verb_of(cm: &IContextMenu, offset: u32) -> Option<String> {
+    let mut buf = [0u16; 260];
+    // SAFETY: the buffer holds `buf.len()` UTF-16 units, as GCS_VERBW writes.
+    unsafe { cm.GetCommandString(offset as usize, GCS_VERBW, None, PSTR(buf.as_mut_ptr().cast()), buf.len() as u32) }.ok()?;
+    let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    (len > 0).then(|| String::from_utf16_lossy(&buf[..len]))
+}
+
+/// Takes the shell's own Delete out of `menu`, which holds only the shell items of `cm` yet: every
+/// top-level item whose canonical verb is `delete` (`menu::is_delete_verb`). An item whose verb
+/// the shell does not give stays (never a guess). Then the separators left at an edge or doubled
+/// go (`menu::separators_to_remove`). Returns how many items went.
+fn hide_shell_delete(cm: &IContextMenu, menu: HMENU) -> usize {
+    // SAFETY: a live popup menu of this thread.
+    let count = unsafe { GetMenuItemCount(Some(menu)) }.max(0) as u32;
+    let is_delete = |at: u32| {
+        // SAFETY: `at` is a position of `menu`; a submenu gives no id (`picked` is `Nothing`).
+        let id = unsafe { GetMenuItemID(menu, at as i32) };
+        matches!(picked(id), Picked::Shell(offset) if verb_of(cm, offset).is_some_and(|v| is_delete_verb(&v)))
+    };
+    let gone: Vec<u32> = (0..count).filter(|&at| is_delete(at)).collect();
+    for &at in gone.iter().rev() {
+        // SAFETY: a position of `menu`, removed from the last one back.
+        if let Err(e) = unsafe { DeleteMenu(menu, at, MF_BYPOSITION) } {
+            eprintln!("The shell's Delete could not be taken out of the menu: {e}");
+        }
+    }
+    let lines: Vec<bool> = (0..count - gone.len() as u32).map(|at| is_separator(menu, at)).collect();
+    for at in separators_to_remove(&lines).into_iter().rev() {
+        // SAFETY: a position of `menu`, removed from the last one back.
+        let _ = unsafe { DeleteMenu(menu, at as u32, MF_BYPOSITION) };
+    }
+    gone.len()
+}
+
+/// Builds the shell menu of `path` into `menu` at its top, ids `SHELL_FIRST..=SHELL_LAST`, with the
+/// shell's own Delete taken out (`hide_shell_delete`).
 fn shell_menu(owner: HWND, path: &Path, menu: HMENU, flags: u32) -> windows::core::Result<(IContextMenu, Pidl)> {
     // The shell extensions can take most of a second here (S9): a wait cursor shows meanwhile.
     // SAFETY: a system cursor; the old one is put back.
@@ -224,6 +269,7 @@ fn shell_menu(owner: HWND, path: &Path, menu: HMENU, flags: u32) -> windows::cor
         let cm: IContextMenu = unsafe { folder.GetUIObjectOf(owner, &[child as *const _], None)? };
         // SAFETY: `menu` is a live popup menu of this thread; the id range is SHELL_FIRST..=SHELL_LAST.
         unsafe { cm.QueryContextMenu(menu, 0, SHELL_FIRST, SHELL_LAST, flags) }.ok()?;
+        hide_shell_delete(&cm, menu);
         Ok((cm, pidl))
     })();
     if let Some(old) = old {
@@ -231,6 +277,13 @@ fn shell_menu(owner: HWND, path: &Path, menu: HMENU, flags: u32) -> windows::cor
         unsafe { SetCursor(Some(old)) };
     }
     built
+}
+
+/// True when the line at position `at` of `menu` is a separator.
+fn is_separator(menu: HMENU, at: u32) -> bool {
+    let mut info = MENUITEMINFOW { cbSize: size_of::<MENUITEMINFOW>() as u32, fMask: MIIM_FTYPE, ..Default::default() };
+    // SAFETY: `info` is a MENUITEMINFOW with its size set; only the type is asked for.
+    unsafe { GetMenuItemInfoW(menu, at, true, &mut info) }.is_ok() && (info.fType.0 & MFT_SEPARATOR.0) != 0
 }
 
 /// Puts the Volatus `item` at position `at` of `menu`.
@@ -298,7 +351,7 @@ pub fn act(cmd: Cmd, path: &Path, is_dir: bool) -> Result<(), String> {
             let copied = arboard::Clipboard::new().and_then(|mut c| c.set_text(clip_text(path)));
             copied.map_err(|e| failed("The clipboard cannot take", &e))
         }
-        Cmd::ShowFolder | Cmd::Rescan => Ok(()),
+        Cmd::ShowFolder | Cmd::Rescan | Cmd::Delete => Ok(()),
     }
 }
 
@@ -473,25 +526,43 @@ mod tests {
     }
 
     #[test]
-    fn popup_of_a_file_has_delete_and_properties_and_no_rename() {
+    fn popup_of_a_file_has_properties_and_no_delete_of_the_shell_and_no_rename() {
         let dir = Scratch::new("file");
         let file = dir.0.join("f.txt");
         fs::write(&file, b"hello").unwrap();
 
         let verbs = verbs_of(&file, false);
 
-        assert_eq!([has(&verbs, "delete"), has(&verbs, "properties"), has(&verbs, "rename")], [true, true, false], "{verbs:?}");
+        assert_eq!([has(&verbs, "delete"), has(&verbs, "properties"), has(&verbs, "rename")], [false, true, false], "{verbs:?}");
     }
 
     #[test]
-    fn popup_of_a_folder_has_delete() {
+    fn popup_of_a_folder_has_no_delete_of_the_shell_with_or_without_shift() {
         let dir = Scratch::new("folder");
         let folder = dir.0.join("sub");
         fs::create_dir(&folder).unwrap();
 
-        let verbs = verbs_of(&folder, false);
+        let (plain, extended) = (verbs_of(&folder, false), verbs_of(&folder, true));
 
-        assert!(has(&verbs, "delete"), "{verbs:?}");
+        assert!(!has(&plain, "delete") && !has(&extended, "delete"), "plain {plain:?}, shift {extended:?}");
+        assert!(has(&plain, "properties"), "{plain:?}");
+    }
+
+    #[test]
+    fn popup_shell_part_has_no_separator_at_an_edge_or_doubled() {
+        let dir = Scratch::new("separators");
+        let file = dir.0.join("f.txt");
+        fs::write(&file, b"hello").unwrap();
+        let folder = dir.0.join("sub");
+        fs::create_dir(&folder).unwrap();
+
+        for (path, shift) in [(&file, false), (&file, true), (&folder, false), (&folder, true)] {
+            let popup = Popup::new(HWND::default(), Some(path), query_flags(shift), |_| Vec::new()).unwrap();
+            let lines: String = popup.separator_lines().iter().map(|&sep| if sep { '-' } else { 'x' }).collect();
+
+            assert!(lines.contains('-'), "{path:?} shift {shift}: the shell part has separators to check: {lines}");
+            assert!(!lines.starts_with('-') && !lines.ends_with('-') && !lines.contains("--"), "{path:?} shift {shift}: {lines}");
+        }
     }
 
     #[test]

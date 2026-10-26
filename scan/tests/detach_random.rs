@@ -1,10 +1,11 @@
-//! `Tree::remove` over random trees, checked against a tree rolled up again from scratch from
-//! the entries that are left after each removal.
+//! `Tree::detach` over random trees, checked against a tree rolled up again from scratch from
+//! the entries that are left after each removal. (Ported from PR #7's `Tree::remove` test: the
+//! delete keeps one way to take a node out of the tree.)
 mod common;
 
 use common::reference::Rng;
 use scan::rollup::{RawEntry, rollup};
-use scan::{NodeId, Removed, Tree};
+use scan::{Detached, NodeId, Tree};
 use std::collections::HashSet;
 
 /// Random entries in walk order: entry `i` has id `i` and a folder before it as its parent, so
@@ -53,6 +54,25 @@ fn recomputed(entries: &[RawEntry], gone: &HashSet<u64>) -> (Tree, Vec<Option<No
     (rollup(0, left).unwrap().tree, map)
 }
 
+/// True when `n` is the root or its chain of parents reaches the root.
+fn attached(tree: &Tree, n: NodeId) -> bool {
+    std::iter::successors(Some(n), |&c| tree.node(c).parent).any(|c| c == tree.root())
+}
+
+/// Files and folders in the subtree of `n`, `n` included.
+fn files_and_dirs(tree: &Tree, n: NodeId) -> (u64, u64) {
+    let (mut files, mut dirs, mut stack) = (0, 0, vec![n]);
+    while let Some(c) = stack.pop() {
+        if tree.node(c).is_dir {
+            dirs += 1;
+        } else {
+            files += 1;
+        }
+        stack.extend(tree.children(c));
+    }
+    (files, dirs)
+}
+
 /// Every original node of `tree` against the recomputed tree: attached or not, and for the
 /// attached ones the parent, totals and children in order.
 fn assert_matches(tree: &Tree, entries: &[RawEntry], gone: &HashSet<u64>, case: &str) {
@@ -60,7 +80,7 @@ fn assert_matches(tree: &Tree, entries: &[RawEntry], gone: &HashSet<u64>, case: 
     let to_new = |n: NodeId| map[n.0 as usize].unwrap_or_else(|| panic!("{case}: {n:?} is attached in the tree but removed"));
     for (i, new) in map.iter().enumerate() {
         let n = NodeId(i as u32);
-        assert_eq!(tree.is_attached(n), new.is_some(), "{case}: is_attached({n:?})");
+        assert_eq!(attached(tree, n), new.is_some(), "{case}: attached({n:?})");
         let Some(new) = *new else { continue };
         let (got, exp) = (tree.node(n), want.node(new));
         assert_eq!((got.size, got.allocated, got.is_dir), (exp.size, exp.allocated, exp.is_dir), "{case}: totals of {n:?}");
@@ -83,7 +103,7 @@ fn pick(rng: &mut Rng, tree: &Tree, entries: &[RawEntry], gone: &HashSet<u64>) -
 }
 
 #[test]
-fn remove_random_removals_match_a_tree_rolled_up_again_from_scratch() {
+fn detach_random_removals_match_a_tree_rolled_up_again_from_scratch() {
     let mut rng = Rng::new(0x005E_ED0F_2E30);
     for t in 0..400 {
         let entries = random_entries(&mut rng);
@@ -93,13 +113,12 @@ fn remove_random_removals_match_a_tree_rolled_up_again_from_scratch() {
             let i = pick(&mut rng, &tree, &entries, &gone);
             let case = format!("tree {t}, removal {k} of node {i}");
             let (before, map) = recomputed(&entries, &gone);
-            let want = map[i as usize].filter(|_| i != 0).map(|new| Removed {
-                parent: NodeId(entries[i as usize].parent as u32),
-                size: before.node(new).size,
-                allocated: before.node(new).allocated,
+            let want = map[i as usize].filter(|_| i != 0).map(|new| {
+                let (files, dirs) = files_and_dirs(&before, new);
+                Detached { size: before.node(new).size, allocated: before.node(new).allocated, files, dirs }
             });
 
-            let got = tree.remove(NodeId(i as u32));
+            let got = tree.detach(NodeId(i as u32));
 
             assert_eq!(got, want, "{case}");
             if got.is_some() {
