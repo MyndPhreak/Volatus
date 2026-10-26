@@ -165,3 +165,39 @@ Icon style, resizable sidebar and treemap, the update toggle, drive-info toggle,
 3. With the folder tree hidden, the treemap is wider, and the arrow keys on the map still change the selection.
 4. With all five parts hidden, Cancel works during a scan and the gear still opens the flyout.
 5. A `settings.json` holding `{"theme": 5}` starts Volatus with the default theme and the other fields, and leaves the old file as `settings.json.bad`.
+
+## Spike result
+
+Task 0 was run on 2026-10-26 with a scratch build (Slint 1.18.1, window-vibrancy 0.8.1, winit 0.30.13, Windows 11 build 26300). The scratch code is discarded. Windows was in **Dark** during the run (`AppsUseLightTheme` = 0); Windows Light was not tried, because the spike must not change the owner's Windows settings. Everything below was seen in log output unless marked "not verified".
+
+**What works**
+
+- Rust can force both schemes while Windows is Dark. `export { Palette }` in `main.slint`, then `ui.global::<Palette>().set_color_scheme(slint::language::ColorScheme::Light)` (and `::Dark`) compiles and takes effect at once: `Palette.color-scheme`, `ui.get_dark()` and `on_theme_changed` all follow. `on_theme_changed` fires once for each real flip of `dark` (and not when the forced value equals the current one). A public function on `MainWindow` that assigns `Palette.color-scheme = ColorScheme.dark` works the same way; the export is the shorter route.
+- Before any forcing, and once the event loop runs, `Palette.color-scheme` read `Dark` with Windows Dark. Before the event loop runs (right after `show()`), it reads `Unknown` and `get_dark()` is false: Slint receives the system scheme during the first loop turn, and `on_theme_changed` fires once then. Windows Light was not observed; the mapping is symmetric in `winitwindowadapter.rs` (winit `Theme::Light` gives `ColorScheme::Light`).
+- `window_vibrancy::apply_mica(&handle, Some(dark))` returned `Ok(())` at runtime, repeatedly, from a timer callback after the event loop started. `DwmGetWindowAttribute` read back `DWMWA_USE_IMMERSIVE_DARK_MODE` as 1, then 0 after `Some(false)`, then 1 after `Some(true)`; the backdrop type (`DWMWA_SYSTEMBACKDROP_TYPE`) stayed 2 (Mica). `None` leaves the dark attribute as it was. The Mica call is therefore also the title-bar dark-mode call: nothing else is needed for the title bar. Only the owner's eyes can confirm how the backdrop and title bar look.
+
+**What does not work**
+
+- `ColorScheme::Unknown` does **not** release the override. After it, `Palette.color-scheme` read `Unknown` and `get_dark()` was false while Windows was Dark. Assigning the property replaces its system binding, and Slint has no way to restore it.
+
+**How to follow Windows after forcing, and how a live change is seen**
+
+- Do not release. Always write `Palette.color-scheme` from Rust, with `dark = match choice { Light => false, Dark => true, Follow => system_dark }`.
+- `system_dark` comes from winit, which keeps tracking Windows while `Palette` is forced: with `slint = { features = ["raw-window-handle-06", "unstable-winit-030"] }`, `use slint::winit_030::WinitWindowAccessor;` then `ui.window().with_winit_window(|w| w.theme())` returned `Some(Some(Theme::Dark))` at every step, even while `Palette` was forced Light. Before the event loop starts it is `None`. No registry read is needed.
+- A live Windows change: `ui.window().on_winit_window_event(|_, e| ...)` (same trait) receives `winit::event::WindowEvent::ThemeChanged(theme)`; Slint's filter runs for every window event (`winitwindowadapter.rs:1258`), and winit sends `ThemeChanged` from its `WM_SETTINGCHANGE` handler only when the theme really changed. This is the smallest reliable signal. **Not verified live** (it needs a real Windows theme flip, which the spike must not do); the owner flips Windows once in Task 4 step 4. Fallback if it fails: a 1 s `Timer` that reads `with_winit_window(|w| w.theme())` and compares with the last value, or the registry value `HKCU\...\Themes\Personalize\AppsUseLightTheme`.
+- Winit's `WM_SETTINGCHANGE` handler resets the title bar to the system theme before it sends `ThemeChanged` (`dark_mode.rs`, `try_theme`). So the handler must always re-apply the effective theme and Mica, even in Light or Dark mode.
+
+**Code recipe for Task 4**
+
+1. `app/Cargo.toml`: add `"unstable-winit-030"` to the `slint` features. `main.slint`: `export { Palette }` above `MainWindow`.
+2. One host function, `fn apply_theme(ui: &MainWindow, choice: ThemeChoice)`: `let system_dark = ui.window().with_winit_window(|w| w.theme()).flatten() == Some(slint::winit_030::winit::window::Theme::Dark);` (an unknown system theme: keep the current value), `let dark = match choice {..};`, then `ui.global::<Palette>().set_color_scheme(if dark { ColorScheme::Dark } else { ColorScheme::Light });`, then `window_vibrancy::apply_mica(&ui.window().window_handle(), Some(dark))` with the existing `set_mica(false)` on `Err`.
+3. Call `apply_theme` in the existing `invoke_from_event_loop` block that applies Mica today (`main.rs` ~:1445), once the window exists, with the loaded setting; and from `theme-chosen`.
+4. Register `on_winit_window_event` there too: on `ThemeChanged`, queue `Timer::single_shot(Duration::ZERO, ...)` that calls `apply_theme(ui, current_choice)`. The existing `changed dark` and `on_theme_changed` then redraw the map and chips.
+
+**Changes to the plan's Task 4**
+
+- Step 2 says to "force with `Palette.color-scheme`, or release it for Follow Windows". Release is impossible; replace with "always write `Palette.color-scheme` from `apply_theme`, with Follow Windows reading the system theme through `with_winit_window(|w| w.theme())`".
+- Step 2 passes `Some(dark)` to `apply_mica`: confirmed, keep it, and call it on every live system change too.
+- Add the `unstable-winit-030` feature to the "Files" list (`app/Cargo.toml`); run `cargo tree -p app -d` and check `Cargo.lock` for new crates when adding it.
+- Add `fn effective_dark(choice, system_dark) -> bool` as a pure function with a test (Light and Dark ignore the system; Follow returns it), as Negotium's `settings::effective_dark` does.
+- Step 4 (run by hand) must add: with the app in Dark or Light mode, flip Windows once and check that the UI follows only in Follow Windows, and that the title bar and backdrop keep the chosen mode. This is the one item the spike could not prove.
