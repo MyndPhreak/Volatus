@@ -126,6 +126,11 @@ pub(crate) fn open_in(
     if !matches!(s.delete.state, DialogState::Closed) {
         return false;
     }
+    // A removal still waits to leave the list: no second delete until it has (never two pending).
+    if s.delete.pending.is_some() {
+        s.delete.state = DialogState::Refused { text: delete_flow::BUSY_TEXT.to_string() };
+        return false;
+    }
     let Some(origin) = origin_of(s) else { return false };
     let Some(l) = s.loaded.as_ref() else { return false };
     let (tree, counts) = (&l.data.tree, &l.data.counts);
@@ -167,6 +172,10 @@ pub(crate) fn begin_confirm(s: &mut Session, check: impl FnOnce(&Path, &Path, bo
     if s.delete.job.is_some() || !may_confirm(s.delete.opened, now, s.scan.state()) {
         return None;
     }
+    if s.delete.pending.is_some() {
+        step(s, DialogEvent::Refuse { text: delete_flow::BUSY_TEXT.to_string() });
+        return None;
+    }
     let (mode, target, origin) = (*mode, target.target.clone(), now?);
     let path = s.loaded.as_ref()?.data.tree.path(target.node);
     if let Err(text) = delete_flow::recheck(&target.path, check(&s.scan_root, &path, target.is_dir)) {
@@ -199,10 +208,19 @@ pub(crate) fn handle_msg(s: &mut Session, msg: DeleteMsg) -> bool {
             let DialogState::Done { tree_action, .. } = &mut s.delete.state else { return false };
             *tree_action = finished_action(job_origin, generation, now, *tree_action);
             let detach = *tree_action == TreeAction::Detach;
-            if detach {
-                s.delete.pending = Some(Pending { origin: job.origin, node: job.node, tries_left: APPLY_TRIES, from_missing: false });
+            if !detach {
+                return false;
             }
-            detach
+            // Open and Confirm refuse while a removal waits, so a second one cannot come here.
+            debug_assert!(s.delete.pending.is_none(), "a second removal while one waits");
+            if s.delete.pending.is_some() {
+                // Keep the first; this one is not applied, and the user is told.
+                s.delete.notice = Some(STALE_LIST_NOTICE.to_string());
+                *tree_action_of(s) = TreeAction::KeepAndOfferRescan;
+                return false;
+            }
+            s.delete.pending = Some(Pending { origin: job.origin, node: job.node, tries_left: APPLY_TRIES, from_missing: false });
+            true
         }
     }
 }
