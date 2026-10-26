@@ -6,6 +6,9 @@
 //! queued before the event loop starts. Calling it right after `show()` returns `NotSupported`.
 //! If Mica is not available (Windows 10), the window falls back to the opaque Fluent background.
 
+// Release builds are GUI-subsystem so no console window opens; debug builds keep theirs.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod browse;
 mod cli;
 mod drives;
@@ -1364,7 +1367,18 @@ fn apply_args(args: &cli::Args) {
     });
 }
 
+/// A GUI-subsystem exe has no console. Started from a terminal, join the terminal's so `--timing`
+/// and the renderer note still print there. Fails (and is ignored) when started from Explorer.
+#[cfg(not(debug_assertions))]
+fn attach_parent_console() {
+    use windows_sys::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
+    // SAFETY: AttachConsole takes a process id constant and has no pointer arguments.
+    unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
+}
+
 fn main() {
+    #[cfg(not(debug_assertions))]
+    attach_parent_console();
     let args = cli::parse_args(std::env::args().skip(1));
     apply_args(&args);
     let ui = MainWindow::new().expect("create window");
