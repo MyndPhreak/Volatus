@@ -2,6 +2,8 @@
 # ucrtbase.dll / api-ms-win-crt-*.dll): the MSI ships only volatus.exe, which is built with the
 # static CRT (.cargo/config.toml) so it runs without the Visual C++ Redistributable.
 # Reads the PE import and delay-import tables itself (no dumpbin or Visual Studio environment).
+# Also fails unless the PE Subsystem is IMAGE_SUBSYSTEM_WINDOWS_GUI (2): a console-subsystem exe
+# flashes a cmd window when Explorer, the Start menu or the MSI launches it.
 # Copied from Negotium's .github/scripts/check-imports.ps1.
 # Usage: pwsh .github/scripts/check-imports.ps1 <path to exe>
 param([Parameter(Mandatory = $true)][string]$Exe)
@@ -23,6 +25,8 @@ switch ($magic) {
   0x10B { $dirs = $optional + 96 }  # PE32
   default { throw "unknown optional header magic 0x$('{0:X}' -f $magic)" }
 }
+# Optional header Subsystem (offset 68 in PE32 and PE32+): 2 = Windows GUI, 3 = console.
+$subsystem = U16 ($optional + 68)
 $sections = $optional + $optionalSize
 
 function Offset([uint32]$rva) {
@@ -61,3 +65,7 @@ if ($crt.Count -gt 0) {
   throw "$Exe imports the Visual C++ runtime ($($crt -join ', ')); build with the static CRT (.cargo/config.toml)"
 }
 Write-Host "No Visual C++ runtime imports."
+if ($subsystem -ne 2) {
+  throw "$Exe has PE subsystem $subsystem, not 2 (Windows GUI): it opens a console window; set windows_subsystem to windows for release builds"
+}
+Write-Host "PE subsystem is Windows GUI (2)."
