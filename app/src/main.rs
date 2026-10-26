@@ -1546,7 +1546,7 @@ mod tests {
         Loaded, RowModel, SESSION, file_labels, frame_labels, glow_drawn, hover_of, map_labels, note_hover, restart_admin,
         Move, picture_point, zoom_frame_at, take_launch_path, forget_scan, gate_hover, left_map,
         shows_start_at_launch, relaunch_path, LabelKind, LogicalBox, Placed, place_label, stretch,
-        apply_args, FOOTER_CHIPS, Stored, chips_of, drop_types, store_totals,
+        apply_args, FOOTER_CHIPS, Stored, chips_of, drop_types, store_totals, remove_node,
     };
     use treemap::filetype::{TypeTotal, type_totals};
     use crate::tip;
@@ -2261,6 +2261,156 @@ mod tests {
         let stored = store_totals(generation, &d, 0, counted);
 
         assert_eq!((stored, kept_totals()), (Stored::Recount, None));
+    }
+
+    // ---- remove_node ----
+    const DOCS: NodeId = NodeId(1);
+    const C_TXT: NodeId = NodeId(2);
+    const D_EXE: NodeId = NodeId(3);
+    const A_TXT: NodeId = NodeId(4);
+    const B_PDF: NodeId = NodeId(5);
+
+    /// `loaded` of `typed()` with nothing else holding the data.
+    fn loaded_typed() -> Loaded {
+        loaded(&typed())
+    }
+
+    #[test]
+    fn remove_node_reduces_the_file_counts_of_every_ancestor() {
+        let mut l = loaded_typed();
+
+        remove_node(&mut l, A_TXT);
+
+        let counts = &l.data.counts;
+        assert_eq!([counts[DOCS.0 as usize], counts[0]], [1, 3]);
+    }
+
+    #[test]
+    fn remove_node_rows_skip_the_node_and_show_the_reduced_size_and_percent_of_each_ancestor() {
+        let mut l = loaded_typed();
+        l.view.expanded.insert(DOCS);
+
+        remove_node(&mut l, A_TXT);
+        l.model.set_rows(crate::tree_view::flatten(&l.data.tree, &l.data.counts, &l.view));
+
+        let rows: Vec<(String, String, String, String)> = (0..slint::Model::row_count(&*l.model))
+            .map(|i| {
+                let r = slint::Model::row_data(&*l.model, i).unwrap();
+                (r.name.to_string(), r.size.to_string(), r.percent.to_string(), r.files.to_string())
+            })
+            .collect();
+        let row = |name: &str, size: &str, percent: &str, files: &str| (name.to_string(), size.to_string(), percent.to_string(), files.to_string());
+        assert_eq!(
+            rows,
+            vec![
+                row("root", "90 B", "100.0%", "3"),
+                row("docs", "50 B", "55.6%", "1"),
+                row("b.pdf", "50 B", "100.0%", "1"),
+                row("d.exe", "30 B", "33.3%", "1"),
+                row("c.txt", "10 B", "11.1%", "1"),
+            ]
+        );
+    }
+
+    /// Rects of `typed()` on a 100 x 100 map: the root, docs on the left with a.txt over b.pdf,
+    /// d.exe over c.txt on the right.
+    fn typed_rects() -> Vec<Rect> {
+        let r = |node, x, y, w, h| Rect { node, x, y, w, h };
+        vec![
+            r(NodeId(0), 0.0, 0.0, 100.0, 100.0),
+            r(DOCS, 0.0, 0.0, 60.0, 100.0),
+            r(A_TXT, 0.0, 0.0, 60.0, 60.0),
+            r(B_PDF, 0.0, 60.0, 60.0, 40.0),
+            r(D_EXE, 60.0, 0.0, 40.0, 60.0),
+            r(C_TXT, 60.0, 60.0, 40.0, 40.0),
+        ]
+    }
+
+    #[test]
+    fn remove_node_drops_the_rects_of_the_subtree_and_its_old_spot_hits_the_parent_frame() {
+        let mut l = loaded_typed();
+        l.rects = typed_rects();
+
+        remove_node(&mut l, A_TXT);
+
+        let left: Vec<NodeId> = l.rects.iter().map(|r| r.node).collect();
+        assert_eq!(left, [NodeId(0), DOCS, B_PDF, D_EXE, C_TXT]);
+        assert_eq!(crate::tree_view::hit_test(&l.rects, 10.0, 10.0), Some(DOCS));
+    }
+
+    #[test]
+    fn remove_node_with_no_other_holder_keeps_the_node_buffer() {
+        let mut l = loaded_typed();
+        let before = std::ptr::from_ref(l.data.tree.node(NodeId(0)));
+
+        remove_node(&mut l, A_TXT);
+
+        assert_eq!(std::ptr::from_ref(l.data.tree.node(NodeId(0))), before);
+    }
+
+    #[test]
+    fn remove_node_while_a_worker_holds_the_data_copies_it_and_the_holder_tree_is_unchanged() {
+        let mut l = loaded_typed();
+        let held = l.data.clone();
+
+        remove_node(&mut l, A_TXT);
+
+        assert!(!Arc::ptr_eq(&held, &l.data));
+        assert_eq!((held.tree.is_attached(A_TXT), held.tree.node(NodeId(0)).size, held.counts[0]), (true, 190, 4));
+        assert_eq!(l.data.tree.node(NodeId(0)).size, 90);
+    }
+
+    /// Random tree of up to 200 nodes, folders and files with a few extensions; every entry is
+    /// reachable, so node `i` is entry `i`.
+    fn random_data(seed: &mut u64) -> Arc<Data> {
+        let mut next = |n: u64| {
+            *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (*seed >> 33) % n.max(1)
+        };
+        let n = 1 + next(200);
+        let mut dirs = vec![0u64];
+        let mut entries = vec![RawEntry { id: 0, parent: 0, name: "root".into(), size: 0, allocated: 0, is_dir: true }];
+        for id in 1..n {
+            let parent = dirs[next(dirs.len() as u64) as usize];
+            let is_dir = next(3) == 0;
+            let name = if is_dir { format!("d{id}") } else { format!("f{id}{}", ["", ".txt", ".DLL", ".mp4", ".tar.gz"][next(5) as usize]) };
+            let size = if is_dir { 0 } else { [0, next(10), next(1 << 30)][next(3) as usize] };
+            if is_dir {
+                dirs.push(id);
+            }
+            entries.push(RawEntry { id, parent, name, size, allocated: size, is_dir });
+        }
+        let tree = rollup(0, entries).unwrap().tree;
+        Arc::new(Data { counts: crate::tree_view::file_counts(&tree), tree })
+    }
+
+    #[test]
+    fn remove_node_random_removals_keep_counts_totals_and_rects_equal_to_a_new_count() {
+        let mut seed = 0x00C0_FFEE;
+        for t in 0..300 {
+            let mut l = loaded(&random_data(&mut seed));
+            let all = l.data.counts.len() as u64;
+            l.totals = Some(type_totals(&l.data.tree, NodeId(0)));
+            l.rects = (0..all as u32).map(|i| Rect { node: NodeId(i), x: 0.0, y: 0.0, w: 1.0, h: 1.0 }).collect();
+            for k in 0..1 + (seed >> 40) % 10 {
+                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                let n = NodeId(((seed >> 33) % all) as u32);
+                let removable = n != NodeId(0) && l.data.tree.is_attached(n);
+                let case = format!("tree {t}, removal {k} of {n:?}");
+
+                let after = remove_node(&mut l, n);
+
+                let tree = &l.data.tree;
+                assert_eq!(after.is_some(), removable, "{case}");
+                let fresh = crate::tree_view::file_counts(tree);
+                let attached: Vec<u32> = (0..all as u32).filter(|&i| tree.is_attached(NodeId(i))).collect();
+                let counts: Vec<u64> = attached.iter().map(|&i| l.data.counts[i as usize]).collect();
+                assert_eq!(counts, attached.iter().map(|&i| fresh[i as usize]).collect::<Vec<_>>(), "{case}: counts");
+                assert_eq!(l.totals, Some(type_totals(tree, NodeId(0))), "{case}: totals");
+                assert!(l.rects.iter().all(|r| tree.is_attached(r.node)), "{case}: rects");
+                assert_eq!(l.rects.len(), attached.len(), "{case}: rects kept");
+            }
+        }
     }
 
     fn run(timing: bool) -> (Result<(), String>, Option<(String, bool)>) {
