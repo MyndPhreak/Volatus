@@ -84,6 +84,12 @@ pub(crate) fn request(ui: &MainWindow, shift: bool) {
     sync(ui);
 }
 
+/// The Delete of the context menu, for the item the menu was opened on (`node`, which need not be
+/// the selection: a crumb is not selected). `shift` is the Shift key when the item was chosen.
+pub(crate) fn menu_delete_with(ui: &MainWindow, node: scan::NodeId, shift: bool) {
+    let _ = (ui, node, shift);
+}
+
 /// True only when Windows says Shift is down both for the message being handled and now.
 fn shift_from(queued: i16, now: i16) -> bool {
     queued < 0 && now < 0
@@ -504,8 +510,89 @@ mod tests {
         });
         ui.invoke_tree_key("delete".into());
         ui.invoke_map_key("shift-delete".into());
+        menu_delete_with(&ui, node("b.bin"), true);
         assert_eq!(step(&ui), DeleteStep::Closed);
         assert!(SESSION.with_borrow(|s| s.delete.state == DialogState::Closed));
+    }
+
+    #[test]
+    fn the_menu_delete_is_for_the_menu_item_and_reads_shift() {
+        let (ui, _dir) = window();
+        // The selection is `a`; the menu was opened on `b.bin` (a crumb, say, is not selected).
+        menu_delete_with(&ui, node("b.bin"), false);
+        let d = ui.get_delete();
+        assert_eq!((d.step, d.name.as_str(), d.permanent), (DeleteStep::Confirm, "b.bin", false));
+        assert_eq!(d.action.as_str(), "Move to Recycle Bin");
+        ui.invoke_close_delete();
+        menu_delete_with(&ui, node("b.bin"), true);
+        let d = ui.get_delete();
+        assert_eq!((d.step, d.name.as_str(), d.permanent, d.action_default), (DeleteStep::Confirm, "b.bin", true, false));
+        // Nothing runs before the confirm click.
+        assert!(modes().is_empty());
+        assert!(JOBS.with_borrow(Vec::is_empty));
+    }
+
+    #[test]
+    fn the_menu_delete_of_the_scan_root_is_refused() {
+        let (ui, _dir) = window();
+        let root = SESSION.with_borrow(|s| s.loaded.as_ref().unwrap().data.tree.root());
+        menu_delete_with(&ui, root, false);
+        assert_eq!(step(&ui), DeleteStep::Refused);
+    }
+
+    /// The tree rows a right-click asked a menu for (`tree-menu`), in order.
+    fn record_tree_menus(ui: &MainWindow) -> Rc<RefCell<Vec<i32>>> {
+        let asked = Rc::new(RefCell::new(Vec::new()));
+        let log = asked.clone();
+        ui.on_tree_menu(move |i, _, _| log.borrow_mut().push(i));
+        asked
+    }
+
+    fn element(ui: &MainWindow, role: i_slint_backend_testing::AccessibleRole, start: &str) -> ElementHandle {
+        i_slint_backend_testing::ElementQuery::from_root(ui)
+            .match_descendants()
+            .match_accessible_role(role)
+            .find_all()
+            .into_iter()
+            .find(|e| e.accessible_label().is_some_and(|l| l.starts_with(start)))
+            .unwrap_or_else(|| panic!("an element {start:?}"))
+    }
+
+    /// A right press and release at a window point.
+    fn right_click_at(ui: &MainWindow, position: slint::LogicalPosition) {
+        let button = slint::platform::PointerEventButton::Right;
+        ui.window().dispatch_event(WindowEvent::PointerPressed { position, button });
+        ui.window().dispatch_event(WindowEvent::PointerReleased { position, button });
+    }
+
+    #[test]
+    fn a_right_click_on_empty_tree_space_asks_for_no_menu() {
+        use i_slint_backend_testing::AccessibleRole;
+        let (ui, _dir) = window();
+        let asked = record_tree_menus(&ui);
+        let tree = element(&ui, AccessibleRole::Tree, "File tree");
+        let (p, s) = (tree.absolute_position(), tree.size());
+        // Below the last row, and in the 2 px margin at the bottom of the tree.
+        for y in [p.y + s.height - 20.0, p.y + s.height - 1.0] {
+            right_click_at(&ui, slint::LogicalPosition::new(p.x + s.width / 2.0, y));
+        }
+        assert_eq!(*asked.borrow(), Vec::<i32>::new());
+        assert_eq!(step(&ui), DeleteStep::Closed);
+    }
+
+    #[test]
+    fn a_right_click_on_a_row_asks_for_the_menu_of_that_row() {
+        use i_slint_backend_testing::AccessibleRole;
+        let (ui, _dir) = window();
+        let asked = record_tree_menus(&ui);
+        let row = element(&ui, AccessibleRole::ListItem, "b.bin");
+        let (p, s) = (row.absolute_position(), row.size());
+        right_click_at(&ui, slint::LogicalPosition::new(p.x + s.width / 2.0, p.y + s.height / 2.0));
+        let want = SESSION.with_borrow(|s| {
+            let l = s.loaded.as_ref().unwrap();
+            l.model.rows.borrow().iter().position(|r| l.data.tree.name(r.node) == "b.bin").map(|i| i as i32)
+        });
+        assert_eq!(asked.borrow().clone(), want.into_iter().collect::<Vec<_>>());
     }
 
     #[test]

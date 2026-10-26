@@ -1328,7 +1328,7 @@ fn run_action(
     let used = match cmd {
         menu::Cmd::ExploreFolder | menu::Cmd::CopyPath => Cow::Borrowed(path),
         menu::Cmd::CommandPrompt => Cow::Owned(menu::terminal_folder(path, is_dir)),
-        menu::Cmd::ShowFolder | menu::Cmd::Rescan => return None,
+        menu::Cmd::ShowFolder | menu::Cmd::Rescan | menu::Cmd::Delete => return None,
     };
     action_note(cmd, act(cmd, &used).is_err()).map(str::to_string)
 }
@@ -1340,7 +1340,7 @@ fn action_note(cmd: menu::Cmd, failed: bool) -> Option<&'static str> {
         menu::Cmd::ExploreFolder => "Volatus cannot open the folder.",
         menu::Cmd::CommandPrompt => "Volatus cannot open a command prompt.",
         menu::Cmd::CopyPath => "Volatus cannot copy the path.",
-        menu::Cmd::ShowFolder | menu::Cmd::Rescan => return None,
+        menu::Cmd::ShowFolder | menu::Cmd::Rescan | menu::Cmd::Delete => return None,
     };
     failed.then_some(note)
 }

@@ -99,6 +99,9 @@ pub enum Cmd {
     /// Opens the folder in the map. It does not scan.
     ShowFolder,
     Rescan,
+    /// The Volatus Delete (`delete_ui::menu_delete`): the confirm dialog, the Recycle Bin, or the
+    /// permanent delete with Shift. The shell's own Delete is hidden (`is_delete_verb`).
+    Delete,
 }
 
 /// A line of the Volatus part of the menu.
@@ -181,6 +184,21 @@ pub fn invoke_mask(shift: bool, ctrl: bool) -> u32 {
         mask |= CMIC_MASK_CONTROL_DOWN;
     }
     mask
+}
+
+/// True only for the shell's canonical verb `delete` (ASCII case). The shell item with this verb
+/// is taken out of the menu (`shell::Popup::new`): the Volatus Delete stands for it.
+pub fn is_delete_verb(verb: &str) -> bool {
+    let _ = verb;
+    false
+}
+
+/// The positions of the separators to take out of the shell part of a menu, from whether each of
+/// its lines is a separator (`is_sep`): one at the start or the end of the part, and the second of
+/// two in a row. In ascending order; remove them from the last one back.
+pub fn separators_to_remove(is_sep: &[bool]) -> Vec<usize> {
+    let _ = is_sep;
+    Vec::new()
 }
 
 /// True only for the canonical verb `delete` of the shell (ASCII case). A verb the shell could not
@@ -637,19 +655,20 @@ mod tests {
     const PROMPT: Item = Item::Action(Cmd::CommandPrompt, "Command Prompt Here");
     const COPY: Item = Item::Action(Cmd::CopyPath, "Copy Path");
     const SHOW: Item = Item::Action(Cmd::ShowFolder, "Show this folder");
+    const DELETE: Item = Item::Action(Cmd::Delete, "Delete");
 
     fn ready(before: Disk) -> Prepared {
         Prepared::Ready { path: PathBuf::from("C:\\x"), before }
     }
 
     #[test]
-    fn items_file_has_explore_prompt_copy_and_a_separator() {
-        assert_eq!(items(&ready(Disk::File(1)), false, true), [EXPLORE, PROMPT, COPY, Item::Separator]);
+    fn items_file_has_explore_prompt_copy_delete_and_a_separator() {
+        assert_eq!(items(&ready(Disk::File(1)), false, true), [EXPLORE, PROMPT, COPY, DELETE, Item::Separator]);
     }
 
     #[test]
     fn items_folder_adds_show_this_folder() {
-        assert_eq!(items(&ready(Disk::Dir), true, true), [EXPLORE, PROMPT, COPY, SHOW, Item::Separator]);
+        assert_eq!(items(&ready(Disk::Dir), true, true), [EXPLORE, PROMPT, COPY, SHOW, DELETE, Item::Separator]);
     }
 
     #[test]
@@ -663,13 +682,13 @@ mod tests {
     fn items_shell_failed_adds_the_no_menu_line() {
         let got = items(&ready(Disk::File(1)), false, false);
 
-        assert_eq!(got, [EXPLORE, PROMPT, COPY, Item::Separator, Item::Disabled("Windows has no menu for this item.")]);
+        assert_eq!(got, [EXPLORE, PROMPT, COPY, DELETE, Item::Separator, Item::Disabled("Windows has no menu for this item.")]);
     }
 
     // ---- picked ----
     #[test]
     fn picked_maps_every_id_range() {
-        let ids = [0, 1, 2, 3, 4, 5, 6, 0xFF, 0x100, 0x7FFC, 0x7FFF, 0x8000, u32::MAX];
+        let ids = [0, 1, 2, 3, 4, 5, 6, 7, 0xFF, 0x100, 0x7FFC, 0x7FFF, 0x8000, u32::MAX];
 
         let got: Vec<Picked> = ids.iter().map(|&id| picked(id)).collect();
 
@@ -680,6 +699,7 @@ mod tests {
             Picked::Volatus(Cmd::CopyPath),
             Picked::Volatus(Cmd::ShowFolder),
             Picked::Volatus(Cmd::Rescan),
+            Picked::Volatus(Cmd::Delete),
             Picked::Nothing,
             Picked::Nothing,
             Picked::Shell(0),
@@ -767,6 +787,59 @@ mod tests {
         ];
 
         assert!(verbs.iter().all(|v| !is_delete(Some(v))));
+    }
+
+    // ---- is_delete_verb ----
+    #[test]
+    fn is_delete_verb_is_true_only_for_delete_in_any_ascii_case() {
+        let verbs = ["delete", "Delete", "DELETE", "delete ", "deletex", "Löschen", "", "properties", "cut"];
+
+        let got = verbs.map(is_delete_verb);
+
+        assert_eq!(got, [true, true, true, false, false, false, false, false, false]);
+    }
+
+    #[test]
+    fn is_delete_verb_is_false_for_the_verbs_the_shell_gave_in_the_spike() {
+        let verbs = [
+            "open", "Edit", "Print", "openas", "pintohomefile", "pintohome", "PinToStartScreen", "copyaspath", "Windows.ModernShare",
+            "PreviousVersions", "cut", "copy", "link", "properties", "Powershell", "WSL", "opennewprocess",
+            "{1861E28B-A1F0-4EF4-A1FE-4C8CA88E2174}", "PeaZip.ext2main", "SevenZipCompress", "TeraCopy", "ShareX", "Volatus", "WizTree",
+        ];
+
+        assert!(verbs.iter().all(|v| !is_delete_verb(v)));
+    }
+
+    // ---- separators_to_remove ----
+    /// `separators_to_remove` of a part written as a string: `-` a separator, `x` an item.
+    fn cut(part: &str) -> Vec<usize> {
+        separators_to_remove(&part.chars().map(|c| c == '-').collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn separators_to_remove_keeps_a_part_that_is_already_tidy() {
+        assert_eq!([cut(""), cut("x"), cut("x-x"), cut("xx-x-xx")], [Vec::<usize>::new(), vec![], vec![], vec![]]);
+    }
+
+    #[test]
+    fn separators_to_remove_takes_one_at_the_start_or_the_end() {
+        assert_eq!([cut("-x"), cut("x-"), cut("-x-"), cut("-")], [vec![0], vec![1], vec![0, 2], vec![0]]);
+    }
+
+    #[test]
+    fn separators_to_remove_takes_the_second_of_two_in_a_row() {
+        // The shell part after its Delete left: "Send to, -, [Delete], -, Properties".
+        assert_eq!([cut("x--x"), cut("x---x"), cut("--x--")], [vec![2], vec![2, 3], vec![0, 1, 3, 4]]);
+    }
+
+    #[test]
+    fn separators_to_remove_leaves_no_separator_at_an_edge_or_doubled() {
+        for part in ["", "-", "--", "x", "-x-", "x--x--x", "--x-x--", "x-x-x", "---"] {
+            let gone = cut(part);
+            let kept: String = part.char_indices().filter(|(i, _)| !gone.contains(i)).map(|(_, c)| c).collect();
+            assert!(!kept.starts_with('-') && !kept.ends_with('-') && !kept.contains("--"), "{part:?} kept {kept:?}");
+            assert_eq!(kept.matches('x').count(), part.matches('x').count(), "{part:?}: an item was removed");
+        }
     }
 
     #[test]

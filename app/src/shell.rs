@@ -149,6 +149,14 @@ impl Popup {
             .collect()
     }
 
+    /// Whether each line of the top level is a separator, in menu order.
+    #[cfg(test)]
+    pub fn separator_lines(&self) -> Vec<bool> {
+        // SAFETY: the menu lives as long as `self`.
+        let count = unsafe { windows::Win32::UI::WindowsAndMessaging::GetMenuItemCount(Some(self.menu)) };
+        (0..count.max(0) as u32).map(|i| is_separator(self.menu, i)).collect()
+    }
+
     /// The canonical verb of the shell item at `offset` from `SHELL_FIRST` (`GCS_VERBW`), or `None`
     /// when the shell gives none (an error or an empty verb).
     pub fn verb(&self, offset: u32) -> Option<String> {
@@ -233,6 +241,12 @@ fn shell_menu(owner: HWND, path: &Path, menu: HMENU, flags: u32) -> windows::cor
     built
 }
 
+/// True when the line at position `at` of `menu` is a separator.
+fn is_separator(menu: HMENU, at: u32) -> bool {
+    let _ = (menu, at);
+    false
+}
+
 /// Puts the Volatus `item` at position `at` of `menu`.
 fn insert(menu: HMENU, at: u32, item: &Item) -> windows::core::Result<()> {
     let (flags, id, text) = match *item {
@@ -298,7 +312,7 @@ pub fn act(cmd: Cmd, path: &Path, is_dir: bool) -> Result<(), String> {
             let copied = arboard::Clipboard::new().and_then(|mut c| c.set_text(clip_text(path)));
             copied.map_err(|e| failed("The clipboard cannot take", &e))
         }
-        Cmd::ShowFolder | Cmd::Rescan => Ok(()),
+        Cmd::ShowFolder | Cmd::Rescan | Cmd::Delete => Ok(()),
     }
 }
 
@@ -473,25 +487,43 @@ mod tests {
     }
 
     #[test]
-    fn popup_of_a_file_has_delete_and_properties_and_no_rename() {
+    fn popup_of_a_file_has_properties_and_no_delete_of_the_shell_and_no_rename() {
         let dir = Scratch::new("file");
         let file = dir.0.join("f.txt");
         fs::write(&file, b"hello").unwrap();
 
         let verbs = verbs_of(&file, false);
 
-        assert_eq!([has(&verbs, "delete"), has(&verbs, "properties"), has(&verbs, "rename")], [true, true, false], "{verbs:?}");
+        assert_eq!([has(&verbs, "delete"), has(&verbs, "properties"), has(&verbs, "rename")], [false, true, false], "{verbs:?}");
     }
 
     #[test]
-    fn popup_of_a_folder_has_delete() {
+    fn popup_of_a_folder_has_no_delete_of_the_shell_with_or_without_shift() {
         let dir = Scratch::new("folder");
         let folder = dir.0.join("sub");
         fs::create_dir(&folder).unwrap();
 
-        let verbs = verbs_of(&folder, false);
+        let (plain, extended) = (verbs_of(&folder, false), verbs_of(&folder, true));
 
-        assert!(has(&verbs, "delete"), "{verbs:?}");
+        assert!(!has(&plain, "delete") && !has(&extended, "delete"), "plain {plain:?}, shift {extended:?}");
+        assert!(has(&plain, "properties"), "{plain:?}");
+    }
+
+    #[test]
+    fn popup_shell_part_has_no_separator_at_an_edge_or_doubled() {
+        let dir = Scratch::new("separators");
+        let file = dir.0.join("f.txt");
+        fs::write(&file, b"hello").unwrap();
+        let folder = dir.0.join("sub");
+        fs::create_dir(&folder).unwrap();
+
+        for (path, shift) in [(&file, false), (&file, true), (&folder, false), (&folder, true)] {
+            let popup = Popup::new(HWND::default(), Some(path), query_flags(shift), |_| Vec::new()).unwrap();
+            let lines: String = popup.separator_lines().iter().map(|&sep| if sep { '-' } else { 'x' }).collect();
+
+            assert!(lines.contains('-'), "{path:?} shift {shift}: the shell part has separators to check: {lines}");
+            assert!(!lines.starts_with('-') && !lines.ends_with('-') && !lines.contains("--"), "{path:?} shift {shift}: {lines}");
+        }
     }
 
     #[test]

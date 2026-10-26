@@ -615,7 +615,6 @@ mod tests {
         l.view.expanded.extend([a, a2]);
         l.rects = vec![rect(a), rect(a2), rect(x), rect(b)];
         l.shown_root = Some(a2);
-        l.totals = Some(Vec::new());
 
         let got = remove_from(&mut l, a);
 
@@ -630,12 +629,28 @@ mod tests {
         assert_eq!(l.view.expanded.iter().copied().collect::<Vec<_>>(), vec![root]);
         assert_eq!(l.rects.iter().map(|r| r.node).collect::<Vec<_>>(), vec![b]);
         assert_eq!(l.shown_root, None);
-        // The footer totals are of the old tree: they are counted again, and a count that started
-        // before the removal is late (`Loaded::edits`).
+        // The file types are still counted (no totals yet): that count is late now (`Loaded::edits`).
         assert_eq!((l.totals.is_none(), l.edits), (true, 1));
         // The row model reads the changed data.
         let model_data = l.model.data.borrow().upgrade().expect("model has data again");
         assert!(Arc::ptr_eq(&model_data, &l.data));
+    }
+
+    #[test]
+    fn remove_from_takes_the_file_types_of_the_subtree_off_the_footer_totals() {
+        use treemap::filetype::type_totals;
+        let d = data();
+        let (root, a) = (d.tree.root(), find(&d.tree, "a"));
+        let mut l = loaded(d.clone());
+        l.totals = Some(type_totals(&d.tree, root));
+        drop(d);
+
+        assert!(matches!(remove_from(&mut l, a), Ok(Some(_))));
+
+        // The footer shows the totals of a new count at once: no count of the whole scan again.
+        let tree = &l.data.tree;
+        let want = crate::footer::chips(&type_totals(tree, root), tree.node(root).size, crate::FOOTER_CHIPS);
+        assert_eq!((crate::chips_of(&l), l.edits), (Some(want), 1));
     }
 
     #[test]
