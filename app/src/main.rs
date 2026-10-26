@@ -877,6 +877,25 @@ fn remove_node(l: &mut Loaded, n: NodeId) -> Option<AfterRemoval> {
     Some(tree_view::after_removal(&l.data.tree, l.view_root, &r))
 }
 
+/// What the window does after a node of the shown scan was deleted on disk (`apply_removal`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Removal {
+    /// The scan root was deleted: the start screen shows, with this note.
+    Start(&'static str),
+    /// The node left the tree: the rows, the picture and the footer show the change.
+    Shown(AfterRemoval),
+    /// Nothing changed: no finished scan shown, or the node was already removed.
+    Nothing,
+}
+
+/// The session part of a deletion of `n` on disk: removes it (`remove_node`), selects its parent,
+/// shows the parent when the shown folder went with it, and drops the picture kept for a zoom and
+/// the folder a zoom out starts from. The scan root goes back to the start screen.
+fn apply_removal(n: NodeId) -> Removal {
+    let _ = n;
+    unimplemented!("P2.T4: apply_removal")
+}
+
 /// Counts the file types of the scan for the footer on its own worker thread, started after the
 /// layout worker of the first treemap, which does not wait for it. Until it ends the footer
 /// says "Counting file types.".
@@ -1568,7 +1587,7 @@ mod tests {
         Loaded, RowModel, SESSION, file_labels, frame_labels, glow_drawn, hover_of, map_labels, note_hover, restart_admin,
         Move, picture_point, zoom_frame_at, take_launch_path, forget_scan, gate_hover, left_map,
         shows_start_at_launch, relaunch_path, LabelKind, LogicalBox, Placed, place_label, stretch,
-        apply_args, FOOTER_CHIPS, Stored, chips_of, drop_types, store_totals, remove_node,
+        apply_args, FOOTER_CHIPS, Stored, chips_of, drop_types, store_totals, remove_node, Removal, apply_removal,
     };
     use treemap::filetype::{TypeTotal, type_totals};
     use crate::tip;
@@ -2433,6 +2452,64 @@ mod tests {
                 assert_eq!(l.rects.len(), attached.len(), "{case}: rects kept");
             }
         }
+    }
+
+    // ---- removed ----
+    #[test]
+    fn apply_removal_of_the_root_goes_to_the_start_screen_with_the_root_gone_note() {
+        show_finished_scan(&typed());
+
+        let removal = apply_removal(NodeId(0));
+
+        let start = SESSION.with_borrow(|s| crate::model::shows_start(s.scan.state()));
+        assert_eq!((removal, start), (Removal::Start("The scanned folder was deleted."), true));
+    }
+
+    #[test]
+    fn apply_removal_of_the_view_root_selects_the_parent_and_shows_it() {
+        show_finished_scan(&typed());
+        SESSION.with_borrow_mut(|s| s.loaded.as_mut().unwrap().view_root = DOCS);
+
+        let removal = apply_removal(DOCS);
+
+        let (selected, view) = SESSION.with_borrow(|s| s.loaded.as_ref().map(|l| (l.selected, l.view_root)).unwrap());
+        let root = NodeId(0);
+        assert_eq!(removal, Removal::Shown(crate::tree_view::AfterRemoval { select: root, view: Some(root) }));
+        assert_eq!((selected, view), (Some(root), root));
+    }
+
+    #[test]
+    fn apply_removal_inside_the_view_selects_the_parent_and_keeps_the_view() {
+        show_finished_scan(&typed());
+        SESSION.with_borrow_mut(|s| s.loaded.as_mut().unwrap().selected = Some(A_TXT));
+
+        apply_removal(A_TXT);
+
+        let (selected, view) = SESSION.with_borrow(|s| s.loaded.as_ref().map(|l| (l.selected, l.view_root)).unwrap());
+        assert_eq!((selected, view), (Some(DOCS), NodeId(0)));
+    }
+
+    #[test]
+    fn apply_removal_drops_the_picture_kept_for_a_zoom_and_the_zoom_out_folder() {
+        show_finished_scan(&typed());
+        SESSION.with_borrow_mut(|s| {
+            s.held = Some(super::Layout { root: DOCS, rects: Vec::new(), image: None, labels: (Vec::new(), Vec::new()), size: (0.0, 0.0) });
+            s.out_from = Some(DOCS);
+        });
+
+        apply_removal(DOCS);
+
+        assert_eq!(SESSION.with_borrow(|s| (s.held.is_none(), s.out_from)), (true, None));
+    }
+
+    #[test]
+    fn apply_removal_of_a_node_already_removed_changes_nothing() {
+        show_finished_scan(&typed());
+        apply_removal(DOCS);
+
+        let removal = apply_removal(A_TXT);
+
+        assert_eq!((removal, SESSION.with_borrow(|s| s.loaded.as_ref().unwrap().edits)), (Removal::Nothing, 1));
     }
 
     fn run(timing: bool) -> (Result<(), String>, Option<(String, bool)>) {
