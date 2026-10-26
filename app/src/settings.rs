@@ -134,6 +134,10 @@ pub enum Loaded {
     Partial(Vec<&'static str>),
     /// Empty, not JSON, or not an object: all defaults.
     Damaged,
+    /// The file exists but was not read cleanly, and no `.bad` copy of it exists (the copy
+    /// failed, or the file could not be read at all). Settings are the defaults. The host must
+    /// not save while this holds, because a save would overwrite the only copy of the file.
+    NotKept,
 }
 
 /// Reads settings text. Pure. A leading UTF-8 BOM is stripped.
@@ -364,7 +368,32 @@ mod tests {
         let dir = TempDir::new("missing");
         assert_eq!(load(&dir.file()), (Settings::default(), Loaded::Fresh));
         assert!(!dir.0.join("settings.json.bad").exists());
-        assert!(Settings::default().show_header);
+    }
+
+    #[test]
+    fn load_damaged_file_whose_bad_copy_fails_is_not_kept() {
+        let dir = TempDir::new("damaged-nokeep");
+        fs::write(dir.file(), "not json at all").unwrap();
+        fs::create_dir(dir.0.join("settings.json.bad")).unwrap();
+        assert_eq!(load(&dir.file()), (Settings::default(), Loaded::NotKept));
+        assert_eq!(fs::read_to_string(dir.file()).unwrap(), "not json at all");
+    }
+
+    #[test]
+    fn load_partial_file_whose_bad_copy_fails_is_not_kept() {
+        let dir = TempDir::new("partial-nokeep");
+        let text = r#"{"theme":"dark","unit":7}"#;
+        fs::write(dir.file(), text).unwrap();
+        fs::create_dir(dir.0.join("settings.json.bad")).unwrap();
+        assert_eq!(load(&dir.file()), (Settings::default(), Loaded::NotKept));
+        assert_eq!(fs::read_to_string(dir.file()).unwrap(), text);
+    }
+
+    #[test]
+    fn load_unreadable_existing_file_is_not_kept() {
+        let dir = TempDir::new("unreadable");
+        fs::create_dir(dir.file()).unwrap();
+        assert_eq!(load(&dir.file()), (Settings::default(), Loaded::NotKept));
     }
 
     #[test]
