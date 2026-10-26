@@ -229,6 +229,7 @@ dependencies = [
  "treemap",
  "window-vibrancy",
  "windows",
+ "windows-core",
  "windows-sys 0.61.2",
 ]
 

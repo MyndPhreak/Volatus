@@ -35,7 +35,13 @@ windows-sys = { version = "0.61", features = ["Wdk_Foundation", "Wdk_Storage_Fil
 # The shell context menu (`shell`): IContextMenu and IShellFolder exist only in `windows`, not in
 # `windows-sys`. 0.62.2 is the copy Slint already builds: `cargo tree -p app -i windows -e normal`
 # fails if a second version comes in. Win32_System_Registry: SHELLEXECUTEINFOW (ShellExecuteExW).
+# The Recycle Bin delete (recycle.rs) is IFileOperation with a progress sink, a COM object that
+# windows-sys cannot implement. Win32_UI_Shell: IFileOperation, IFileOperationProgressSink,
+# IShellItem, SHCreateItemFromParsingName, the FOF/FOFX/TSF flags. Win32_System_Com: CoInitializeEx,
+# CoCreateInstance (and gates SHCreateItemFromParsingName). Win32_Foundation: HWND, E_ABORT, RPC_E_CHANGED_MODE.
 windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_Com", "Win32_System_Registry", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_WindowsAndMessaging"] }
+# windows-core: the `implement` macro's generated code names `::windows_core` directly.
+windows-core = "0.62.2"
 
 # tests/wix.rs and the menu round trip in cli.rs read the installer source (already in the lock through Slint).
 # tests/release.rs reads the release-please files and app/Cargo.toml (both crates already in the lock).

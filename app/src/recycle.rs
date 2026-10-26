@@ -1,34 +1,62 @@
-//! Send to the Recycle Bin: one shell operation (`SHFileOperationW`, `FO_DELETE` with
-//! `FOF_ALLOWUNDO`) on the one checked path. A folder goes into the bin as one item. The shell
-//! takes only a plain (`C:\...`) path, so the verbatim (`\\?\`) path from `check_target` is made
-//! plain only where the plain form names the same item; any other path is one skip whose text
-//! offers the permanent delete. Nothing here ever falls back to a permanent delete by itself.
+//! Send to the Recycle Bin: one `IFileOperation` delete with `FOF_ALLOWUNDO | FOFX_RECYCLEONDELETE`
+//! on the one checked path, watched by a progress sink. A folder goes into the bin as one item.
+//! The shell calls the sink's `PreDeleteItem` before it deletes an item, with flags that say if
+//! the item can go to the bin; when it cannot, the sink returns `E_ABORT` and nothing is deleted.
+//! The item counts as recycled only when `PostDeleteItem` reports a success and the new item in
+//! the bin. So plain Delete never becomes a permanent delete: an item the bin cannot take is one
+//! skip whose text offers the permanent delete, and the user chooses. The shell takes only a
+//! plain (`C:\...`) path, so the verbatim (`\\?\`) path from `check_target` is made plain only
+//! where the plain form names the same item.
 
 #![cfg_attr(not(test), expect(dead_code, reason = "wired in the UI task"))]
 #![cfg_attr(test, allow(dead_code, reason = "tests do not use every item; wired in the UI task"))]
 
 use crate::delete::{DeleteTarget, Outcome, Remover, SkipReason, Skipped, reason_from_win32};
+use std::cell::Cell;
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use windows_sys::Win32::UI::Shell::{
-    FO_DELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOCONFIRMMKDIR, FOF_NOERRORUI, FOF_SILENT, FOF_WANTNUKEWARNING,
-    SHFILEOPSTRUCTW, SHFileOperationW,
+use windows::Win32::Foundation::{E_ABORT, HWND, RPC_E_CHANGED_MODE};
+use windows::Win32::System::Com::{CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize};
+use windows::Win32::UI::Shell::{
+    COPYENGINE_E_CANCELLED, COPYENGINE_E_RECYCLE_BIN_NOT_FOUND, COPYENGINE_E_RECYCLE_FORCE_NUKE,
+    COPYENGINE_E_RECYCLE_PATH_TOO_LONG, COPYENGINE_E_RECYCLE_SIZE_TOO_BIG, COPYENGINE_E_RECYCLE_UNKNOWN_ERROR,
+    COPYENGINE_E_USER_CANCELLED, FILEOPERATION_FLAGS, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT,
+    FOFX_RECYCLEONDELETE, FileOperation, IFileOperation, IFileOperationProgressSink, IFileOperationProgressSink_Impl,
+    IShellItem, SHCreateItemFromParsingName, TSF_DELETE_RECYCLE_IF_POSSIBLE,
 };
+use windows_core::{ComObject, HRESULT, PCWSTR, Ref};
 
-/// The Recycle Bin delete.
-pub struct Recycle;
+/// The Recycle Bin delete. `owner` is the window handle (`HWND` as `isize`) that the shell's own
+/// windows, if it shows any, belong to.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Recycle {
+    owner: Option<isize>,
+}
+
+impl Recycle {
+    pub fn new(owner: Option<isize>) -> Recycle {
+        Recycle { owner }
+    }
+}
 
 /// `SkipReason::Other` code for a path the shell cannot take as the same item (see `shell_path`).
-/// Not a shell or Win32 code: those are never this negative.
+/// Not a shell, Win32 or HRESULT code that this engine sees.
 pub const PATH_REFUSED: i32 = i32::MIN;
 
-/// `SkipReason::Other` code for a call that returned 0 but set `fAnyOperationsAborted`.
+/// `SkipReason::Other` code for a cancelled or aborted operation.
 pub const ABORTED: i32 = i32::MIN + 1;
 
-/// The legacy `DE_*` codes `SHFileOperationW` can return (shellapi.h does not define them; the
-/// values are from the `SHFileOperation` documentation). The ones not named here map through
-/// `reason_from_win32` to `Other(code)`, as they collide with none of its special codes.
+/// `SkipReason::Other` code for an item the shell would delete permanently (the sink refused it).
+pub const NOT_RECYCLABLE: i32 = i32::MIN + 2;
+
+/// `SkipReason::Other` code for an operation that reported success but did not report the item
+/// in the bin. The item may or may not still be in its place.
+pub const NOT_IN_BIN: i32 = i32::MIN + 3;
+
+/// The legacy `DE_*` codes of the shell's copy engine (from the `SHFileOperation` documentation;
+/// shellapi.h does not define them). The ones not named here map through `reason_from_win32` to
+/// `Other(code)`, as they collide with none of its special codes.
 const DE_OPCANCELLED: i32 = 0x75;
 const DE_ACCESSDENIEDSRC: i32 = 0x78;
 const DE_PATHTOODEEP: i32 = 0x79;
@@ -36,22 +64,33 @@ const DE_INVALIDFILES: i32 = 0x7C;
 const DE_FILENAMETOOLONG: i32 = 0x81;
 const DE_FILE_TOO_LARGE: i32 = 0x85;
 
+/// Win32 `ERROR_CANCELLED`.
+const ERROR_CANCELLED: i32 = 1223;
+
+const HR_E_ABORT: i32 = E_ABORT.0;
+const HR_USER_CANCELLED: i32 = COPYENGINE_E_USER_CANCELLED.0;
+const HR_CANCELLED: i32 = COPYENGINE_E_CANCELLED.0;
+const HR_RECYCLE_UNKNOWN: i32 = COPYENGINE_E_RECYCLE_UNKNOWN_ERROR.0;
+const HR_RECYCLE_FORCE_NUKE: i32 = COPYENGINE_E_RECYCLE_FORCE_NUKE.0;
+const HR_RECYCLE_SIZE_TOO_BIG: i32 = COPYENGINE_E_RECYCLE_SIZE_TOO_BIG.0;
+const HR_RECYCLE_PATH_TOO_LONG: i32 = COPYENGINE_E_RECYCLE_PATH_TOO_LONG.0;
+const HR_RECYCLE_BIN_NOT_FOUND: i32 = COPYENGINE_E_RECYCLE_BIN_NOT_FOUND.0;
+
 /// Longest plain path (in UTF-16 units, no NUL) the shell is given: `MAX_PATH` less the NUL.
 const MAX_PLAIN: usize = 259;
 
-/// `FOF_ALLOWUNDO` is what makes the delete a recycle. `FOF_NOCONFIRMATION` answers "Yes to all"
-/// to every shell prompt, which includes "this item is too big for the Recycle Bin (or the bin is
-/// off on this drive): delete it permanently?". `FOF_WANTNUKEWARNING` takes that one prompt back
-/// out of `FOF_NOCONFIRMATION`, so the shell never permanently deletes an item without asking.
-/// `FOF_SILENT` and `FOF_NOERRORUI` turn the shell's own progress and error UI off.
-const FLAGS: u32 =
-    FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI | FOF_NOCONFIRMMKDIR | FOF_WANTNUKEWARNING;
-const _: () = assert!(FLAGS <= u16::MAX as u32, "fFlags is a u16");
+/// `FOF_ALLOWUNDO | FOFX_RECYCLEONDELETE` make the delete a recycle. `FOF_NOCONFIRMATION`,
+/// `FOF_SILENT` and `FOF_NOERRORUI` turn every shell window off. `FOF_NOCONFIRMATION` would also
+/// say yes to "delete permanently?" for an item the bin cannot take: the sink's `PreDeleteItem`
+/// refuses that item first, so no flag here can delete it.
+const FLAGS: FILEOPERATION_FLAGS = FILEOPERATION_FLAGS(
+    FOF_ALLOWUNDO.0 | FOFX_RECYCLEONDELETE.0 | FOF_NOCONFIRMATION.0 | FOF_SILENT.0 | FOF_NOERRORUI.0,
+);
 
 impl Remover for Recycle {
-    /// One shell call for the whole target. There is no progress during it: `progress(0, 0)` is
-    /// called before it and `progress(1, t.size)` after a success. `stop` is checked only before
-    /// the call (Recycle Bin mode has no Stop button); when it is set nothing is done.
+    /// One shell operation for the whole target. There is no progress during it: `progress(0, 0)`
+    /// is called before it and `progress(1, t.size)` after a success. `stop` is checked only
+    /// before the operation (Recycle Bin mode has no Stop button); when it is set nothing is done.
     fn remove(&self, t: &DeleteTarget, progress: &dyn Fn(u64, u64), stop: &AtomicBool) -> Outcome {
         let mut out = Outcome::default();
         if stop.load(Ordering::Relaxed) {
@@ -64,8 +103,8 @@ impl Remover for Recycle {
             return out;
         };
         progress(0, 0);
-        let (code, aborted) = shell_delete(&from);
-        match skip_for_shell_result(code, aborted) {
+        let r = shell_recycle(&from, self.owner);
+        match skip_for_result(r.hr, r.aborted, r.seen) {
             None => {
                 out.removed_items = 1;
                 out.removed_bytes = t.size;
@@ -77,7 +116,7 @@ impl Remover for Recycle {
     }
 }
 
-/// The plain, double-NUL-terminated `pFrom` for a verbatim drive path, or `None` when the plain
+/// The plain, double-NUL-terminated path for a verbatim drive path, or `None` when the plain
 /// form could name a different item or more than one. Win32 drops a trailing dot or space from a
 /// name (and reaches a sibling), reads a `:` as a stream, reads a device name (`con`, `aux.txt`)
 /// as a device, and the shell expands `*` and `?` (and `<`, `>`, `"` are wildcards to
@@ -125,21 +164,78 @@ fn is_device(name: &str) -> bool {
     numbered || ["con", "prn", "aux", "nul", "conin$", "conout$"].contains(&stem.as_str())
 }
 
-/// What one shell call means for the target: `None` for a success (0, not aborted), else the
-/// one skip reason. A non-zero code or the aborted flag is never a success.
+/// What `PreDeleteItem` does with an item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PreDelete {
+    Allow,
+    Abort,
+}
+
+/// What `PostDeleteItem` says happened to an item. `NotRecycled` keeps the `hrDelete` code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PostDelete {
+    Recycled,
+    NotRecycled(i32),
+}
+
+/// What the sink saw over the whole operation: the worst of its calls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Seen {
+    Nothing,
+    Post(PostDelete),
+    /// `PreDeleteItem` refused an item the bin cannot take.
+    Refused,
+}
+
+/// Allow only an item the shell will send to the bin (`TSF_DELETE_RECYCLE_IF_POSSIBLE` set).
+/// Without it the shell would delete the item permanently.
+pub(crate) fn pre_delete_decision(_tsf_flags: u32) -> PreDelete {
+    PreDelete::Allow
+}
+
+/// Recycled only for a success `hrDelete` with a new item in the bin (`psiNewlyCreated`).
+pub(crate) fn post_delete_decision(_hr: i32, _newly_created_is_null: bool) -> PostDelete {
+    PostDelete::Recycled
+}
+
+/// The worse of two sink observations: `Refused` over `NotRecycled` over `Recycled` over
+/// `Nothing`, so a later call never hides an earlier failure.
+fn worse(a: Seen, b: Seen) -> Seen {
+    let rank = |s: Seen| match s {
+        Seen::Nothing => 0,
+        Seen::Post(PostDelete::Recycled) => 1,
+        Seen::Post(PostDelete::NotRecycled(_)) => 2,
+        Seen::Refused => 3,
+    };
+    if rank(b) > rank(a) { b } else { a }
+}
+
+/// What one operation means for the target: `None` only when the result is a success, nothing
+/// aborted, and the sink saw the item recycled. In this order: `Refused` is
+/// `Other(NOT_RECYCLABLE)`; a failure code maps by `skip_for_shell_result`; a `NotRecycled` with
+/// a failure code maps by that code, with a success code it is `Other(NOT_IN_BIN)`; the aborted
+/// flag is `Other(ABORTED)`; no sink report is `Other(NOT_IN_BIN)`.
+pub(crate) fn skip_for_result(_hr: i32, _aborted: bool, _seen: Seen) -> Option<SkipReason> {
+    None
+}
+
+/// What a code and the aborted flag mean: `None` for a success (0, not aborted), else the one
+/// skip reason. A non-zero code or the aborted flag is never a success.
 ///
-/// | Result                                  | Reason                       |
-/// |-----------------------------------------|------------------------------|
-/// | 0, not aborted                          | success (`None`)             |
-/// | 0, aborted                              | `Other(ABORTED)`             |
-/// | `DE_ACCESSDENIEDSRC` (0x78)             | `AccessDenied`               |
-/// | `DE_PATHTOODEEP` (0x79), `DE_FILENAMETOOLONG` (0x81) | `TooLong`       |
-/// | any other code (`DE_*` or Win32)        | `reason_from_win32(code)`    |
+/// | Result                                                  | Reason                    |
+/// |---------------------------------------------------------|---------------------------|
+/// | 0, not aborted                                          | success (`None`)          |
+/// | 0, aborted                                              | `Other(ABORTED)`          |
+/// | a cancel: `ERROR_CANCELLED` 1223 (or its HRESULT 0x800704C7), `DE_OPCANCELLED` 0x75, `E_ABORT`, `COPYENGINE_E_USER_CANCELLED`, `COPYENGINE_E_CANCELLED` | `Other(ABORTED)` |
+/// | an HRESULT 0x8007xxxx (a Win32 code)                    | as the Win32 code xxxx    |
+/// | `DE_ACCESSDENIEDSRC` (0x78)                             | `AccessDenied`            |
+/// | `DE_PATHTOODEEP` (0x79), `DE_FILENAMETOOLONG` (0x81)    | `TooLong`                 |
+/// | any other code (`DE_*`, Win32, other HRESULT)           | `reason_from_win32(code)` |
 ///
 /// `reason_from_win32` gives `Locked`, `AccessDenied` and `TooLong` for the plain Win32 codes and
-/// `Other(code)` for the rest, every `DE_*` code included (`DE_FILE_TOO_LARGE` 0x85,
-/// `DE_OPCANCELLED` 0x75, `DE_INVALIDFILES` 0x7C, ...). `skip_text` has the words for the codes
-/// that offer the permanent delete.
+/// `Other(code)` for the rest (`DE_FILE_TOO_LARGE`, `DE_INVALIDFILES`, the
+/// `COPYENGINE_E_RECYCLE_*` codes, ...). `skip_text` has the words for the codes that offer the
+/// permanent delete.
 pub(crate) fn skip_for_shell_result(code: i32, aborted: bool) -> Option<SkipReason> {
     match code {
         0 if !aborted => None,
@@ -150,8 +246,9 @@ pub(crate) fn skip_for_shell_result(code: i32, aborted: bool) -> Option<SkipReas
     }
 }
 
-/// The words for a Recycle Bin skip that offers the permanent delete (ASD-STE100), or `None` for a
-/// reason that has the general text. No automatic fallback: the user chooses.
+/// The words for a Recycle Bin skip (ASD-STE100), or `None` for a reason that has the general
+/// text. The ones for an item the bin did not take offer the permanent delete; there is no
+/// automatic fallback: the user chooses.
 pub fn skip_text(r: SkipReason) -> Option<&'static str> {
     match r {
         SkipReason::Other(PATH_REFUSED | DE_INVALIDFILES) => {
@@ -167,27 +264,157 @@ pub fn skip_text(r: SkipReason) -> Option<&'static str> {
     }
 }
 
-/// `SHFileOperationW` `FO_DELETE` with `FLAGS` on `from` (double-NUL terminated, one path).
-/// Returns the call's code and `fAnyOperationsAborted`. No owner window: the only UI the flags
-/// leave on is the shell's warning before a permanent delete.
-fn shell_delete(from: &[u16]) -> (i32, bool) {
-    assert!(from.ends_with(&[0, 0]) && !from[..from.len() - 2].contains(&0), "pFrom must be one path, double-NUL terminated");
-    let mut op = SHFILEOPSTRUCTW {
-        hwnd: std::ptr::null_mut(),
-        wFunc: FO_DELETE,
-        pFrom: from.as_ptr(),
-        pTo: std::ptr::null(),
-        fFlags: FLAGS as u16,
-        fAnyOperationsAborted: 0,
-        hNameMappings: std::ptr::null_mut(),
-        lpszProgressTitle: std::ptr::null(),
-    };
-    // SAFETY: `op` is the windows-sys definition, fully set. `pFrom` points into `from`, which
-    // holds one path and ends in two NULs and lives across the call; `pTo` and the progress title
-    // are null, which `FO_DELETE` without `FOF_SIMPLEPROGRESS` allows. Without
-    // `FOF_WANTMAPPINGHANDLE` the shell leaves `hNameMappings` unset, so nothing is to be freed.
-    let code = unsafe { SHFileOperationW(&mut op) };
-    (code, op.fAnyOperationsAborted != 0)
+/// COM on this thread for one operation: `CoInitializeEx` (apartment-threaded), balanced by
+/// `CoUninitialize` on drop only when this guard initialised it. A thread already in the other
+/// mode (`RPC_E_CHANGED_MODE`) keeps its COM and is not uninitialised.
+struct Com {
+    uninit: bool,
+}
+
+impl Com {
+    fn init() -> Result<Com, i32> {
+        Ok(Com { uninit: false })
+    }
+}
+
+impl Drop for Com {
+    fn drop(&mut self) {
+        if self.uninit {
+            // SAFETY: balances the successful `CoInitializeEx` this guard made on this thread.
+            unsafe { CoUninitialize() };
+        }
+    }
+}
+
+/// The progress sink: records what the shell did to the item. Every other call is accepted.
+#[windows_core::implement(IFileOperationProgressSink)]
+struct Sink {
+    seen: Cell<Seen>,
+}
+
+impl Sink {
+    fn new() -> ComObject<Sink> {
+        ComObject::new(Sink { seen: Cell::new(Seen::Nothing) })
+    }
+    fn note(&self, s: Seen) {
+        self.seen.set(worse(self.seen.get(), s));
+    }
+}
+
+#[allow(non_snake_case, reason = "the COM interface's method names")]
+impl IFileOperationProgressSink_Impl for Sink_Impl {
+    fn StartOperations(&self) -> windows_core::Result<()> {
+        Ok(())
+    }
+    fn FinishOperations(&self, _hr: HRESULT) -> windows_core::Result<()> {
+        Ok(())
+    }
+    fn PreRenameItem(&self, _f: u32, _i: Ref<'_, IShellItem>, _n: &PCWSTR) -> windows_core::Result<()> {
+        Ok(())
+    }
+    fn PostRenameItem(
+        &self,
+        _f: u32,
+        _i: Ref<'_, IShellItem>,
+        _n: &PCWSTR,
+        _hr: HRESULT,
+        _new: Ref<'_, IShellItem>,
+    ) -> windows_core::Result<()> {
+        Ok(())
+    }
+    fn PreMoveItem(
+        &self,
+        _f: u32,
+        _i: Ref<'_, IShellItem>,
+        _d: Ref<'_, IShellItem>,
+        _n: &PCWSTR,
+    ) -> windows_core::Result<()> {
+        Ok(())
+    }
+    fn PostMoveItem(
+        &self,
+        _f: u32,
+        _i: Ref<'_, IShellItem>,
+        _d: Ref<'_, IShellItem>,
+        _n: &PCWSTR,
+        _hr: HRESULT,
+        _new: Ref<'_, IShellItem>,
+    ) -> windows_core::Result<()> {
+        Ok(())
+    }
+    fn PreCopyItem(
+        &self,
+        _f: u32,
+        _i: Ref<'_, IShellItem>,
+        _d: Ref<'_, IShellItem>,
+        _n: &PCWSTR,
+    ) -> windows_core::Result<()> {
+        Ok(())
+    }
+    fn PostCopyItem(
+        &self,
+        _f: u32,
+        _i: Ref<'_, IShellItem>,
+        _d: Ref<'_, IShellItem>,
+        _n: &PCWSTR,
+        _hr: HRESULT,
+        _new: Ref<'_, IShellItem>,
+    ) -> windows_core::Result<()> {
+        Ok(())
+    }
+    fn PreDeleteItem(&self, _flags: u32, _i: Ref<'_, IShellItem>) -> windows_core::Result<()> {
+        Ok(())
+    }
+    fn PostDeleteItem(
+        &self,
+        _flags: u32,
+        _i: Ref<'_, IShellItem>,
+        _hr: HRESULT,
+        _new: Ref<'_, IShellItem>,
+    ) -> windows_core::Result<()> {
+        Ok(())
+    }
+    fn PreNewItem(&self, _f: u32, _d: Ref<'_, IShellItem>, _n: &PCWSTR) -> windows_core::Result<()> {
+        Ok(())
+    }
+    fn PostNewItem(
+        &self,
+        _f: u32,
+        _d: Ref<'_, IShellItem>,
+        _n: &PCWSTR,
+        _t: &PCWSTR,
+        _a: u32,
+        _hr: HRESULT,
+        _new: Ref<'_, IShellItem>,
+    ) -> windows_core::Result<()> {
+        Ok(())
+    }
+    fn UpdateProgress(&self, _total: u32, _done: u32) -> windows_core::Result<()> {
+        Ok(())
+    }
+    fn ResetTimer(&self) -> windows_core::Result<()> {
+        Ok(())
+    }
+    fn PauseTimer(&self) -> windows_core::Result<()> {
+        Ok(())
+    }
+    fn ResumeTimer(&self) -> windows_core::Result<()> {
+        Ok(())
+    }
+}
+
+/// What one shell operation reported.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Report {
+    /// The first failing HRESULT of the setup or of `PerformOperations`; 0 for none.
+    pub hr: i32,
+    pub aborted: bool,
+    pub seen: Seen,
+}
+
+/// One `IFileOperation` delete of `from` (one plain path, double-NUL terminated), on this thread.
+fn shell_recycle(_from: &[u16], _owner: Option<isize>) -> Report {
+    Report { hr: -1, aborted: true, seen: Seen::Nothing }
 }
 
 #[cfg(test)]
@@ -196,6 +423,8 @@ mod tests {
     use scan::NodeId;
     use std::fs;
     use std::path::PathBuf;
+    use windows::Win32::Foundation::{E_FAIL, S_OK};
+    use windows::Win32::System::Com::COINIT_MULTITHREADED;
 
     /// A unique directory, canonical (verbatim) form. Removed on drop; a link inside is removed
     /// first, so nothing outside is ever followed.
@@ -244,7 +473,7 @@ mod tests {
     /// Runs `Recycle` and records every progress call.
     fn run(t: &DeleteTarget, stop: bool) -> (Outcome, Vec<(u64, u64)>) {
         let calls = std::cell::RefCell::new(Vec::new());
-        let o = Recycle.remove(t, &|i, b| calls.borrow_mut().push((i, b)), &AtomicBool::new(stop));
+        let o = Recycle::default().remove(t, &|i, b| calls.borrow_mut().push((i, b)), &AtomicBool::new(stop));
         (o, calls.into_inner())
     }
 
@@ -341,30 +570,53 @@ mod tests {
         assert_eq!(shell_path(&p), None);
     }
 
+    /// `HRESULT_FROM_WIN32`.
+    fn hr_win32(code: u32) -> i32 {
+        (0x8007_0000 | code) as i32
+    }
+
     #[test]
     fn shell_results_map_to_one_skip_or_success() {
-        for (code, aborted, want) in [
+        let aborted = Some(SkipReason::Other(ABORTED));
+        for (code, flag, want) in [
             (0, false, None),
-            (0, true, Some(SkipReason::Other(ABORTED))),
+            (0, true, aborted),
             (DE_ACCESSDENIEDSRC, false, Some(SkipReason::AccessDenied)),
             (DE_PATHTOODEEP, false, Some(SkipReason::TooLong)),
             (DE_FILENAMETOOLONG, false, Some(SkipReason::TooLong)),
             (DE_FILE_TOO_LARGE, false, Some(SkipReason::Other(DE_FILE_TOO_LARGE))),
-            (DE_OPCANCELLED, true, Some(SkipReason::Other(DE_OPCANCELLED))),
             (DE_INVALIDFILES, false, Some(SkipReason::Other(DE_INVALIDFILES))),
             (0x71, false, Some(SkipReason::Other(0x71))),
             (0x74, false, Some(SkipReason::Other(0x74))),
             (0xB7, false, Some(SkipReason::Other(0xB7))),
             (0x10000, false, Some(SkipReason::Other(0x10000))),
             (0x402, false, Some(SkipReason::Other(0x402))),
-            // Plain Win32 codes.
+            // Cancels, in every form, are the aborted reason.
+            (DE_OPCANCELLED, false, aborted),
+            (DE_OPCANCELLED, true, aborted),
+            (ERROR_CANCELLED, false, aborted),
+            (hr_win32(1223), false, aborted),
+            (hr_win32(1223), true, aborted),
+            (HR_E_ABORT, false, aborted),
+            (HR_E_ABORT, true, aborted),
+            (HR_USER_CANCELLED, true, aborted),
+            (HR_CANCELLED, false, aborted),
+            // Plain Win32 codes, bare and as HRESULTs.
             (2, false, Some(SkipReason::Other(2))),
             (5, false, Some(SkipReason::AccessDenied)),
             (32, false, Some(SkipReason::Locked)),
             (32, true, Some(SkipReason::Locked)),
             (206, false, Some(SkipReason::TooLong)),
+            (hr_win32(2), false, Some(SkipReason::Other(2))),
+            (hr_win32(5), false, Some(SkipReason::AccessDenied)),
+            (hr_win32(32), false, Some(SkipReason::Locked)),
+            (hr_win32(206), false, Some(SkipReason::TooLong)),
+            // Other HRESULTs keep their code.
+            (HR_RECYCLE_SIZE_TOO_BIG, false, Some(SkipReason::Other(HR_RECYCLE_SIZE_TOO_BIG))),
+            (HR_RECYCLE_FORCE_NUKE, false, Some(SkipReason::Other(HR_RECYCLE_FORCE_NUKE))),
+            (E_FAIL.0, false, Some(SkipReason::Other(E_FAIL.0))),
         ] {
-            assert_eq!(skip_for_shell_result(code, aborted), want, "code={code:#x} aborted={aborted}");
+            assert_eq!(skip_for_shell_result(code, flag), want, "code={code:#x} aborted={flag}");
         }
         // Every DE_* code from the documentation is a skip, never a success.
         for code in (0x71..=0x88).chain([0xB7, 0x402, 0x10000, 0x10074]) {
@@ -372,14 +624,92 @@ mod tests {
         }
     }
 
+    /// Every `TSF_*` bit (`_TRANSFER_SOURCE_FLAGS`, 0x1 to 0x2000).
+    const TSF_BITS: u32 = 0x3FFF;
+
     #[test]
-    fn skip_text_offers_the_permanent_delete_where_the_bin_cannot_take_the_item() {
+    fn pre_delete_allows_only_an_item_the_shell_will_recycle() {
+        let recycle = TSF_DELETE_RECYCLE_IF_POSSIBLE.0 as u32;
+        assert_eq!(recycle, 0x80);
+        // Every combination of the other bits, with and without the recycle bit.
+        let others = TSF_BITS & !recycle;
+        let mut sub = others;
+        loop {
+            assert_eq!(pre_delete_decision(sub), PreDelete::Abort, "flags={sub:#x}");
+            assert_eq!(pre_delete_decision(sub | recycle), PreDelete::Allow, "flags={:#x}", sub | recycle);
+            if sub == 0 {
+                break;
+            }
+            sub = (sub - 1) & others;
+        }
+        assert_eq!(pre_delete_decision(u32::MAX & !recycle), PreDelete::Abort);
+    }
+
+    #[test]
+    fn post_delete_counts_only_a_success_with_a_new_item_in_the_bin() {
+        for (hr, null, want) in [
+            (S_OK.0, false, PostDelete::Recycled),
+            (1, false, PostDelete::Recycled),
+            (S_OK.0, true, PostDelete::NotRecycled(S_OK.0)),
+            (E_FAIL.0, false, PostDelete::NotRecycled(E_FAIL.0)),
+            (E_FAIL.0, true, PostDelete::NotRecycled(E_FAIL.0)),
+            (HR_E_ABORT, false, PostDelete::NotRecycled(HR_E_ABORT)),
+        ] {
+            assert_eq!(post_delete_decision(hr, null), want, "hr={hr:#x} null={null}");
+        }
+    }
+
+    #[test]
+    fn results_are_a_success_only_when_the_sink_saw_the_item_recycled() {
+        let recycled = Seen::Post(PostDelete::Recycled);
+        let other = |c| Some(SkipReason::Other(c));
+        for (hr, aborted, seen, want) in [
+            (0, false, recycled, None),
+            // The sink refused the item: whatever the operation says, it is not recyclable.
+            (0, false, Seen::Refused, other(NOT_RECYCLABLE)),
+            (HR_E_ABORT, true, Seen::Refused, other(NOT_RECYCLABLE)),
+            (HR_USER_CANCELLED, true, Seen::Refused, other(NOT_RECYCLABLE)),
+            // A failure or an abort is never a success, even after a recycled report.
+            (0, true, recycled, other(ABORTED)),
+            (HR_E_ABORT, true, recycled, other(ABORTED)),
+            (hr_win32(1223), false, recycled, other(ABORTED)),
+            (hr_win32(5), false, recycled, Some(SkipReason::AccessDenied)),
+            (hr_win32(2), false, Seen::Nothing, Some(SkipReason::Other(2))),
+            // Not recycled: by its code, or not in the bin.
+            (0, false, Seen::Post(PostDelete::NotRecycled(hr_win32(32))), Some(SkipReason::Locked)),
+            (0, false, Seen::Post(PostDelete::NotRecycled(0)), other(NOT_IN_BIN)),
+            (0, true, Seen::Post(PostDelete::NotRecycled(0)), other(NOT_IN_BIN)),
+            // No report from the sink is never a success.
+            (0, false, Seen::Nothing, other(NOT_IN_BIN)),
+            (0, true, Seen::Nothing, other(ABORTED)),
+        ] {
+            assert_eq!(skip_for_result(hr, aborted, seen), want, "hr={hr:#x} aborted={aborted} seen={seen:?}");
+        }
+    }
+
+    #[test]
+    fn worse_keeps_the_worst_report() {
+        let (r, n) = (Seen::Post(PostDelete::Recycled), Seen::Post(PostDelete::NotRecycled(5)));
+        assert_eq!(worse(Seen::Nothing, r), r);
+        assert_eq!(worse(r, n), n);
+        assert_eq!(worse(n, r), n);
+        assert_eq!(worse(Seen::Refused, r), Seen::Refused);
+        assert_eq!(worse(n, Seen::Refused), Seen::Refused);
+    }
+
+    #[test]
+    fn skip_text_offers_the_permanent_delete_where_the_bin_did_not_take_the_item() {
         let offers = [
             SkipReason::Other(PATH_REFUSED),
             SkipReason::Other(DE_INVALIDFILES),
             SkipReason::Other(DE_FILE_TOO_LARGE),
+            SkipReason::Other(HR_RECYCLE_SIZE_TOO_BIG),
             SkipReason::Other(ABORTED),
-            SkipReason::Other(DE_OPCANCELLED),
+            SkipReason::Other(NOT_RECYCLABLE),
+            SkipReason::Other(HR_RECYCLE_FORCE_NUKE),
+            SkipReason::Other(HR_RECYCLE_UNKNOWN),
+            SkipReason::Other(HR_RECYCLE_PATH_TOO_LONG),
+            SkipReason::Other(HR_RECYCLE_BIN_NOT_FOUND),
         ];
         for r in offers {
             let t = skip_text(r).unwrap_or_else(|| panic!("{r:?} has no text"));
@@ -388,24 +718,94 @@ mod tests {
         }
         assert!(skip_text(SkipReason::Other(PATH_REFUSED)).unwrap().contains("path"));
         assert!(skip_text(SkipReason::Other(DE_FILE_TOO_LARGE)).unwrap().contains("too large"));
+        assert!(skip_text(SkipReason::Other(NOT_RECYCLABLE)).unwrap().contains("cannot take this item"));
+        // The item may be gone: no offer to delete it, a request to scan again.
+        let gone = skip_text(SkipReason::Other(NOT_IN_BIN)).expect("text");
+        assert!(!gone.contains("permanently") && gone.contains("Scan"), "{gone}");
         for r in [SkipReason::Locked, SkipReason::AccessDenied, SkipReason::TooLong, SkipReason::Other(2)] {
             assert_eq!(skip_text(r), None, "{r:?}");
         }
     }
 
     #[test]
-    fn the_flags_recycle_silently_and_warn_before_a_permanent_delete() {
-        let f = FLAGS;
+    fn the_flags_recycle_with_no_shell_window_and_no_nuke_warning() {
         for (flag, name) in [
             (FOF_ALLOWUNDO, "FOF_ALLOWUNDO"),
+            (FOFX_RECYCLEONDELETE, "FOFX_RECYCLEONDELETE"),
             (FOF_NOCONFIRMATION, "FOF_NOCONFIRMATION"),
             (FOF_SILENT, "FOF_SILENT"),
             (FOF_NOERRORUI, "FOF_NOERRORUI"),
-            (FOF_NOCONFIRMMKDIR, "FOF_NOCONFIRMMKDIR"),
-            (FOF_WANTNUKEWARNING, "FOF_WANTNUKEWARNING"),
         ] {
-            assert_ne!(f & flag, 0, "{name}");
+            assert_ne!(FLAGS.0 & flag.0, 0, "{name}");
         }
+        assert_eq!(FLAGS.0 & windows::Win32::UI::Shell::FOF_WANTNUKEWARNING.0, 0);
+    }
+
+    #[test]
+    fn recycle_keeps_its_owner_window() {
+        assert_eq!(Recycle::default().owner, None);
+        assert_eq!(Recycle::new(Some(0x1234)).owner, Some(0x1234));
+    }
+
+    #[test]
+    fn com_is_uninitialised_only_by_the_guard_that_initialised_it() {
+        std::thread::spawn(|| {
+            let first = Com::init().expect("init");
+            assert!(first.uninit, "a new thread is initialised by the guard");
+            // A second init on the same thread (S_FALSE) also needs its own uninit.
+            let second = Com::init().expect("init again");
+            assert!(second.uninit);
+        })
+        .join()
+        .unwrap();
+        std::thread::spawn(|| {
+            // SAFETY: no reserved pointer; balanced below on this thread.
+            unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.ok().expect("MTA");
+            let g = Com::init().expect("a thread in the other mode keeps its COM");
+            assert!(!g.uninit, "RPC_E_CHANGED_MODE: not ours to uninitialise");
+            drop(g);
+            // SAFETY: balances the CoInitializeEx above.
+            unsafe { CoUninitialize() };
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn the_sink_refuses_an_item_the_bin_cannot_take_and_records_the_result() {
+        let d = Dir::new("sink");
+        // COM is started here without the guard, so this test does not depend on it. The test
+        // thread ends with the test, which ends its COM too.
+        // SAFETY: no reserved pointer; on this thread only.
+        unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.ok().expect("com");
+        let path = pfrom(&plain(&d.base).to_string_lossy());
+        // SAFETY: COM is initialised on this thread; `path` is NUL-terminated and lives across the call.
+        let item: IShellItem = unsafe { SHCreateItemFromParsingName(PCWSTR(path.as_ptr()), None) }.expect("item");
+        let recycle = TSF_DELETE_RECYCLE_IF_POSSIBLE.0 as u32;
+
+        let sink = Sink::new();
+        let i: IFileOperationProgressSink = sink.to_interface();
+        // SAFETY (each call below): `i` is a live sink on this thread; the items are live or null.
+        unsafe { i.PreDeleteItem(recycle, None) }.expect("a recyclable item is allowed");
+        assert_eq!(sink.seen.get(), Seen::Nothing);
+        unsafe { i.PostDeleteItem(recycle, None, S_OK, &item) }.unwrap();
+        assert_eq!(sink.seen.get(), Seen::Post(PostDelete::Recycled));
+        let refused = unsafe { i.PreDeleteItem(0, None) }.expect_err("an item the bin cannot take is refused");
+        assert_eq!(refused.code(), E_ABORT);
+        assert_eq!(sink.seen.get(), Seen::Refused);
+        unsafe { i.PostDeleteItem(recycle, None, S_OK, &item) }.unwrap();
+        assert_eq!(sink.seen.get(), Seen::Refused, "a later report does not hide the refusal");
+
+        let sink = Sink::new();
+        let i: IFileOperationProgressSink = sink.to_interface();
+        unsafe { i.PostDeleteItem(recycle, None, S_OK, None) }.unwrap();
+        assert_eq!(sink.seen.get(), Seen::Post(PostDelete::NotRecycled(0)), "no new item: not in the bin");
+        unsafe { i.PostDeleteItem(recycle, None, E_FAIL, &item) }.unwrap();
+        assert_eq!(sink.seen.get(), Seen::Post(PostDelete::NotRecycled(0)), "the first failure stays");
+        let sink = Sink::new();
+        let i: IFileOperationProgressSink = sink.to_interface();
+        unsafe { i.PostDeleteItem(recycle, None, E_FAIL, &item) }.unwrap();
+        assert_eq!(sink.seen.get(), Seen::Post(PostDelete::NotRecycled(E_FAIL.0)));
     }
 
     #[test]
@@ -545,13 +945,14 @@ mod tests {
 
     #[test]
     #[ignore = "sends a temp folder to the real Recycle Bin"]
-    fn the_shell_moves_a_file_with_no_prompt_and_no_abort() {
+    fn the_shell_recycles_a_file_with_no_abort_and_reports_it_in_the_bin() {
         let d = Dir::new("file");
         let item = d.base.join(format!("{}.txt", Dir::bin_name("file")));
         fs::write(&item, b"hello").unwrap();
         let before = bin_records(&item);
         let from = shell_path(&item).expect("a plain form");
-        assert_eq!(shell_delete(&from), (0, false));
+        let r = shell_recycle(&from, None);
+        assert_eq!(r, Report { hr: 0, aborted: false, seen: Seen::Post(PostDelete::Recycled) });
         assert!(!item.exists(), "the file left its place");
         assert_in_bin(&item, before);
     }
@@ -575,6 +976,7 @@ mod tests {
             return;
         }
         d.links.borrow_mut().push(link.clone());
+        let before = bin_records(&link);
         let mut t = target(&link, false, 0);
         t.is_link = true;
         let (o, _) = run(&t, false);
@@ -582,5 +984,28 @@ mod tests {
         assert_eq!(o.removed_items, 1);
         assert!(fs::symlink_metadata(&link).is_err(), "the junction left its place");
         assert!(other.join("keep").exists(), "the junction was not followed");
+        assert_in_bin(&link, before);
+    }
+
+    /// A network path has no Recycle Bin: the shell would delete it permanently. The item is a
+    /// temp folder reached through this machine's own admin share (`\\localhost\C$`), so the test
+    /// changes no setting. `shell_recycle` is called directly, as `shell_path` refuses UNC paths.
+    #[test]
+    #[ignore = "sends a temp folder to the real Recycle Bin"]
+    fn an_item_the_bin_cannot_take_is_refused_and_stays() {
+        let d = Dir::new("network");
+        let item = d.base.join("must-stay");
+        fs::create_dir(&item).unwrap();
+        fs::write(item.join("keep"), b"x").unwrap();
+        let local = plain(&item).to_string_lossy().into_owned();
+        let unc = format!(r"\\localhost\{}${}", &local[..1], &local[2..]);
+        if let Err(e) = fs::metadata(&unc) {
+            skipped(&format!("item the bin cannot take (the admin share path {unc} is not reachable: {e})"));
+            return;
+        }
+        let r = shell_recycle(&pfrom(&unc), None);
+        assert_eq!(r.seen, Seen::Refused, "{r:?}");
+        assert_eq!(skip_for_result(r.hr, r.aborted, r.seen), Some(SkipReason::Other(NOT_RECYCLABLE)));
+        assert!(item.join("keep").exists(), "the item the bin cannot take is not deleted");
     }
 }
