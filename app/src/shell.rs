@@ -19,7 +19,7 @@
 
 use crate::menu::{Anchor, Cmd, Item, SHELL_FIRST, SHELL_LAST};
 use std::cell::{Cell, RefCell};
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 use windows::Win32::Foundation::{E_ABORT, E_FAIL, E_INVALIDARG, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{ClientToScreen, ScreenToClient};
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoTaskMemFree};
@@ -299,6 +299,13 @@ pub fn act(cmd: Cmd, path: &Path, is_dir: bool) -> Result<(), String> {
     }
 }
 
+/// Explore Folder (`act`) for the item at `path` on a new thread with its own COM (STA), so a file
+/// manager that blocks `SHOpenFolderAndSelectItems` does not block the window. `done` gets the
+/// result on that thread. Returns at once.
+pub fn explore_on_worker(_path: PathBuf, _is_dir: bool, _done: impl FnOnce(Result<(), String>) + Send + 'static) {
+    unimplemented!("explore_on_worker")
+}
+
 /// `ShellExecuteExW` of `info`, shown as a normal window.
 fn execute(mut info: SHELLEXECUTEINFOW) -> windows::core::Result<()> {
     info.cbSize = size_of::<SHELLEXECUTEINFOW>() as u32;
@@ -416,7 +423,6 @@ mod tests {
     use super::*;
     use crate::menu::query_flags;
     use std::fs;
-    use std::path::PathBuf;
 
     /// A new empty folder under the target folder of the worktree, removed when dropped. The shell
     /// builds menus only for items made here: no verb runs.
@@ -510,6 +516,20 @@ mod tests {
         if let Ok(got) = got {
             assert_eq!(got, abs.join("a.").display().to_string());
         }
+    }
+
+    #[test]
+    fn explore_on_worker_parses_the_path_on_another_thread_and_gives_its_error() {
+        let dir = Scratch::new("explore-worker");
+        let missing = dir.0.join("gone.txt");
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        explore_on_worker(missing.clone(), false, move |result| tx.send((std::thread::current().id(), result)).unwrap());
+
+        let (thread, result) = rx.recv_timeout(std::time::Duration::from_secs(30)).unwrap();
+        assert_ne!(thread, std::thread::current().id());
+        let error = result.unwrap_err();
+        assert!(error.contains(&missing.display().to_string()), "{error}");
     }
 
     #[test]

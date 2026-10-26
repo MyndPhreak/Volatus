@@ -996,6 +996,12 @@ fn run_action(
     act(cmd, &used).err().map(|_| note.to_string())
 }
 
+/// The note to show after the Volatus menu item `cmd` ran: its own note when it `failed`, else
+/// none. Show this folder and Rescan have none.
+fn action_note(_cmd: menu::Cmd, _failed: bool) -> Option<&'static str> {
+    unimplemented!("action_note")
+}
+
 /// True when the top bar offers Rescan: a finished scan found changed on disk.
 fn rescan_shown(state: &ScanState, outdated: bool) -> bool {
     outdated && matches!(state, ScanState::Done(_))
@@ -1951,7 +1957,7 @@ mod tests {
         Move, picture_point, zoom_frame_at, take_launch_path, forget_scan, gate_hover, left_map,
         shows_start_at_launch, relaunch_path, LabelKind, LogicalBox, Placed, place_label, stretch,
         apply_args, FOOTER_CHIPS, Stored, chips_of, drop_types, store_totals, remove_node, Removal, apply_removal, begin_layout, take_removal,
-        Source, target_of, hit_at, run_action, rescan_shown, rescan_target, Request, menu_request, FollowStep, check_follow,
+        Source, target_of, hit_at, run_action, action_note, rescan_shown, rescan_target, Request, menu_request, FollowStep, check_follow,
     };
     use crate::menu::{self, Cmd, Disk};
     use treemap::filetype::{TypeTotal, type_totals};
@@ -3533,6 +3539,22 @@ mod tests {
                 Some((Cmd::CommandPrompt, std::path::PathBuf::from("C:\\a\\f.txt"))),
             ]
         );
+    }
+
+    #[test]
+    fn action_note_is_the_note_of_a_failed_action_only() {
+        let cmds = [Cmd::ExploreFolder, Cmd::CommandPrompt, Cmd::CopyPath, Cmd::ShowFolder, Cmd::Rescan];
+
+        let got: Vec<(Option<&str>, Option<&str>)> = cmds.iter().map(|&cmd| (action_note(cmd, true), action_note(cmd, false))).collect();
+
+        let want = vec![
+            (Some("Volatus cannot open the folder."), None),
+            (Some("Volatus cannot open a command prompt."), None),
+            (Some("Volatus cannot copy the path."), None),
+            (None, None),
+            (None, None),
+        ];
+        assert_eq!(got, want);
     }
 
     #[test]
