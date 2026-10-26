@@ -19,6 +19,7 @@ mod menu;
 mod model;
 mod motion;
 mod nav;
+mod purge;
 mod shell;
 mod settings;
 mod tip;

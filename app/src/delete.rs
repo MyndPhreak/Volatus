@@ -7,6 +7,7 @@
 use crate::model::{Unit, format_size};
 use scan::NodeId;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 
 /// How the item leaves the disk. Plain Delete is always `RecycleBin`; only Shift gives `Permanent`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -390,6 +391,12 @@ pub struct Outcome {
     pub removed_bytes: u64,
     pub skipped: Vec<Skipped>,
     pub stopped: bool,
+}
+
+/// A way to remove one checked target. `progress(items_removed, bytes_removed)` is called at a
+/// bounded rate; `stop` is checked between items, and what was removed before it stays removed.
+pub trait Remover: Send + Sync {
+    fn remove(&self, t: &DeleteTarget, progress: &dyn Fn(u64, u64), stop: &AtomicBool) -> Outcome;
 }
 
 /// Maps a Win32 error code to a skip reason.
