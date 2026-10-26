@@ -124,11 +124,16 @@ impl Tree {
         parts.iter().rev().collect()
     }
 
-    /// Unlinks `n` from its parent and subtracts its sizes from every ancestor. `None` for the
-    /// root and for a node already detached. The arena slots stay in place and are not reused.
+    /// Unlinks `n` from its parent and subtracts its sizes from every ancestor. `None`, and nothing
+    /// changes, for the root, a node already detached, and a node under a detached one. The arena
+    /// slots stay in place and are not reused.
     pub fn detach(&mut self, n: NodeId) -> Option<Detached> {
         // The root has no parent, and a detached node has its parent cleared below.
         let parent = self.node(n).parent?;
+        // Under a detached folder the parent links stay, but they do not reach the root.
+        if !std::iter::successors(Some(parent), |&c| self.node(c).parent).any(|c| c == self.root) {
+            return None;
+        }
 
         // No back-pointer: walk the parent's child chain to the node before `n`.
         let next = self.node(n).next_sibling;
