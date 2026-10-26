@@ -65,8 +65,23 @@ impl Probe for RealFs {
     fn resolve(&self, p: &Path) -> Option<PathBuf> {
         std::fs::canonicalize(p).ok()
     }
+    /// A link item (any reparse point) is not followed: its parent is resolved and the name joined
+    /// back, so the link is what gets deleted. Any other item is resolved in full, so an 8.3 short
+    /// name becomes the long name. An item that is gone has its parent resolved; `exists` then says
+    /// `Missing`.
     fn resolve_target(&self, p: &Path) -> Option<PathBuf> {
-        std::fs::canonicalize(p).ok()
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        let by_parent = || {
+            let name = p.file_name()?;
+            std::fs::canonicalize(p.parent()?).ok().map(|dir| dir.join(name))
+        };
+        match std::fs::symlink_metadata(p) {
+            Ok(m) if m.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 => by_parent(),
+            Ok(_) => std::fs::canonicalize(p).ok(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => by_parent(),
+            Err(_) => None,
+        }
     }
 }
 
@@ -145,7 +160,7 @@ pub fn refusal_text(r: Refusal) -> &'static str {
         Refusal::KindChanged => "The item changed after the scan. Scan again.",
         Refusal::ScanRunning => "A scan is running. Wait until it ends.",
         Refusal::Unresolved => "Volatus cannot find the real path of the item. It does not delete the item.",
-        Refusal::NotLocal => "",
+        Refusal::NotLocal => "Volatus deletes items on local drives only.",
     }
 }
 
@@ -187,16 +202,21 @@ pub fn check_target_with(
     }
 }
 
-/// The real path of the item. Its parent is resolved and the name is joined back, so an item that
-/// is a link stays the link and is never followed.
-fn resolve_item(fs: &dyn Probe, target: &Path) -> Option<PathBuf> {
-    match (target.parent(), target.file_name()) {
-        (Some(parent), Some(name)) => fs.resolve(parent).map(|p| p.join(name)),
-        _ => fs.resolve(target),
-    }
+/// True for `<letter>:` or `<letter>:\...` in `norm` form.
+fn is_local(n: &str) -> bool {
+    let b = n.as_bytes();
+    b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b.len() == 2 || b[2] == b'\\')
 }
 
-/// `check_target` with the environment given, so tests never read the real one.
+/// A network path, in `norm` form: `\\server\...`, `\\.\...` or `\\?\UNC\...` (which `norm` shows
+/// as `unc\...`).
+fn is_unc(n: &str) -> bool {
+    n.starts_with(r"\\") || n.starts_with(r"unc\")
+}
+
+/// `check_target` with the environment given, so tests never read the real one. The Ok value is
+/// the RESOLVED path: the caller must delete exactly that path, so the approved path and the
+/// deleted path are the same.
 pub fn check_target_in(
     root: &Path,
     target: &Path,
@@ -204,28 +224,51 @@ pub fn check_target_in(
     fs: &dyn Probe,
     env: &Env,
 ) -> Result<PathBuf, Refusal> {
+    // Only local drive paths are accepted. A network path is refused before anything else.
+    if is_unc(&norm(root)) || is_unc(&norm(target)) {
+        return Err(Refusal::NotLocal);
+    }
+    // A relative or drive-relative path (`C:`, `C:x`, `\`) means nothing without a current
+    // directory; an item with no name (`x\..`) is not one item. Only a drive root has no name.
+    let drive_root = scan::is_volume_root(target);
+    if !root.is_absolute() || !target.is_absolute() || (target.file_name().is_none() && !drive_root) {
+        return Err(Refusal::Unresolved);
+    }
     // A miss here never falls back to the raw path: the text of a path proves nothing.
     let root = fs.resolve(root).ok_or(Refusal::Unresolved)?;
-    let target = resolve_item(fs, target).ok_or(Refusal::Unresolved)?;
+    let target = fs.resolve_target(target).ok_or(Refusal::Unresolved)?;
     let (r, t) = (norm(&root), norm(&target));
+    if is_unc(&r) || is_unc(&t) || !is_local(&r) || !is_local(&t) {
+        return Err(Refusal::NotLocal);
+    }
     if !within(&t, &r) {
         return Err(Refusal::NotUnderRoot);
     }
     // A drive root is named before the root check below, so a scan of `C:\` says "drive root".
-    let bare_drive = t.len() == 2 && t.ends_with(':');
-    if bare_drive || scan::is_volume_root(&target) {
+    if t.len() == 2 || scan::is_volume_root(&target) {
         return Err(Refusal::DriveRoot);
     }
     if t == r {
         return Err(Refusal::NotUnderRoot);
     }
-    let hit = |p: &str, scope: Scope| match scope {
+    // Each environment entry is compared as given and as resolved (8.3 names, links). The Windows
+    // folder and the user profile must resolve; a Program folder may be absent.
+    let mut list: Vec<(String, Scope)> = Vec::new();
+    for (p, scope) in protected_folders(env) {
+        list.push((norm(&p), scope));
+        match fs.resolve(&p) {
+            Some(resolved) => list.push((norm(&resolved), scope)),
+            None if p == Path::new(&env.windir) || p == Path::new(&env.user_profile) => {
+                return Err(Refusal::Unresolved);
+            }
+            None => {}
+        }
+    }
+    let from_env = list.iter().any(|(p, scope)| match scope {
         Scope::Subtree => within(&t, p),
-        Scope::Exact => t == p,
-    };
-    let from_env = protected_folders(env).iter().any(|(p, scope)| hit(&norm(p), *scope));
-    let any_volume = on_any_volume(&t).is_some();
-    if from_env || any_volume {
+        Scope::Exact => t == *p,
+    });
+    if from_env || on_any_volume(&t).is_some() {
         return Err(Refusal::ProtectedFolder);
     }
     if !fs.exists(&target) {
