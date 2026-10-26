@@ -54,15 +54,37 @@ impl Tree {
     /// ancestor, the root included. The node and its subtree stay in the arena, detached
     /// (`is_attached` is false for each); the other children keep their order. `None`, and
     /// nothing changes, for the root or a node that is already detached.
+    /// ponytail: O(siblings + depth); finding the previous sibling walks the parent's child list.
     pub fn remove(&mut self, n: NodeId) -> Option<Removed> {
-        let _ = n;
-        unimplemented!("P2.T1: Tree::remove")
+        if !self.is_attached(n) {
+            return None;
+        }
+        let Node { parent, size, allocated, next_sibling, .. } = *self.node(n);
+        // The root has no parent.
+        let parent = parent?;
+        if self.node(parent).first_child == Some(n) {
+            self.nodes[parent.0 as usize].first_child = next_sibling;
+        } else {
+            // An attached node is in its parent's list, so `prev` is found.
+            let prev = self.children(parent).find(|&c| self.node(c).next_sibling == Some(n))?;
+            self.nodes[prev.0 as usize].next_sibling = next_sibling;
+        }
+        let gone = &mut self.nodes[n.0 as usize];
+        (gone.parent, gone.next_sibling) = (None, None);
+        let mut up = Some(parent);
+        while let Some(p) = up {
+            let node = &mut self.nodes[p.0 as usize];
+            // Every ancestor holds at least `n`'s totals; saturating keeps a bad tree from panicking.
+            node.size = node.size.saturating_sub(size);
+            node.allocated = node.allocated.saturating_sub(allocated);
+            up = node.parent;
+        }
+        Some(Removed { parent, size, allocated })
     }
 
     /// True when `n` is the root or its chain of parents reaches the root.
     pub fn is_attached(&self, n: NodeId) -> bool {
-        let _ = n;
-        unimplemented!("P2.T1: Tree::is_attached")
+        std::iter::successors(Some(n), |&c| self.node(c).parent).any(|c| c == self.root)
     }
     pub fn root(&self) -> NodeId {
         self.root

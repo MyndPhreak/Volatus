@@ -84,7 +84,7 @@ fn pick(rng: &mut Rng, tree: &Tree, entries: &[RawEntry], gone: &HashSet<u64>) -
 
 #[test]
 fn remove_random_removals_match_a_tree_rolled_up_again_from_scratch() {
-    let mut rng = Rng::new(0x5EED_0F_2E30);
+    let mut rng = Rng::new(0x005E_ED0F_2E30);
     for t in 0..400 {
         let entries = random_entries(&mut rng);
         let mut tree = rollup(0, entries.clone()).unwrap().tree;
