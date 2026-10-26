@@ -524,6 +524,81 @@ mod tests {
         assert_eq!(got, Prepared::Changed);
     }
 
+    #[test]
+    fn prepare_name_with_a_trailing_dot_next_to_its_plain_twin_is_changed() {
+        let dir = TempDir::new("proof-trailing-dot");
+        // Made through \\?\: a plain path would lose the dot.
+        let verbatim = |name: &str| PathBuf::from(format!(r"\\?\{}\{name}", dir.0.display()));
+        fs::write(verbatim("a."), b"hello").unwrap();
+        fs::write(verbatim("a"), b"abc").unwrap();
+        let tree = scanned(&dir.0);
+        let n = find(&tree, &["a."]);
+        assert_eq!(tree.node(n).size, 5, "the scan keeps the raw name and its own size");
+
+        let got = prepare(&tree, n, read_disk);
+
+        let _ = fs::remove_file(verbatim("a."));
+        assert_eq!(got, Prepared::Changed, "the disk check read another item");
+    }
+
+    #[test]
+    fn prepare_on_disk_names_that_windows_changes_are_changed_and_the_others_ready() {
+        let dir = TempDir::new("prepare-win32-names");
+        let verbatim = |name: &str| PathBuf::from(format!(r"\\?\{}\{name}", dir.0.display()));
+        let names = ["a.", "a", "b ", "b", "c.", "plain.txt", "u\u{FFFD}v"];
+        for name in names {
+            fs::write(verbatim(name), b"abc").unwrap();
+        }
+        let tree = scanned(&dir.0);
+
+        let got: Vec<(&str, bool)> = names.iter().map(|&name| (name, prepare(&tree, find(&tree, &[name]), read_disk) != Prepared::Changed)).collect();
+
+        for name in names {
+            let _ = fs::remove_file(verbatim(name));
+        }
+        let want = [("a.", false), ("a", true), ("b ", false), ("b", true), ("c.", false), ("plain.txt", true), ("u\u{FFFD}v", false)];
+        assert_eq!(got, want);
+    }
+
+    /// `prepare` of the last node of the chain `root`\`names` (folders, then a file), with a disk
+    /// that matches the scan.
+    fn prepare_chain(root: &str, names: &[&str]) -> Prepared {
+        let mut entries = vec![RawEntry { id: 0, parent: 0, name: root.into(), size: 0, allocated: 0, is_dir: true }];
+        for (i, name) in names.iter().enumerate() {
+            let id = i as u64 + 1;
+            entries.push(RawEntry { id, parent: id - 1, name: (*name).into(), size: 10, allocated: 10, is_dir: i + 1 < names.len() });
+        }
+        let tree = rollup(0, entries).unwrap().tree;
+        let n = find(&tree, names);
+        let kind = if tree.node(n).is_dir { Disk::Dir } else { Disk::File(10) };
+        prepare(&tree, n, |_| kind.clone())
+    }
+
+    #[test]
+    fn prepare_any_name_below_the_root_that_windows_would_change_is_changed() {
+        let cases: [(&str, &[&str], bool); 13] = [
+            ("drive root", &[], true),
+            ("plain", &["a"], true),
+            ("dot inside", &["a.b"], true),
+            ("space inside", &["a b"], true),
+            ("trailing dot", &["a."], false),
+            ("trailing space", &["a "], false),
+            ("only dots", &["..."], false),
+            ("folder with a trailing dot", &["d.", "g"], false),
+            ("folder with a trailing space", &["d ", "g"], false),
+            ("replacement character", &["x\u{FFFD}y"], false),
+            ("relative root", &["a"], true),
+            ("root with a parent step", &["a"], true),
+            ("root with slashes", &["a"], true),
+        ];
+        let roots = ["C:\\", "C:\\scan", "C:\\scan", "C:\\scan", "C:\\scan", "C:\\scan", "C:\\scan", "C:\\scan", "C:\\scan", "C:\\scan", "root", "..\\scan", "C:/scan/"];
+
+        let got: Vec<(&str, bool)> = cases.iter().zip(roots).map(|((case, names, _), root)| (*case, prepare_chain(root, names) != Prepared::Changed)).collect();
+
+        let want: Vec<(&str, bool)> = cases.iter().map(|(case, _, ready)| (*case, *ready)).collect();
+        assert_eq!(got, want);
+    }
+
     // ---- items ----
     const EXPLORE: Item = Item::Action(Cmd::ExploreFolder, "Explore Folder");
     const PROMPT: Item = Item::Action(Cmd::CommandPrompt, "Command Prompt Here");

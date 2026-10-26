@@ -483,6 +483,31 @@ mod tests {
     }
 
     #[test]
+    fn parse_of_a_trailing_dot_name_never_names_its_twin() {
+        use windows::Win32::UI::Shell::SHGetPathFromIDListW;
+        let dir = Scratch::new("proof-dot");
+        let abs = std::path::absolute(&dir.0).unwrap();
+        let verbatim = |name: &str| PathBuf::from(format!(r"\\?\{}\{name}", abs.display()));
+        fs::write(verbatim("a."), b"hello").unwrap();
+        fs::write(verbatim("a"), b"abc").unwrap();
+        assert!(com_ready());
+
+        let parsed = parse(&abs.join("a."));
+
+        // Refused is safe; an id list must name "a." itself, never its twin "a".
+        let got = parsed.map(|pidl| {
+            let mut buf = [0u16; 260];
+            // SAFETY: a full id list and a MAX_PATH buffer.
+            assert!(unsafe { SHGetPathFromIDListW(pidl.0, &mut buf) }.as_bool());
+            String::from_utf16_lossy(&buf[..buf.iter().position(|&c| c == 0).unwrap()])
+        });
+        let _ = fs::remove_file(verbatim("a."));
+        if let Ok(got) = got {
+            assert_eq!(got, abs.join("a.").display().to_string());
+        }
+    }
+
+    #[test]
     fn popup_of_a_folder_with_shift_has_at_least_the_items_without() {
         let dir = Scratch::new("folder-shift");
         let folder = dir.0.join("sub");
