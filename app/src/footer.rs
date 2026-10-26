@@ -2,6 +2,7 @@
 
 use crate::model::{display_name, format_size};
 use crate::tree_view::{format_percent, spoken_percent};
+use std::collections::HashMap;
 use treemap::filetype::{Category, TypeTotal, category_of_ext};
 
 /// One chip of the footer: a file type, its share of the scan and its tile category.
@@ -53,6 +54,23 @@ pub fn chips(totals: &[TypeTotal], total: u64, max: usize) -> Vec<Chip> {
         out.push(chip(OTHER.to_string(), rest, Category::Other));
     }
     out
+}
+
+/// `totals` less the totals `gone` of a removed subtree, per extension: bytes and files go down;
+/// an extension left with no file is dropped. Sorted as `type_totals` sorts: bytes descending,
+/// then ext ascending.
+pub fn subtract(totals: &[TypeTotal], gone: &[TypeTotal]) -> Vec<TypeTotal> {
+    let gone: HashMap<&str, (u64, u64)> = gone.iter().map(|g| (g.ext.as_str(), (g.bytes, g.files))).collect();
+    let mut left: Vec<TypeTotal> = totals
+        .iter()
+        .filter_map(|t| {
+            let (bytes, files) = gone.get(t.ext.as_str()).copied().unwrap_or_default();
+            let files = t.files.saturating_sub(files);
+            (files > 0).then(|| TypeTotal { ext: t.ext.clone(), bytes: t.bytes.saturating_sub(bytes), files })
+        })
+        .collect();
+    left.sort_unstable_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.ext.cmp(&b.ext)));
+    left
 }
 
 /// What a screen reader says for chip `c`: ".dll, 10.5 percent, 12.3 GB".
@@ -224,6 +242,36 @@ mod tests {
         let chips = chips(&ten(), 550, 8);
 
         assert_eq!(chips[8].size, "30 B");
+    }
+
+    fn counted(ext: &str, bytes: u64, files: u64) -> TypeTotal {
+        TypeTotal { ext: ext.into(), bytes, files }
+    }
+
+    #[test]
+    fn subtract_lowers_bytes_and_files_of_each_extension_and_drops_one_left_with_no_file() {
+        let totals = [counted("dll", 100, 3), counted("exe", 50, 2), counted("txt", 10, 1)];
+        let gone = [counted("dll", 40, 1), counted("txt", 10, 1)];
+
+        let left = subtract(&totals, &gone);
+
+        assert_eq!(left, vec![counted("dll", 60, 2), counted("exe", 50, 2)]);
+    }
+
+    #[test]
+    fn subtract_extension_left_with_files_of_no_size_is_kept() {
+        let left = subtract(&[counted("log", 5, 2)], &[counted("log", 5, 1)]);
+
+        assert_eq!(left, vec![counted("log", 0, 1)]);
+    }
+
+    #[test]
+    fn subtract_result_keeps_bytes_descending_then_ext_ascending() {
+        let totals = [counted("a", 100, 2), counted("c", 90, 1), counted("b", 90, 2)];
+
+        let left = subtract(&totals, &[counted("a", 20, 1)]);
+
+        assert_eq!(left, vec![counted("b", 90, 2), counted("c", 90, 1), counted("a", 80, 1)]);
     }
 
     #[test]

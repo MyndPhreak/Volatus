@@ -201,6 +201,23 @@ pub fn zoom_way(tree: &Tree, shown: Option<NodeId>, rects: &[Rect], to: NodeId) 
     }
 }
 
+/// Where the selection and the treemap go after a removal (`after_removal`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AfterRemoval {
+    /// The node to select: the folder the removed node was in.
+    pub select: NodeId,
+    /// The folder the treemap must show now, or `None` to keep the shown one.
+    pub view: Option<NodeId>,
+}
+
+/// Where the selection and the treemap go after `r` was removed from `tree` (call it after
+/// `Tree::remove`) while the treemap shows `view_root`: the parent is selected; the treemap
+/// shows the parent only when the removal took the view root with it.
+pub fn after_removal(tree: &Tree, view_root: NodeId, r: &scan::Removed) -> AfterRemoval {
+    // The view root is detached only when it or one of its ancestors was removed.
+    AfterRemoval { select: r.parent, view: (!tree.is_attached(view_root)).then_some(r.parent) }
+}
+
 /// Map text for a folder with no file that has a size.
 pub const NO_SIZES: &str = "No files with a size in this folder.";
 /// Map text for a folder whose files are all too small to draw at this map size.
@@ -795,6 +812,48 @@ mod tests {
         let b = find(&t, t.root(), "b");
         let b1 = find(&t, b, "b1");
         assert_eq!(open_target(&t, b1), Some((b, b1)));
+    }
+
+    // ---- after_removal ----
+    /// `after_removal` for the treemap at `view` after `gone` was removed from `sample()`.
+    fn removal(view: &[&str], gone: &[&str]) -> (AfterRemoval, Tree, NodeId) {
+        let mut t = sample();
+        let path = |names: &[&str]| names.iter().fold(t.root(), |n, name| find(&t, n, name));
+        let (view, gone) = (path(view), path(gone));
+        let r = t.remove(gone).unwrap();
+        (after_removal(&t, view, &r), t, gone)
+    }
+
+    #[test]
+    fn after_removal_inside_the_view_selects_the_parent_and_keeps_the_view() {
+        for gone in [&["a", "sub"][..], &["a", "sub", "s1"]] {
+            let (after, t, _) = removal(&["a"], gone);
+
+            let parent = gone[..gone.len() - 1].iter().fold(t.root(), |n, name| find(&t, n, name));
+            assert_eq!(after, AfterRemoval { select: parent, view: None }, "removed {gone:?}");
+        }
+    }
+
+    #[test]
+    fn after_removal_of_the_view_root_shows_its_parent() {
+        let (after, t, _) = removal(&["a", "sub"], &["a", "sub"]);
+
+        let a = find(&t, t.root(), "a");
+        assert_eq!(after, AfterRemoval { select: a, view: Some(a) });
+    }
+
+    #[test]
+    fn after_removal_of_an_ancestor_of_the_view_root_shows_the_ancestor_parent() {
+        let (after, t, _) = removal(&["a", "sub"], &["a"]);
+
+        assert_eq!(after, AfterRemoval { select: t.root(), view: Some(t.root()) });
+    }
+
+    #[test]
+    fn after_removal_outside_the_view_selects_the_parent_and_keeps_the_view() {
+        let (after, t, _) = removal(&["a"], &["b", "b1"]);
+
+        assert_eq!(after, AfterRemoval { select: find(&t, t.root(), "b"), view: None });
     }
 
     // ---- view_for_selection ----

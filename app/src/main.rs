@@ -14,9 +14,11 @@ mod cli;
 mod drives;
 mod elevate;
 mod footer;
+mod menu;
 mod model;
 mod motion;
 mod nav;
+mod shell;
 mod tip;
 mod tree_view;
 
@@ -31,12 +33,15 @@ use slint::{
     ComponentHandle, Image, Model, ModelNotify, ModelRc, ModelTracker, Rgba8Pixel, SetRenderingNotifierError,
     SharedPixelBuffer, SharedString, Timer, TimerMode, VecModel, Weak,
 };
+use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
-use tree_view::{Row, SortKey, ViewState};
+use tree_view::{AfterRemoval, Row, SortKey, ViewState};
+use treemap::filetype::TypeTotal;
 use treemap::{Chrome, Frame, Rect, Theme};
 
 slint::include_modules!();
@@ -66,6 +71,7 @@ const FOOTER_CHIPS: usize = 8;
 const LAUNCH_FALLBACK: Duration = Duration::from_secs(2);
 
 /// A finished scan plus its derived per-node data. Shared with treemap layout threads.
+#[derive(Clone)]
 struct Data {
     tree: Tree,
     /// Files under each node, from `tree_view::file_counts`.
@@ -75,7 +81,9 @@ struct Data {
 /// The file tree as a Slint model. Rows are cheap ids; text is built only for rows the list
 /// asks for, so a tree with millions of nodes costs nothing for the rows nobody sees.
 struct RowModel {
-    data: Arc<Data>,
+    /// The shown data. Weak, so that a removal changes the data in place (`remove_node`, which
+    /// points it at the data again); a strong one would make `Arc::make_mut` copy every time.
+    data: RefCell<std::sync::Weak<Data>>,
     rows: RefCell<Vec<Row>>,
     notify: ModelNotify,
 }
@@ -96,11 +104,12 @@ impl Model for RowModel {
 
     fn row_data(&self, i: usize) -> Option<TreeRow> {
         let row = *self.rows.borrow().get(i)?;
-        let tree = &self.data.tree;
+        let data = self.data.borrow().upgrade()?;
+        let tree = &data.tree;
         let node = tree.node(row.node);
         let parent_size = node.parent.map_or(node.size, |p| tree.node(p).size);
         let (name, size) = (model::display_name(tree.name(row.node)), format_size(node.size));
-        let (percent, files) = (tree_view::format_percent(node.size, parent_size), self.data.counts[row.node.0 as usize]);
+        let (percent, files) = (tree_view::format_percent(node.size, parent_size), data.counts[row.node.0 as usize]);
         Some(TreeRow {
             spoken: tree_view::row_spoken(&name, &size, &percent, files).into(),
             name: name.as_ref().into(),
@@ -130,8 +139,11 @@ struct Loaded {
     rects: Vec<Rect>,
     /// The folder of the shown picture and its `rects`; `None` before the first one.
     shown_root: Option<NodeId>,
-    /// Footer chips of the whole scan; `None` while the file types are counted.
-    chips: Option<Vec<footer::Chip>>,
+    /// File-type totals of the shown tree: the count less every removal since. `None` while the
+    /// file types are counted.
+    totals: Option<Vec<TypeTotal>>,
+    /// Removals from the tree since it was installed. A count started before a removal is late.
+    edits: u64,
 }
 
 /// UI-thread state. Events from worker threads are applied here via `invoke_from_event_loop`.
@@ -180,6 +192,11 @@ struct Session {
     /// Folder given on the command line. Its scan starts once, after the first frame or after
     /// `LAUNCH_FALLBACK`, whichever comes first (`take_launch_path`).
     launch_path: Option<String>,
+    /// The shown scan was found changed on disk after an action (`menu::Follow`): the top bar
+    /// offers Rescan. Cleared with the scan (`forget_scan`).
+    outdated: bool,
+    /// The checks after a menu action that are still to come. At most one; a new menu or scan drops it.
+    follow: Option<menu::Follow>,
 }
 
 /// A finished layout of folder `root`: its rects in physical pixels, its picture and its labels.
@@ -228,6 +245,8 @@ thread_local! {
         out_from: None,
         fade_next: false,
         launch_path: None,
+        outdated: false,
+        follow: None,
     });
     /// Starts one relayout after the window stops changing the treemap size.
     static RESIZE_TIMER: Timer = Timer::default();
@@ -235,6 +254,8 @@ thread_local! {
     static TIP_TIMER: Timer = Timer::default();
     /// Ends the time of the move of the treemap picture.
     static MOVE_TIMER: Timer = Timer::default();
+    /// Runs the next check after a menu action (`run_follow`).
+    static FOLLOW_TIMER: Timer = Timer::default();
     /// Frames the window has drawn. With `--timing` each move prints how many it took.
     static FRAMES: Cell<u64> = const { Cell::new(0) };
 }
@@ -269,6 +290,7 @@ fn show_state(ui: &MainWindow) {
     let banner = with_options(banner_text(&state, offer), &state, threads, &notices);
     ui.set_banner(append_timing(banner, line.as_deref()).into());
     ui.set_show_elevate(offer);
+    ui.set_outdated(SESSION.with_borrow(|s| rescan_shown(&state, s.outdated)));
     ui.set_scan_title(SESSION.with_borrow(|s| model::scan_title(&s.scan_root)).into());
 }
 
@@ -312,30 +334,54 @@ fn sync_selection(ui: &MainWindow) {
     }
 }
 
+/// A treemap layout to run (`begin_layout`): the data, the folder, the scan and layout ids it is
+/// for, and the map size in logical pixels.
+struct LayoutJob {
+    data: Arc<Data>,
+    root: NodeId,
+    generation: u64,
+    seq: u64,
+    size: (f32, f32),
+}
+
+/// The session part of a new layout: a new `layout_seq` (any layout on its way is late now) and
+/// no layout kept for a zoom in. `None` with no scan shown.
+fn begin_layout(s: &mut Session) -> Option<LayoutJob> {
+    let l = s.loaded.as_ref()?;
+    let (data, root) = (l.data.clone(), l.view_root);
+    s.layout_seq += 1;
+    // A layout kept for a zoom in is older than this one now.
+    s.held = None;
+    // With `--timing`, each layout (and new picture) shows, so a hover that starts one is seen.
+    if s.flags.timing {
+        eprintln!("Layout {}.", s.layout_seq);
+    }
+    Some(LayoutJob { data, root, generation: s.scan.generation(), seq: s.layout_seq, size: s.map_size })
+}
+
+/// `apply_removal` of `n`, and the layout to run when the map shows the change (`begin_layout`).
+fn take_removal(n: NodeId) -> (Removal, Option<LayoutJob>) {
+    let removal = apply_removal(n);
+    let job = if matches!(removal, Removal::Shown(_)) { SESSION.with_borrow_mut(begin_layout) } else { None };
+    (removal, job)
+}
+
 /// Lays out and draws the treemap for the current folder and window size on a worker thread.
 /// The window keeps the old image until the new one arrives. A result is dropped if a newer
 /// layout or a new scan started meanwhile.
+fn relayout(ui: &MainWindow) {
+    if let Some(job) = SESSION.with_borrow_mut(begin_layout) {
+        spawn_layout(ui, job);
+    }
+}
+
+/// Runs `job` (`begin_layout`) on a worker thread and lands it when it is still the latest.
 /// ponytail: one thread per request and no early stop; fine while a layout takes well under
 /// a second and resizes are debounced. Upgrade path: a cancel flag per request.
-fn relayout(ui: &MainWindow) {
+fn spawn_layout(ui: &MainWindow, LayoutJob { data, root, generation, seq, size: (lw, lh) }: LayoutJob) {
     let scale = ui.window().scale_factor();
     let theme = if ui.get_dark() { Theme::Dark } else { Theme::Light };
-    let Some((data, root, generation, seq, w, h)) = SESSION.with_borrow_mut(|s| {
-        let l = s.loaded.as_ref()?;
-        let (lw, lh) = s.map_size;
-        let (w, h) = ((lw * scale).round() as u32, (lh * scale).round() as u32);
-        let (data, root) = (l.data.clone(), l.view_root);
-        s.layout_seq += 1;
-        // A layout kept for a zoom in is older than this one now.
-        s.held = None;
-        // With `--timing`, each layout (and new picture) shows, so a hover that starts one is seen.
-        if s.flags.timing {
-            eprintln!("Layout {}.", s.layout_seq);
-        }
-        Some((data, root, s.scan.generation(), s.layout_seq, w, h))
-    }) else {
-        return;
-    };
+    let (w, h) = ((lw * scale).round() as u32, (lh * scale).round() as u32);
     let weak = ui.as_weak();
     std::thread::spawn(move || {
         let chrome = Chrome::scaled(f64::from(scale));
@@ -451,8 +497,8 @@ fn glow_drawn(notifier: Result<(), SetRenderingNotifierError>) -> bool {
 fn node_at(ui: &MainWindow, x: f32, y: f32) -> Option<NodeId> {
     let (x, y) = to_physical(ui, x, y);
     let moving = SESSION.with_borrow(|s| s.moving);
-    let (x, y) = picture_point(moving, f64::from(ui.get_zoom_t()), map_px(ui), x, y)?;
-    with_loaded(|l| tree_view::hit_test(&l.rects, x, y)).flatten()
+    let (t, view) = (f64::from(ui.get_zoom_t()), map_px(ui));
+    with_loaded(|l| hit_at(&l.rects, moving, t, view, x, y)).flatten()
 }
 
 /// The point of the shown picture, in its own rects' physical pixels, under the view point (x, y)
@@ -502,6 +548,8 @@ fn forget_scan(show: impl FnOnce(Option<NodeId>) -> bool) -> tip::TipAction {
         s.held = None;
         s.out_from = None;
         s.fade_next = false;
+        s.outdated = false;
+        s.follow = None;
     });
     left_map(show)
 }
@@ -818,11 +866,245 @@ fn select(ui: &MainWindow, node: NodeId) {
     });
 }
 
+/// Where a menu was asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Source {
+    /// A right-click on the treemap; the tile under the pointer is passed separately (`hit_at`).
+    Map,
+    /// A right-click on tree row `i`.
+    Row(i32),
+    /// A right-click on the crumb that opens node `i` (-1: the gap crumb, which opens nothing).
+    Crumb(i32),
+    /// The Menu key or Shift+F10: the selected node.
+    Key,
+}
+
+/// The node a menu is for and whether to select it first. `hit` is the treemap tile under the
+/// pointer (`Source::Map`). `None` for no item or an item that left the tree. A right-click on a
+/// tile or a row selects it, as a left-click does; on a crumb it does not (selecting an ancestor
+/// would move the map), and a key acts on the selection that already exists.
+fn target_of(l: &Loaded, src: Source, hit: Option<NodeId>) -> Option<(NodeId, bool)> {
+    let (node, select) = match src {
+        Source::Map => (hit?, true),
+        Source::Row(i) => (l.model.rows.borrow().get(usize::try_from(i).ok()?)?.node, true),
+        Source::Crumb(i) => {
+            let i = u32::try_from(i).ok().filter(|&i| (i as usize) < l.data.counts.len())?;
+            (NodeId(i), false)
+        }
+        Source::Key => (l.selected?, false),
+    };
+    // A tile or a crumb can outlive a removal: a node that left the tree gets no menu.
+    l.data.tree.is_attached(node).then_some((node, select))
+}
+
+/// What a menu is for, after the gate and the disk check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Request {
+    node: NodeId,
+    /// Select the node before the menu shows (`target_of`).
+    select: bool,
+    is_dir: bool,
+    /// `Loaded::edits` at the menu.
+    edits: u64,
+    prepared: menu::Prepared,
+}
+
+/// The menu asked for at `src` (`hit`: the tile under the pointer), or `None` when no menu opens:
+/// no finished scan (`menu::allowed`) or no item (`target_of`). The disk check (`menu::prepare`
+/// with `disk`) runs here only, for every way a menu opens. A menu drops the checks still to come
+/// of the menu before it.
+fn menu_request(src: Source, hit: Option<NodeId>, disk: impl Fn(&std::path::Path) -> menu::Disk) -> Option<Request> {
+    SESSION.with_borrow_mut(|s| {
+        let l = s.loaded.as_ref().filter(|_| menu::allowed(s.scan.state(), true))?;
+        let (node, select) = target_of(l, src, hit)?;
+        let tree = &l.data.tree;
+        let request = Request { node, select, is_dir: tree.node(node).is_dir, edits: l.edits, prepared: menu::prepare(tree, node, disk) };
+        s.follow = None;
+        Some(request)
+    })
+}
+
+/// Opens the context menu asked for at `src` (`hit`: the tile under the pointer) at `at` in the
+/// window, when `menu_request` gives one. A tile or a row is selected first;
+/// the hover and the tooltip hide. No session borrow is held while the menu shows (it runs its
+/// own message loop).
+fn open_menu(ui: &MainWindow, src: Source, hit: Option<NodeId>, at: menu::At) {
+    let Some(window) = shell::window_hwnd(ui.window()) else { return };
+    let Some(request) = menu_request(src, hit, menu::read_disk) else { return };
+    if request.select {
+        select(ui, request.node);
+    }
+    drop_hover(ui);
+    let owner = shell::menu_owner(window);
+    let path = match &request.prepared {
+        menu::Prepared::Ready { path, .. } => Some(path.as_path()),
+        menu::Prepared::Changed => None,
+    };
+    use windows::Win32::UI::Input::KeyboardAndMouse::{VK_APPS, VK_SHIFT};
+    let flags = menu::query_flags(menu::extended(at, shell::key_down(VK_SHIFT), shell::key_down(VK_APPS)));
+    let popup = match shell::Popup::new(owner, path, flags, |shell_ok| menu::items(&request.prepared, request.is_dir, shell_ok)) {
+        Ok(popup) => popup,
+        Err(e) => return eprintln!("The menu cannot open: {e}"),
+    };
+    let anchor = menu::anchor(at, ui.window().scale_factor(), shell::client_origin(window));
+    let id = popup.track(owner, window, anchor);
+    match (menu::picked(id), request.prepared) {
+        (menu::Picked::Volatus(menu::Cmd::Rescan), _) => rescan(ui),
+        (menu::Picked::Volatus(menu::Cmd::ShowFolder), _) => open_node(ui, request.node),
+        (menu::Picked::Volatus(cmd), menu::Prepared::Ready { path, .. }) => {
+            let act = |cmd, p: &std::path::Path| match cmd {
+                // On a worker (another file manager can block it); its note comes through the event loop.
+                menu::Cmd::ExploreFolder => {
+                    let weak = ui.as_weak();
+                    shell::explore_on_worker(p.to_path_buf(), request.is_dir, move |result| {
+                        if let Some(note) = action_note(cmd, result.inspect_err(|e| eprintln!("{e}")).is_err()) {
+                            let _ = weak.upgrade_in_event_loop(move |ui| ui.set_elevate_note(note.into()));
+                        }
+                    });
+                    Ok(())
+                }
+                _ => shell::act(cmd, p, request.is_dir).inspect_err(|e| eprintln!("{e}")),
+            };
+            if let Some(note) = run_action(cmd, &path, request.is_dir, act) {
+                ui.set_elevate_note(note.into());
+            }
+        }
+        (menu::Picked::Shell(offset), menu::Prepared::Ready { path, before }) => {
+            let verb = popup.verb(offset);
+            let follow = menu::Follow::new(request.node, request.edits, path, menu::is_delete(verb.as_deref()), before);
+            use windows::Win32::UI::Input::KeyboardAndMouse::{VK_CONTROL, VK_SHIFT};
+            // The keys held now: Shift+Delete deletes for good, as in Explorer.
+            let mask = menu::invoke_mask(shell::key_down(VK_SHIFT), shell::key_down(VK_CONTROL));
+            let point = match anchor {
+                menu::Anchor::Point(x, y) | menu::Anchor::Below { left: x, bottom: y, .. } => (x, y),
+            };
+            if let Some(follow) = menu::after_pick(follow, menu::read_disk, || popup.invoke(offset, window, point, mask)) {
+                SESSION.with_borrow_mut(|s| s.follow = Some(follow));
+                run_follow(ui);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The tile of the treemap (`rects`, physical pixels) under the view point (x, y) while `moving`
+/// is at time `t`: what a left-click hits (`picture_point`).
+fn hit_at(rects: &[Rect], moving: Option<Move>, t: f64, view: (f64, f64), x: f64, y: f64) -> Option<NodeId> {
+    let (x, y) = picture_point(moving, t, view, x, y)?;
+    tree_view::hit_test(rects, x, y)
+}
+
+/// Runs a Volatus menu item through `act` and gives the note to show when it fails. `act` gets the
+/// command and the path to use (a command prompt gets `menu::terminal_folder`). Show this folder
+/// and Rescan are not actions of the shell: no call, no note. An `act` that runs on a worker (Explore
+/// Folder) gives `Ok` at once and shows its note itself (`action_note`).
+fn run_action(
+    cmd: menu::Cmd,
+    path: &std::path::Path,
+    is_dir: bool,
+    act: impl FnOnce(menu::Cmd, &std::path::Path) -> Result<(), String>,
+) -> Option<String> {
+    let used = match cmd {
+        menu::Cmd::ExploreFolder | menu::Cmd::CopyPath => Cow::Borrowed(path),
+        menu::Cmd::CommandPrompt => Cow::Owned(menu::terminal_folder(path, is_dir)),
+        menu::Cmd::ShowFolder | menu::Cmd::Rescan => return None,
+    };
+    action_note(cmd, act(cmd, &used).is_err()).map(str::to_string)
+}
+
+/// The note to show after the Volatus menu item `cmd` ran: its own note when it `failed`, else
+/// none. Show this folder and Rescan have none.
+fn action_note(cmd: menu::Cmd, failed: bool) -> Option<&'static str> {
+    let note = match cmd {
+        menu::Cmd::ExploreFolder => "Volatus cannot open the folder.",
+        menu::Cmd::CommandPrompt => "Volatus cannot open a command prompt.",
+        menu::Cmd::CopyPath => "Volatus cannot copy the path.",
+        menu::Cmd::ShowFolder | menu::Cmd::Rescan => return None,
+    };
+    failed.then_some(note)
+}
+
+/// True when the top bar offers Rescan: a finished scan found changed on disk.
+fn rescan_shown(state: &ScanState, outdated: bool) -> bool {
+    outdated && matches!(state, ScanState::Done(_))
+}
+
+/// The folder a Rescan scans, as typed (`relaunch_path`): the shown scan's root. `None` unless a
+/// scan is finished. The options stay in the session, so the scan runs with the same ones.
+fn rescan_target() -> Option<String> {
+    SESSION.with_borrow(|s| matches!(s.scan.state(), ScanState::Done(_)).then(|| relaunch_path(false, &s.scan_root)))
+}
+
+/// What `check_follow` found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FollowStep {
+    /// The item was deleted: remove this node from the map (`removed`).
+    Remove(NodeId),
+    /// The scan is outdated now (`Session::outdated`): the top bar offers Rescan.
+    Outdated,
+    /// Check again after this time.
+    Again(Duration),
+    /// No check is left.
+    Done,
+}
+
+/// One check of the pending checks after a menu action (`Session::follow`), with the disk read by
+/// `disk`. A decision, or the last check, ends them; so does a scan that was replaced or changed
+/// since the menu (its node id would be stale).
+fn check_follow(disk: impl Fn(&std::path::Path) -> menu::Disk) -> FollowStep {
+    SESSION.with_borrow_mut(|s| {
+        let Some(mut follow) = s.follow.take() else { return FollowStep::Done };
+        if s.loaded.as_ref().map(|l| l.edits) != Some(follow.edits) {
+            return FollowStep::Done;
+        }
+        match follow.step(&disk(&follow.path)) {
+            (menu::Outcome::Remove, _) => FollowStep::Remove(follow.node),
+            (menu::Outcome::Outdated, _) => {
+                s.outdated = true;
+                FollowStep::Outdated
+            }
+            (menu::Outcome::Wait, Some(delay)) => {
+                s.follow = Some(follow);
+                FollowStep::Again(delay)
+            }
+            _ => FollowStep::Done,
+        }
+    })
+}
+
+/// Runs the checks after a menu action (`check_follow`) until one decides: the deleted node leaves
+/// the map, or the top bar says the scan is outdated. The next check runs on `FOLLOW_TIMER`.
+fn run_follow(ui: &MainWindow) {
+    match check_follow(menu::read_disk) {
+        FollowStep::Remove(n) => removed(ui, n),
+        FollowStep::Outdated => show_state(ui),
+        FollowStep::Again(delay) => {
+            let weak = ui.as_weak();
+            FOLLOW_TIMER.with(|t| {
+                t.start(TimerMode::SingleShot, delay, move || {
+                    if let Some(ui) = weak.upgrade() {
+                        run_follow(&ui);
+                    }
+                })
+            });
+        }
+        FollowStep::Done => {}
+    }
+}
+
+/// Rescan: scans the shown scan's root again, with the same options (`rescan_target`). The new
+/// scan drops the outdated mark and the pending checks (`forget_scan`).
+fn rescan(ui: &MainWindow) {
+    if let Some(path) = rescan_target() {
+        start_scan(ui, &path);
+    }
+}
+
 /// Replaces the shown scan with a new one.
 fn install(ui: &MainWindow, data: Arc<Data>) {
     let root = data.tree.root();
     let model =
-        Rc::new(RowModel { data: data.clone(), rows: RefCell::new(Vec::new()), notify: ModelNotify::default() });
+        Rc::new(RowModel { data: RefCell::new(Arc::downgrade(&data)), rows: RefCell::new(Vec::new()), notify: ModelNotify::default() });
     ui.set_rows(ModelRc::from(model.clone()));
     SESSION.with_borrow_mut(|s| {
         s.loaded = Some(Loaded {
@@ -833,7 +1115,8 @@ fn install(ui: &MainWindow, data: Arc<Data>) {
             view_root: root,
             rects: Vec::new(),
             shown_root: None,
-            chips: None,
+            totals: None,
+            edits: 0,
         });
         s.fade_next = true;
     });
@@ -842,42 +1125,196 @@ fn install(ui: &MainWindow, data: Arc<Data>) {
     count_types(ui, data);
 }
 
+/// Removes `n` from the shown scan, as it was deleted on disk: unlinks it from the tree (in place
+/// unless a worker holds the data, `Arc::make_mut`), takes its files off the file count of every
+/// ancestor and its file types off the footer totals, and drops the rects of its subtree. Returns
+/// where the selection and the treemap go; `None`, and nothing changes, for the root or a node
+/// that is already removed.
+fn remove_node(l: &mut Loaded, n: NodeId) -> Option<AfterRemoval> {
+    let tree = &l.data.tree;
+    // Checked first: a call that removes nothing must not copy the data.
+    if n == tree.root() || !tree.is_attached(n) {
+        return None;
+    }
+    // Before the unlink; not needed while the totals are counted (that count is late anyway).
+    let gone = if l.totals.is_some() { treemap::filetype::type_totals(tree, n) } else { Vec::new() };
+    let data = Arc::make_mut(&mut l.data);
+    let r = data.tree.remove(n)?;
+    let files = data.counts[n.0 as usize];
+    let mut up = Some(r.parent);
+    while let Some(p) = up {
+        data.counts[p.0 as usize] = data.counts[p.0 as usize].saturating_sub(files);
+        up = data.tree.node(p).parent;
+    }
+    *l.model.data.borrow_mut() = Arc::downgrade(&l.data);
+    drop_types(l, &gone);
+    let tree = &l.data.tree;
+    if l.shown_root.is_some_and(|s| !tree.is_attached(s)) {
+        // Every rect is under the shown folder, which went.
+        l.rects.clear();
+    } else if let Some(at) = l.rects.iter().position(|rect| rect.node == n) {
+        // The layout lists a folder before its descendants and draws a node only inside its drawn
+        // parent (or the shown folder): the drawn part of `n`'s subtree comes after `n`'s rect and
+        // starts inside it. One pass grows the set of dropped nodes; only rects that start inside
+        // `n`'s rect read the tree (about 100 ns each on 5 M nodes), so a small removal does not
+        // read it for every rect. A node with no rect has no drawn descendant: nothing to drop.
+        let Rect { x, y, w, h, .. } = l.rects[at];
+        // One pixel of slack, so rounding never keeps a rect of the subtree; the parent test decides.
+        let inside = |r: &Rect| r.x > x - 1.0 && r.x < x + w + 1.0 && r.y > y - 1.0 && r.y < y + h + 1.0;
+        let (mut dropped, mut index) = (HashSet::new(), 0);
+        l.rects.retain(|rect| {
+            index += 1;
+            let gone = index > at
+                && inside(rect)
+                && (rect.node == n || tree.node(rect.node).parent.is_some_and(|p| dropped.contains(&p)));
+            if gone {
+                dropped.insert(rect.node);
+            }
+            !gone
+        });
+    }
+    Some(tree_view::after_removal(tree, l.view_root, &r))
+}
+
+/// What the window does after a node of the shown scan was deleted on disk (`apply_removal`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Removal {
+    /// The scan root was deleted: the start screen shows, with this note.
+    Start(&'static str),
+    /// The node left the tree: the rows, the picture and the footer show the change.
+    Shown(AfterRemoval),
+    /// Nothing changed: no finished scan shown, or the node was already removed.
+    Nothing,
+}
+
+/// The session part of a deletion of `n` on disk: removes it (`remove_node`), selects its parent,
+/// shows the parent when the shown folder went with it, and drops the picture kept for a zoom and
+/// the folder a zoom out starts from. The scan root goes back to the start screen.
+fn apply_removal(n: NodeId) -> Removal {
+    SESSION.with_borrow_mut(|s| {
+        let Some(l) = s.loaded.as_mut() else { return Removal::Nothing };
+        if n == l.data.tree.root() {
+            return if s.scan.reset() { Removal::Start(ROOT_GONE) } else { Removal::Nothing };
+        }
+        let Some(after) = remove_node(l, n) else { return Removal::Nothing };
+        l.selected = Some(after.select);
+        if let Some(view) = after.view {
+            l.view_root = view;
+        }
+        // Both can show the removed node.
+        (s.held, s.out_from) = (None, None);
+        Removal::Shown(after)
+    })
+}
+
+/// The note on the start screen after the scanned folder itself was deleted.
+const ROOT_GONE: &str = "The scanned folder was deleted.";
+
+/// Node `n` of the shown scan was deleted on disk (`apply_removal`): the tree rows, the treemap,
+/// the selection and the footer show the scan without it, or the start screen shows when it was
+/// the scan root. Nothing is scanned again. With `--timing` it prints the time it took.
+fn removed(ui: &MainWindow, n: NodeId) {
+    let started = Instant::now();
+    let (removal, job) = take_removal(n);
+    match removal {
+        Removal::Start(note) => {
+            clear(ui);
+            show_state(ui);
+            ui.set_elevate_note(note.into());
+        }
+        Removal::Shown(after) => {
+            stop_move(ui);
+            drop_hover(ui);
+            if let Some(job) = job {
+                spawn_layout(ui, job);
+            }
+            select(ui, after.select);
+            sync_types(ui);
+        }
+        Removal::Nothing => return,
+    }
+    if SESSION.with_borrow(|s| s.flags.timing) {
+        eprintln!("Removal: {:.2} ms.", started.elapsed().as_secs_f64() * 1000.0);
+    }
+}
+
 /// Counts the file types of the scan for the footer on its own worker thread, started after the
 /// layout worker of the first treemap, which does not wait for it. Until it ends the footer
 /// says "Counting file types.".
-/// The result is dropped if a newer scan started or the scan was cancelled meanwhile.
+/// The result is dropped if a newer scan started or the scan was cancelled meanwhile, and counted
+/// again for the changed tree if a removal happened meanwhile (`store_totals`).
 fn count_types(ui: &MainWindow, data: Arc<Data>) {
-    let generation = SESSION.with_borrow(|s| s.scan.generation());
+    let (generation, edits) = SESSION.with_borrow(|s| (s.scan.generation(), s.loaded.as_ref().map_or(0, |l| l.edits)));
     sync_types(ui);
     let weak = ui.as_weak();
     std::thread::spawn(move || {
-        let root = data.tree.root();
-        let totals = treemap::filetype::type_totals(&data.tree, root);
-        let chips = footer::chips(&totals, data.tree.node(root).size, FOOTER_CHIPS);
+        let totals = treemap::filetype::type_totals(&data.tree, data.tree.root());
         // Err means the event loop has stopped: nothing left to update.
         let _ = slint::invoke_from_event_loop(move || {
             let Some(ui) = weak.upgrade() else { return };
-            if store_chips(generation, &data, chips) {
-                sync_types(&ui);
+            match store_totals(generation, &data, edits, totals) {
+                Stored::Kept => sync_types(&ui),
+                Stored::Recount => {
+                    if let Some(now) = with_loaded(|l| l.data.clone()) {
+                        count_types(&ui, now);
+                    }
+                }
+                Stored::Late => {}
             }
         });
     });
 }
 
-/// Keeps the footer `chips` counted for `data` of scan `generation`. `false`, and nothing kept, for a
-/// late result: of an older scan, or for data the window no longer shows (`ScanControl::reset`
-/// keeps the generation, so the generation alone does not tell).
-fn store_chips(generation: u64, data: &Arc<Data>, chips: Vec<footer::Chip>) -> bool {
+/// What `store_totals` did with file-type totals that landed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stored {
+    /// Kept: the footer shows them.
+    Kept,
+    /// Dropped: of an older scan, or of data the window no longer shows.
+    Late,
+    /// Dropped: counted before a removal from the shown tree. The count must start again.
+    Recount,
+}
+
+/// Keeps the file-type `totals` counted for `data` of scan `generation` after `edits` removals.
+/// A result of an older scan or for data the window no longer shows is `Late` (`ScanControl::reset`
+/// keeps the generation, so the generation alone does not tell); one counted before a later
+/// removal is `Recount`. Only `Kept` keeps them.
+fn store_totals(generation: u64, data: &Arc<Data>, edits: u64, totals: Vec<TypeTotal>) -> Stored {
     SESSION.with_borrow_mut(|s| {
-        let shown = s.scan.is_current(generation).then_some(s.loaded.as_mut()).flatten();
-        shown.filter(|l| Arc::ptr_eq(&l.data, data)).map(|l| l.chips = Some(chips)).is_some()
+        let Some(l) = s.scan.is_current(generation).then_some(s.loaded.as_mut()).flatten() else {
+            return Stored::Late;
+        };
+        if l.edits != edits {
+            Stored::Recount
+        } else if !Arc::ptr_eq(&l.data, data) {
+            Stored::Late
+        } else {
+            l.totals = Some(totals);
+            Stored::Kept
+        }
     })
+}
+
+/// The file types `gone` (those of a removed subtree) left the shown tree: they come off the
+/// totals. While the totals are counted, nothing comes off: that count is late (`store_totals`).
+fn drop_types(l: &mut Loaded, gone: &[TypeTotal]) {
+    l.edits += 1;
+    if let Some(totals) = l.totals.as_mut() {
+        *totals = footer::subtract(totals, gone);
+    }
+}
+
+/// The footer chips of the shown tree, from its totals; `None` while they are counted.
+fn chips_of(l: &Loaded) -> Option<Vec<footer::Chip>> {
+    let tree = &l.data.tree;
+    l.totals.as_ref().map(|t| footer::chips(t, tree.node(tree.root()).size, FOOTER_CHIPS))
 }
 
 /// Pushes the footer chips into the window, in the tile colours of the current theme.
 fn sync_types(ui: &MainWindow) {
     let theme = if ui.get_dark() { Theme::Dark } else { Theme::Light };
-    let (counting, chips) = with_loaded(|l| match &l.chips {
+    let (counting, chips) = with_loaded(|l| match chips_of(l) {
         None => (true, Vec::new()),
         Some(chips) => (false, chips.iter().map(|c| type_chip(c, theme)).collect()),
     })
@@ -1230,6 +1667,48 @@ fn wire_tree_and_treemap(ui: &MainWindow) {
             }
         }
     });
+    ui.on_treemap_menu({
+        let weak = ui.as_weak();
+        move |x, y, wx, wy| {
+            let Some(ui) = weak.upgrade() else { return };
+            // The tile a left-click there hits, also during a zoom.
+            let hit = node_at(&ui, x, y);
+            open_menu(&ui, Source::Map, hit, menu::At::Pointer(wx, wy));
+        }
+    });
+    ui.on_tree_menu({
+        let weak = ui.as_weak();
+        move |i, x, y| {
+            if let Some(ui) = weak.upgrade() {
+                open_menu(&ui, Source::Row(i), None, menu::At::Pointer(x, y));
+            }
+        }
+    });
+    ui.on_crumb_menu({
+        let weak = ui.as_weak();
+        move |i, x, y| {
+            if let Some(ui) = weak.upgrade() {
+                open_menu(&ui, Source::Crumb(i), None, menu::At::Pointer(x, y));
+            }
+        }
+    });
+    ui.on_crumb_menu_key({
+        let weak = ui.as_weak();
+        move |i, x, y, w, h| {
+            if let Some(ui) = weak.upgrade() {
+                open_menu(&ui, Source::Crumb(i), None, menu::At::Box(x, y, w, h));
+            }
+        }
+    });
+    // The Menu key or Shift+F10 in the tree or the map: the selected item, under its box.
+    ui.on_menu_key({
+        let weak = ui.as_weak();
+        move |x, y, w, h| {
+            if let Some(ui) = weak.upgrade() {
+                open_menu(&ui, Source::Key, None, menu::At::Box(x, y, w, h));
+            }
+        }
+    });
     ui.on_treemap_open({
         let weak = ui.as_weak();
         move |x, y| {
@@ -1417,6 +1896,14 @@ fn main() {
             }
         }
     });
+    ui.on_rescan({
+        let weak = ui.as_weak();
+        move || {
+            if let Some(ui) = weak.upgrade() {
+                rescan(&ui);
+            }
+        }
+    });
     ui.on_new_scan({
         let weak = ui.as_weak();
         move || {
@@ -1500,17 +1987,19 @@ mod tests {
     use super::{
         Data, FILE_LABEL_TWO_LINES, FileLabel, FrameLabel, Hover, LABEL_CAP, ZoomFrame, ZoomMove, frame_at,
         Loaded, RowModel, SESSION, file_labels, frame_labels, glow_drawn, hover_of, map_labels, note_hover, restart_admin,
-        store_chips, Move, picture_point, zoom_frame_at, take_launch_path, forget_scan, gate_hover, left_map,
+        Move, picture_point, zoom_frame_at, take_launch_path, forget_scan, gate_hover, left_map,
         shows_start_at_launch, relaunch_path, LabelKind, LogicalBox, Placed, place_label, stretch,
-        apply_args,
+        apply_args, FOOTER_CHIPS, Stored, chips_of, drop_types, store_totals, remove_node, Removal, apply_removal, begin_layout, take_removal,
+        Source, target_of, hit_at, run_action, action_note, rescan_shown, rescan_target, Request, menu_request, FollowStep, check_follow,
     };
+    use crate::menu::{self, Cmd, Disk};
+    use treemap::filetype::{TypeTotal, type_totals};
     use crate::tip;
     use crate::motion::Kind;
     use std::time::Instant;
     use slint::SetRenderingNotifierError;
     use scan::{NodeId, Tree};
     use treemap::{FILE_LABEL_MIN_HEIGHT, FILE_LABEL_MIN_WIDTH, Theme};
-    use crate::footer::Chip;
     use crate::model::{Event, Summary};
     use crate::tree_view::ViewState;
     use scan::Method;
@@ -1696,7 +2185,7 @@ mod tests {
         let (tree, folder, file) = spoofed();
         let data = Arc::new(Data { counts: crate::tree_view::file_counts(&tree), tree });
         let row = |node| crate::tree_view::Row { node, depth: 0, expanded: false, has_children: false };
-        let model = RowModel { data: data.clone(), rows: RefCell::new(vec![row(folder), row(file)]), notify: ModelNotify::default() };
+        let model = RowModel { data: RefCell::new(Arc::downgrade(&data)), rows: RefCell::new(vec![row(folder), row(file)]), notify: ModelNotify::default() };
 
         let names: Vec<String> = (0..2).map(|i| slint::Model::row_data(&model, i).unwrap().name.to_string()).collect();
 
@@ -2065,12 +2554,22 @@ mod tests {
 
     fn loaded(data: &Arc<Data>) -> Loaded {
         let root = data.tree.root();
-        let model = Rc::new(RowModel { data: data.clone(), rows: RefCell::new(Vec::new()), notify: ModelNotify::default() });
-        Loaded { data: data.clone(), model, view: ViewState::new(root), selected: None, view_root: root, rects: Vec::new(), shown_root: None, chips: None }
+        let model = Rc::new(RowModel { data: RefCell::new(Arc::downgrade(data)), rows: RefCell::new(Vec::new()), notify: ModelNotify::default() });
+        Loaded {
+            data: data.clone(),
+            model,
+            view: ViewState::new(root),
+            selected: None,
+            view_root: root,
+            rects: Vec::new(),
+            shown_root: None,
+            totals: None,
+            edits: 0,
+        }
     }
 
-    fn chips() -> Vec<Chip> {
-        vec![Chip { label: ".txt".into(), percent: "100.0%".into(), share: 1.0, size: "10 B".into(), category: Category::Document }]
+    fn totals() -> Vec<TypeTotal> {
+        vec![TypeTotal { ext: "txt".into(), bytes: 10, files: 1 }]
     }
 
     fn summary() -> Summary {
@@ -2095,32 +2594,28 @@ mod tests {
         })
     }
 
-    fn kept_chips() -> Option<Vec<Chip>> {
-        SESSION.with_borrow(|s| s.loaded.as_ref().and_then(|l| l.chips.clone()))
-    }
-
     #[test]
-    fn store_chips_result_of_the_shown_scan_is_kept() {
+    fn store_totals_result_of_the_shown_scan_is_kept() {
         let d = data();
         let generation = show_finished_scan(&d);
-        assert!(store_chips(generation, &d, chips()));
-        assert_eq!(kept_chips(), Some(chips()));
+        assert_eq!(store_totals(generation, &d, 0, totals()), Stored::Kept);
+        assert_eq!(kept_totals(), Some(totals()));
     }
 
     #[test]
-    fn store_chips_late_result_after_reset_is_dropped() {
+    fn store_totals_late_result_after_reset_is_dropped() {
         let d = data();
         let generation = show_finished_scan(&d);
         SESSION.with_borrow_mut(|s| {
             assert!(s.scan.reset());
             s.loaded = None;
         });
-        assert!(!store_chips(generation, &d, chips()));
-        assert_eq!(kept_chips(), None);
+        assert_eq!(store_totals(generation, &d, 0, totals()), Stored::Late);
+        assert_eq!(kept_totals(), None);
     }
 
     #[test]
-    fn store_chips_late_result_of_a_scan_before_cancel_and_new_scan_is_dropped() {
+    fn store_totals_late_result_of_a_scan_before_cancel_and_new_scan_is_dropped() {
         let old = data();
         let old_generation = show_finished_scan(&old);
         let new = data();
@@ -2133,36 +2628,383 @@ mod tests {
             assert!(s.scan.apply(generation2, Event::Finished(summary())));
             s.loaded = Some(loaded(&new));
         });
-        assert!(!store_chips(old_generation, &old, chips()));
-        assert_eq!(kept_chips(), None);
+        assert_eq!(store_totals(old_generation, &old, 0, totals()), Stored::Late);
+        assert_eq!(kept_totals(), None);
     }
 
     #[test]
-    fn store_chips_late_result_for_other_data_of_the_same_generation_is_dropped() {
+    fn store_totals_late_result_for_other_data_of_the_same_generation_is_dropped() {
         // reset keeps the generation: the scan id alone cannot tell old data from new data.
         let shown = data();
         let late = data();
         let generation = show_finished_scan(&shown);
-        assert!(!store_chips(generation, &late, chips()));
-        assert_eq!(kept_chips(), None);
+        assert_eq!(store_totals(generation, &late, 0, totals()), Stored::Late);
+        assert_eq!(kept_totals(), None);
     }
 
     #[test]
-    fn store_chips_result_of_an_older_scan_for_the_shown_data_is_dropped() {
+    fn store_totals_result_of_an_older_scan_for_the_shown_data_is_dropped() {
         let d = data();
         let generation = show_finished_scan(&d);
-        assert!(!store_chips(generation - 1, &d, chips()));
-        assert_eq!(kept_chips(), None);
+        assert_eq!(store_totals(generation - 1, &d, 0, totals()), Stored::Late);
+        assert_eq!(kept_totals(), None);
     }
 
     #[test]
-    fn store_chips_same_data_after_a_theme_change_is_still_kept() {
-        // A theme change does not replace the data or the scan: the chips (categories) are theme free.
+    fn store_totals_same_data_after_a_theme_change_is_still_kept() {
+        // A theme change does not replace the data or the scan: the totals are theme free.
         let d = data();
         let generation = show_finished_scan(&d);
-        assert!(store_chips(generation, &d, chips()));
-        assert!(store_chips(generation, &d, chips()));
-        assert_eq!(kept_chips(), Some(chips()));
+        assert_eq!(store_totals(generation, &d, 0, totals()), Stored::Kept);
+        assert_eq!(store_totals(generation, &d, 0, totals()), Stored::Kept);
+        assert_eq!(kept_totals(), Some(totals()));
+    }
+
+    // ---- footer totals after a removal ----
+    /// root(0){ docs(1){ a.txt(4)=100, b.pdf(5)=50 }, c.txt(2)=10, d.exe(3)=30 }
+    fn typed() -> Arc<Data> {
+        let e = |id: u64, parent: u64, name: &str, size: u64, is_dir: bool| RawEntry { id, parent, name: name.into(), size, allocated: size, is_dir };
+        let entries = vec![
+            e(0, 0, "root", 0, true),
+            e(1, 0, "docs", 0, true),
+            e(2, 0, "c.txt", 10, false),
+            e(3, 0, "d.exe", 30, false),
+            e(4, 1, "a.txt", 100, false),
+            e(5, 1, "b.pdf", 50, false),
+        ];
+        let tree = rollup(0, entries).unwrap().tree;
+        Arc::new(Data { counts: crate::tree_view::file_counts(&tree), tree })
+    }
+
+    fn kept_totals() -> Option<Vec<TypeTotal>> {
+        SESSION.with_borrow(|s| s.loaded.as_ref().and_then(|l| l.totals.clone()))
+    }
+
+    #[test]
+    fn drop_types_chips_after_a_removal_are_those_of_a_new_count_and_the_footer_is_not_counting() {
+        let d = typed();
+        let (root, docs) = (d.tree.root(), NodeId(1));
+        let mut l = loaded(&d);
+        l.totals = Some(type_totals(&d.tree, root));
+        let gone = type_totals(&d.tree, docs);
+        Arc::make_mut(&mut l.data).tree.remove(docs);
+        let tree = &l.data.tree;
+        let want = crate::footer::chips(&type_totals(tree, root), tree.node(root).size, FOOTER_CHIPS);
+
+        drop_types(&mut l, &gone);
+
+        assert_eq!(chips_of(&l), Some(want));
+    }
+
+    #[test]
+    fn store_totals_counted_before_a_removal_and_landing_after_it_are_dropped_and_counted_again() {
+        let d = typed();
+        let generation = show_finished_scan(&d);
+        let counted = type_totals(&d.tree, d.tree.root());
+        super::with_loaded(|l| drop_types(l, &[]));
+
+        let stored = store_totals(generation, &d, 0, counted);
+
+        assert_eq!((stored, kept_totals()), (Stored::Recount, None));
+    }
+
+    // ---- remove_node ----
+    const DOCS: NodeId = NodeId(1);
+    const C_TXT: NodeId = NodeId(2);
+    const D_EXE: NodeId = NodeId(3);
+    const A_TXT: NodeId = NodeId(4);
+    const B_PDF: NodeId = NodeId(5);
+
+    /// `loaded` of `typed()` with nothing else holding the data.
+    fn loaded_typed() -> Loaded {
+        loaded(&typed())
+    }
+
+    #[test]
+    fn remove_node_reduces_the_file_counts_of_every_ancestor() {
+        let mut l = loaded_typed();
+
+        remove_node(&mut l, A_TXT);
+
+        let counts = &l.data.counts;
+        assert_eq!([counts[DOCS.0 as usize], counts[0]], [1, 3]);
+    }
+
+    #[test]
+    fn remove_node_rows_skip_the_node_and_show_the_reduced_size_and_percent_of_each_ancestor() {
+        let mut l = loaded_typed();
+        l.view.expanded.insert(DOCS);
+
+        remove_node(&mut l, A_TXT);
+        l.model.set_rows(crate::tree_view::flatten(&l.data.tree, &l.data.counts, &l.view));
+
+        let rows: Vec<(String, String, String, String)> = (0..slint::Model::row_count(&*l.model))
+            .map(|i| {
+                let r = slint::Model::row_data(&*l.model, i).unwrap();
+                (r.name.to_string(), r.size.to_string(), r.percent.to_string(), r.files.to_string())
+            })
+            .collect();
+        let row = |name: &str, size: &str, percent: &str, files: &str| (name.to_string(), size.to_string(), percent.to_string(), files.to_string());
+        assert_eq!(
+            rows,
+            vec![
+                row("root", "90 B", "100.0%", "3"),
+                row("docs", "50 B", "55.6%", "1"),
+                row("b.pdf", "50 B", "100.0%", "1"),
+                row("d.exe", "30 B", "33.3%", "1"),
+                row("c.txt", "10 B", "11.1%", "1"),
+            ]
+        );
+    }
+
+    /// Rects of `typed()` on a 100 x 100 map: the root, docs on the left with a.txt over b.pdf,
+    /// d.exe over c.txt on the right.
+    fn typed_rects() -> Vec<Rect> {
+        let r = |node, x, y, w, h| Rect { node, x, y, w, h };
+        vec![
+            r(NodeId(0), 0.0, 0.0, 100.0, 100.0),
+            r(DOCS, 0.0, 0.0, 60.0, 100.0),
+            r(A_TXT, 0.0, 0.0, 60.0, 60.0),
+            r(B_PDF, 0.0, 60.0, 60.0, 40.0),
+            r(D_EXE, 60.0, 0.0, 40.0, 60.0),
+            r(C_TXT, 60.0, 60.0, 40.0, 40.0),
+        ]
+    }
+
+    #[test]
+    fn remove_node_drops_the_rects_of_the_subtree_and_its_old_spot_hits_the_parent_frame() {
+        let mut l = loaded_typed();
+        l.rects = typed_rects();
+
+        remove_node(&mut l, A_TXT);
+
+        let left: Vec<NodeId> = l.rects.iter().map(|r| r.node).collect();
+        assert_eq!(left, [NodeId(0), DOCS, B_PDF, D_EXE, C_TXT]);
+        assert_eq!(crate::tree_view::hit_test(&l.rects, 10.0, 10.0), Some(DOCS));
+    }
+
+    #[test]
+    fn remove_node_with_no_other_holder_keeps_the_node_buffer() {
+        let mut l = loaded_typed();
+        let before = std::ptr::from_ref(l.data.tree.node(NodeId(0)));
+
+        remove_node(&mut l, A_TXT);
+
+        assert_eq!(std::ptr::from_ref(l.data.tree.node(NodeId(0))), before);
+    }
+
+    #[test]
+    fn remove_node_while_a_worker_holds_the_data_copies_it_and_the_holder_tree_is_unchanged() {
+        let mut l = loaded_typed();
+        let held = l.data.clone();
+
+        remove_node(&mut l, A_TXT);
+
+        assert!(!Arc::ptr_eq(&held, &l.data));
+        assert_eq!((held.tree.is_attached(A_TXT), held.tree.node(NodeId(0)).size, held.counts[0]), (true, 190, 4));
+        assert_eq!(l.data.tree.node(NodeId(0)).size, 90);
+    }
+
+    /// Random tree of up to 200 nodes, folders and files with a few extensions; every entry is
+    /// reachable, so node `i` is entry `i`.
+    fn random_data(seed: &mut u64) -> Arc<Data> {
+        let mut next = |n: u64| {
+            *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (*seed >> 33) % n.max(1)
+        };
+        let n = 1 + next(200);
+        let mut dirs = vec![0u64];
+        let mut entries = vec![RawEntry { id: 0, parent: 0, name: "root".into(), size: 0, allocated: 0, is_dir: true }];
+        for id in 1..n {
+            let parent = dirs[next(dirs.len() as u64) as usize];
+            let is_dir = next(3) == 0;
+            let name = if is_dir { format!("d{id}") } else { format!("f{id}{}", ["", ".txt", ".DLL", ".mp4", ".tar.gz"][next(5) as usize]) };
+            let size = if is_dir { 0 } else { [0, next(10), next(1 << 30)][next(3) as usize] };
+            if is_dir {
+                dirs.push(id);
+            }
+            entries.push(RawEntry { id, parent, name, size, allocated: size, is_dir });
+        }
+        let tree = rollup(0, entries).unwrap().tree;
+        Arc::new(Data { counts: crate::tree_view::file_counts(&tree), tree })
+    }
+
+    #[test]
+    fn remove_node_random_removals_keep_counts_totals_and_rects_equal_to_a_new_count() {
+        let mut seed = 0x00C0_FFEE;
+        for t in 0..300 {
+            let mut l = loaded(&random_data(&mut seed));
+            let all = l.data.counts.len() as u64;
+            l.totals = Some(type_totals(&l.data.tree, NodeId(0)));
+            l.rects = (0..all as u32).map(|i| Rect { node: NodeId(i), x: 0.0, y: 0.0, w: 1.0, h: 1.0 }).collect();
+            for k in 0..1 + (seed >> 40) % 10 {
+                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                let n = NodeId(((seed >> 33) % all) as u32);
+                let removable = n != NodeId(0) && l.data.tree.is_attached(n);
+                let case = format!("tree {t}, removal {k} of {n:?}");
+
+                let after = remove_node(&mut l, n);
+
+                let tree = &l.data.tree;
+                assert_eq!(after.is_some(), removable, "{case}");
+                let fresh = crate::tree_view::file_counts(tree);
+                let attached: Vec<u32> = (0..all as u32).filter(|&i| tree.is_attached(NodeId(i))).collect();
+                let counts: Vec<u64> = attached.iter().map(|&i| l.data.counts[i as usize]).collect();
+                assert_eq!(counts, attached.iter().map(|&i| fresh[i as usize]).collect::<Vec<_>>(), "{case}: counts");
+                assert_eq!(l.totals, Some(type_totals(tree, NodeId(0))), "{case}: totals");
+                assert!(l.rects.iter().all(|r| tree.is_attached(r.node)), "{case}: rects");
+                assert_eq!(l.rects.len(), attached.len(), "{case}: rects kept");
+            }
+        }
+    }
+
+    #[test]
+    fn remove_node_of_the_shown_folder_drops_every_rect() {
+        let mut l = loaded_typed();
+        l.rects = treemap::layout_framed(&l.data.tree, DOCS, 100, 100, Chrome::scaled(1.0));
+        (l.view_root, l.shown_root) = (DOCS, Some(DOCS));
+        assert!(!l.rects.is_empty());
+
+        remove_node(&mut l, DOCS);
+
+        assert!(l.rects.is_empty(), "{:?}", l.rects);
+    }
+
+    #[test]
+    fn remove_node_random_removals_on_a_real_layout_keep_exactly_the_attached_rects() {
+        let mut seed: u64 = 0x0BAD_CAFE;
+        let mut roll = |n: u64| {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 33) % n.max(1)
+        };
+        for t in 0..300 {
+            let mut l = loaded(&random_data(&mut (roll(u64::MAX) + 1)));
+            let tree = &l.data.tree;
+            let folders: Vec<NodeId> = (0..l.data.counts.len() as u32).map(NodeId).filter(|&n| tree.node(n).is_dir).collect();
+            let shown = folders[roll(folders.len() as u64) as usize];
+            l.rects = treemap::layout_framed(tree, shown, 640, 480, Chrome::scaled(1.0));
+            (l.view_root, l.shown_root) = (shown, Some(shown));
+            for k in 0..1 + roll(8) {
+                // Mostly drawn nodes, sometimes the shown folder or any node.
+                let n = match roll(4) {
+                    0 => shown,
+                    1 => NodeId(roll(l.data.counts.len() as u64) as u32),
+                    _ => l.rects.get(roll(l.rects.len() as u64) as usize).map_or(shown, |r| r.node),
+                };
+                let before = l.rects.clone();
+
+                remove_node(&mut l, n);
+
+                let want: Vec<Rect> = before.into_iter().filter(|r| l.data.tree.is_attached(r.node)).collect();
+                assert_eq!(l.rects, want, "tree {t}, removal {k} of {n:?}, shown {shown:?}");
+            }
+        }
+    }
+
+    // ---- removed ----
+    #[test]
+    fn remove_node_of_the_root_is_none_and_changes_nothing() {
+        let mut l = loaded_typed();
+        let before = format!("{:?}", l.data.tree);
+
+        let after = remove_node(&mut l, NodeId(0));
+
+        assert_eq!((after, format!("{:?}", l.data.tree), l.edits), (None, before, 0));
+    }
+
+    #[test]
+    fn apply_removal_of_the_root_goes_to_the_start_screen_with_the_root_gone_note() {
+        show_finished_scan(&typed());
+
+        let removal = apply_removal(NodeId(0));
+
+        let start = SESSION.with_borrow(|s| crate::model::shows_start(s.scan.state()));
+        assert_eq!((removal, start), (Removal::Start("The scanned folder was deleted."), true));
+    }
+
+    #[test]
+    fn apply_removal_of_the_view_root_selects_the_parent_and_shows_it() {
+        show_finished_scan(&typed());
+        SESSION.with_borrow_mut(|s| s.loaded.as_mut().unwrap().view_root = DOCS);
+
+        let removal = apply_removal(DOCS);
+
+        let (selected, view) = SESSION.with_borrow(|s| s.loaded.as_ref().map(|l| (l.selected, l.view_root)).unwrap());
+        let root = NodeId(0);
+        assert_eq!(removal, Removal::Shown(crate::tree_view::AfterRemoval { select: root, view: Some(root) }));
+        assert_eq!((selected, view), (Some(root), root));
+    }
+
+    #[test]
+    fn apply_removal_inside_the_view_selects_the_parent_and_keeps_the_view() {
+        show_finished_scan(&typed());
+        SESSION.with_borrow_mut(|s| s.loaded.as_mut().unwrap().selected = Some(A_TXT));
+
+        apply_removal(A_TXT);
+
+        let (selected, view) = SESSION.with_borrow(|s| s.loaded.as_ref().map(|l| (l.selected, l.view_root)).unwrap());
+        assert_eq!((selected, view), (Some(DOCS), NodeId(0)));
+    }
+
+    #[test]
+    fn apply_removal_drops_the_picture_kept_for_a_zoom_and_the_zoom_out_folder() {
+        show_finished_scan(&typed());
+        SESSION.with_borrow_mut(|s| {
+            s.held = Some(super::Layout { root: DOCS, rects: Vec::new(), image: None, labels: (Vec::new(), Vec::new()), size: (0.0, 0.0) });
+            s.out_from = Some(DOCS);
+        });
+
+        apply_removal(DOCS);
+
+        assert_eq!(SESSION.with_borrow(|s| (s.held.is_none(), s.out_from)), (true, None));
+    }
+
+    #[test]
+    fn begin_layout_takes_a_new_layout_seq_and_drops_the_layout_kept_for_a_zoom() {
+        show_finished_scan(&typed());
+        let seq = SESSION.with_borrow_mut(|s| {
+            s.held = Some(super::Layout { root: DOCS, rects: Vec::new(), image: None, labels: (Vec::new(), Vec::new()), size: (0.0, 0.0) });
+            s.layout_seq
+        });
+
+        let job = SESSION.with_borrow_mut(begin_layout);
+
+        let after = SESSION.with_borrow(|s| (s.layout_seq, s.held.is_none()));
+        assert_eq!((job.map(|j| (j.root, j.seq)), after), (Some((NodeId(0), seq + 1)), (seq + 1, true)));
+    }
+
+    #[test]
+    fn take_removal_of_a_shown_node_starts_a_new_layout_of_the_view() {
+        show_finished_scan(&typed());
+        let seq = SESSION.with_borrow(|s| s.layout_seq);
+
+        let (removal, job) = take_removal(DOCS);
+
+        let after = SESSION.with_borrow(|s| s.layout_seq);
+        assert!(matches!(removal, Removal::Shown(_)), "{removal:?}");
+        assert_eq!((job.map(|j| (j.root, j.seq)), after), (Some((NodeId(0), seq + 1)), seq + 1));
+    }
+
+    #[test]
+    fn take_removal_that_shows_no_change_starts_no_layout() {
+        show_finished_scan(&typed());
+        take_removal(DOCS);
+        let seq = SESSION.with_borrow(|s| s.layout_seq);
+
+        let got = [take_removal(A_TXT), take_removal(NodeId(0))].map(|(removal, job)| (removal, job.is_some()));
+
+        let after = SESSION.with_borrow(|s| s.layout_seq);
+        assert_eq!((got, after), ([(Removal::Nothing, false), (Removal::Start("The scanned folder was deleted."), false)], seq));
+    }
+
+    #[test]
+    fn apply_removal_of_a_node_already_removed_changes_nothing() {
+        show_finished_scan(&typed());
+        apply_removal(DOCS);
+
+        let removal = apply_removal(A_TXT);
+
+        assert_eq!((removal, SESSION.with_borrow(|s| s.loaded.as_ref().unwrap().edits)), (Removal::Nothing, 1));
     }
 
     fn run(timing: bool) -> (Result<(), String>, Option<(String, bool)>) {
@@ -2354,5 +3196,404 @@ mod tests {
 
         let left = SESSION.with_borrow(|s| (s.loaded.is_none(), s.held.is_none(), s.out_from, s.fade_next));
         assert_eq!(left, (true, true, None, false));
+    }
+
+    // ---- the context menu: targets ----
+    /// `loaded_typed` with the rows root, docs, c.txt shown (docs collapsed) and a.txt selected.
+    fn loaded_with_rows() -> Loaded {
+        let mut l = loaded_typed();
+        let row = |node, has_children| crate::tree_view::Row { node, depth: 0, expanded: false, has_children };
+        l.model.set_rows(vec![row(NodeId(0), true), row(DOCS, true), row(C_TXT, false)]);
+        l.selected = Some(A_TXT);
+        l
+    }
+
+    #[test]
+    fn target_of_map_tile_is_that_node_and_selects_it() {
+        let l = loaded_with_rows();
+
+        assert_eq!(target_of(&l, Source::Map, Some(C_TXT)), Some((C_TXT, true)));
+    }
+
+    #[test]
+    fn target_of_map_frame_header_is_that_folder_and_selects_it() {
+        let l = loaded_with_rows();
+
+        assert_eq!(target_of(&l, Source::Map, Some(DOCS)), Some((DOCS, true)));
+    }
+
+    #[test]
+    fn target_of_map_with_no_tile_is_none() {
+        assert_eq!(target_of(&loaded_with_rows(), Source::Map, None), None);
+    }
+
+    #[test]
+    fn target_of_row_is_its_node_and_selects_it() {
+        let l = loaded_with_rows();
+
+        assert_eq!(target_of(&l, Source::Row(2), None), Some((C_TXT, true)));
+    }
+
+    #[test]
+    fn target_of_row_that_does_not_exist_is_none() {
+        let l = loaded_with_rows();
+
+        assert_eq!([Source::Row(-1), Source::Row(3), Source::Row(i32::MAX)].map(|src| target_of(&l, src, None)), [None, None, None]);
+    }
+
+    #[test]
+    fn target_of_crumb_is_that_folder_and_does_not_select_it() {
+        let l = loaded_with_rows();
+
+        assert_eq!(target_of(&l, Source::Crumb(DOCS.0 as i32), None), Some((DOCS, false)));
+    }
+
+    #[test]
+    fn target_of_the_gap_crumb_and_a_crumb_past_the_tree_are_none() {
+        let l = loaded_with_rows();
+
+        assert_eq!([Source::Crumb(-1), Source::Crumb(6), Source::Crumb(i32::MAX)].map(|src| target_of(&l, src, None)), [None, None, None]);
+    }
+
+    #[test]
+    fn target_of_crumb_of_a_removed_folder_is_none() {
+        let mut l = loaded_with_rows();
+        remove_node(&mut l, DOCS);
+
+        assert_eq!(target_of(&l, Source::Crumb(DOCS.0 as i32), None), None);
+    }
+
+    #[test]
+    fn target_of_map_tile_removed_since_the_layout_is_none() {
+        let mut l = loaded_with_rows();
+        remove_node(&mut l, A_TXT);
+
+        assert_eq!(target_of(&l, Source::Map, Some(A_TXT)), None);
+    }
+
+    #[test]
+    fn target_of_key_is_the_selected_node_and_does_not_select_it_again() {
+        let l = loaded_with_rows();
+
+        assert_eq!(target_of(&l, Source::Key, None), Some((A_TXT, false)));
+    }
+
+    #[test]
+    fn target_of_key_with_nothing_selected_is_none() {
+        let mut l = loaded_with_rows();
+        l.selected = None;
+
+        assert_eq!(target_of(&l, Source::Key, None), None);
+    }
+
+    #[test]
+    fn target_of_the_same_folder_by_map_row_crumb_and_key_is_the_same_node() {
+        let mut l = loaded_with_rows();
+        l.selected = Some(DOCS);
+
+        let by = [
+            target_of(&l, Source::Map, Some(DOCS)),
+            target_of(&l, Source::Row(1), None),
+            target_of(&l, Source::Crumb(DOCS.0 as i32), None),
+            target_of(&l, Source::Key, None),
+        ];
+
+        assert_eq!(by.map(|t| t.map(|(n, _)| n)), [Some(DOCS); 4]);
+    }
+
+    // ---- the context menu: the request ----
+    /// A finished scan on screen, shown as `loaded_with_rows`.
+    fn show_rows() {
+        SESSION.with_borrow_mut(|s| {
+            let (generation, _) = s.scan.start().unwrap();
+            assert!(s.scan.apply(generation, Event::Finished(summary())));
+            s.loaded = Some(loaded_with_rows());
+        });
+    }
+
+    fn pending() -> menu::Follow {
+        menu::Follow::new(D_EXE, 0, std::path::PathBuf::from("root\\d.exe"), false, Disk::File(30))
+    }
+
+    #[test]
+    fn menu_request_for_a_row_of_a_finished_scan_is_ready_with_the_path_of_its_node() {
+        show_rows();
+
+        let got = menu_request(Source::Row(2), None, |_| Disk::File(10));
+
+        let path = std::path::PathBuf::from("root").join("c.txt");
+        let want = Request { node: C_TXT, select: true, is_dir: false, edits: 0, prepared: menu::Prepared::Ready { path, before: Disk::File(10) } };
+        assert_eq!(got, Some(want));
+    }
+
+    #[test]
+    fn menu_request_without_a_finished_scan_is_none() {
+        SESSION.with_borrow_mut(|s| s.loaded = Some(loaded_with_rows()));
+
+        assert_eq!(menu_request(Source::Row(2), None, |_| Disk::File(10)), None);
+    }
+
+    #[test]
+    fn menu_request_with_a_disk_that_does_not_match_is_changed() {
+        show_rows();
+
+        let got = menu_request(Source::Crumb(DOCS.0 as i32), None, |_| Disk::Gone);
+
+        assert_eq!(got.map(|r| (r.node, r.select, r.is_dir, r.prepared)), Some((DOCS, false, true, menu::Prepared::Changed)));
+    }
+
+    #[test]
+    fn menu_request_carries_the_removals_since_the_scan() {
+        show_rows();
+        super::with_loaded(|l| remove_node(l, B_PDF));
+
+        let got = menu_request(Source::Key, None, |_| Disk::File(100));
+
+        assert_eq!(got.map(|r| (r.node, r.edits)), Some((A_TXT, 1)));
+    }
+
+    #[test]
+    fn menu_request_drops_the_checks_of_the_menu_before() {
+        show_rows();
+        SESSION.with_borrow_mut(|s| s.follow = Some(pending()));
+
+        menu_request(Source::Key, None, |_| Disk::File(100));
+
+        assert!(SESSION.with_borrow(|s| s.follow.is_none()));
+    }
+
+    #[test]
+    fn menu_request_for_no_item_keeps_the_checks_of_the_menu_before() {
+        show_rows();
+        SESSION.with_borrow_mut(|s| s.follow = Some(pending()));
+
+        let got = menu_request(Source::Map, None, |_| Disk::File(100));
+
+        assert_eq!((got, SESSION.with_borrow(|s| s.follow.is_some())), (None, true));
+    }
+
+    #[test]
+    fn hit_at_during_a_zoom_out_is_the_tile_a_left_click_hits() {
+        // (200, 200) is in tile 2 of the full map, but tile 1 fills the view at t = 0.
+        assert_eq!(hit_at(&two_tiles(), Some(zoom_out_of_tile_1()), 0.0, VIEW, 200.0, 200.0), Some(NodeId(1)));
+    }
+
+    #[test]
+    fn hit_at_with_no_zoom_is_the_tile_under_the_point() {
+        assert_eq!(hit_at(&two_tiles(), None, 0.0, VIEW, 200.0, 200.0), Some(NodeId(2)));
+    }
+
+    #[test]
+    fn hit_at_outside_every_tile_is_none() {
+        // Tile 1 is (0, 0, 100, 100); tile 2 starts at x = 100: (50, 300) is in neither.
+        assert_eq!(hit_at(&two_tiles(), None, 0.0, VIEW, 50.0, 300.0), None);
+    }
+
+    // ---- the context menu: outdated, Rescan ----
+    #[test]
+    fn rescan_shown_only_for_a_finished_scan_that_is_outdated() {
+        use crate::model::ScanState;
+        let states = [
+            ScanState::Idle,
+            ScanState::Scanning { files: 1, dirs: 1 },
+            ScanState::Error("x".into()),
+            ScanState::Cancelled,
+            ScanState::Done(summary()),
+        ];
+
+        let outdated = states.each_ref().map(|st| rescan_shown(st, true));
+        let current = rescan_shown(&ScanState::Done(summary()), false);
+
+        assert_eq!((outdated, current), ([false, false, false, false, true], false));
+    }
+
+    #[test]
+    fn forget_scan_clears_outdated_and_the_pending_checks() {
+        SESSION.with_borrow_mut(|s| {
+            s.outdated = true;
+            s.follow = Some(menu::Follow::new(NodeId(1), 0, std::path::PathBuf::from("C:\\x"), true, Disk::Dir));
+        });
+        let (_, show) = shown();
+
+        forget_scan(show);
+
+        assert_eq!(SESSION.with_borrow(|s| (s.outdated, s.follow.is_none())), (false, true));
+    }
+
+    #[test]
+    fn rescan_target_of_a_finished_scan_is_its_root_as_typed_and_keeps_the_options() {
+        show_finished_scan(&data());
+        SESSION.with_borrow_mut(|s| {
+            s.scan_root = std::path::PathBuf::from("D:\\Data");
+            s.flags.timing = true;
+        });
+
+        let target = rescan_target();
+
+        assert_eq!((target.as_deref(), SESSION.with_borrow(|s| s.flags.timing)), (Some("D:\\Data"), true));
+    }
+
+    #[test]
+    fn rescan_target_without_a_finished_scan_is_none() {
+        SESSION.with_borrow_mut(|s| s.scan_root = std::path::PathBuf::from("D:\\Data"));
+
+        assert_eq!(rescan_target(), None);
+    }
+
+    // ---- the context menu: the checks after an action ----
+    /// A finished scan on screen (`loaded_with_rows`) with checks pending for D_EXE (`pending`,
+    /// or the delete of it).
+    fn show_pending(delete: bool) {
+        show_rows();
+        let f = menu::Follow::new(D_EXE, 0, std::path::PathBuf::from("root\\d.exe"), delete, Disk::File(30));
+        SESSION.with_borrow_mut(|s| s.follow = Some(f));
+    }
+
+    fn follow_and_outdated() -> (bool, bool) {
+        SESSION.with_borrow(|s| (s.follow.is_some(), s.outdated))
+    }
+
+    #[test]
+    fn check_follow_with_no_checks_is_done() {
+        show_rows();
+
+        assert_eq!(check_follow(|_| Disk::Gone), FollowStep::Done);
+    }
+
+    #[test]
+    fn check_follow_of_a_delete_whose_item_is_gone_removes_it_and_ends() {
+        show_pending(true);
+
+        let got = check_follow(|_| Disk::Gone);
+
+        assert_eq!((got, follow_and_outdated()), (FollowStep::Remove(D_EXE), (false, false)));
+    }
+
+    #[test]
+    fn check_follow_of_an_item_that_changed_marks_the_scan_outdated_and_ends() {
+        show_pending(false);
+
+        let got = check_follow(|_| Disk::File(31));
+
+        assert_eq!((got, follow_and_outdated()), (FollowStep::Outdated, (false, true)));
+    }
+
+    #[test]
+    fn check_follow_of_an_item_that_did_not_change_checks_again_later() {
+        show_pending(false);
+
+        let got = check_follow(|_| Disk::File(30));
+
+        assert_eq!((got, follow_and_outdated()), (FollowStep::Again(std::time::Duration::from_millis(500)), (true, false)));
+    }
+
+    #[test]
+    fn check_follow_reads_the_disk_at_the_path_of_the_checks() {
+        show_pending(true);
+        let read = RefCell::new(None);
+
+        check_follow(|p| {
+            *read.borrow_mut() = Some(p.to_path_buf());
+            Disk::File(30)
+        });
+
+        assert_eq!(read.into_inner(), Some(std::path::PathBuf::from("root\\d.exe")));
+    }
+
+    #[test]
+    fn check_follow_after_a_removal_since_the_menu_ends_without_a_decision() {
+        show_pending(true);
+        super::with_loaded(|l| remove_node(l, B_PDF));
+
+        let got = check_follow(|_| Disk::Gone);
+
+        assert_eq!((got, follow_and_outdated()), (FollowStep::Done, (false, false)));
+    }
+
+    #[test]
+    fn check_follow_with_no_scan_shown_ends_without_a_decision() {
+        show_pending(true);
+        SESSION.with_borrow_mut(|s| s.loaded = None);
+
+        let got = check_follow(|_| Disk::Gone);
+
+        assert_eq!((got, follow_and_outdated()), (FollowStep::Done, (false, false)));
+    }
+
+    // ---- the context menu: Volatus items ----
+    /// Runs `cmd` on C:\a\f.txt (a file, or a folder) with an action that fails with "boom" or works.
+    /// Gives the note and what the action was called with.
+    fn run_cmd(cmd: Cmd, is_dir: bool, fail: bool) -> (Option<String>, Option<(Cmd, std::path::PathBuf)>) {
+        let called = RefCell::new(None);
+        let note = run_action(cmd, std::path::Path::new("C:\\a\\f.txt"), is_dir, |c, p| {
+            *called.borrow_mut() = Some((c, p.to_path_buf()));
+            if fail { Err("boom".into()) } else { Ok(()) }
+        });
+        (note, called.into_inner())
+    }
+
+    #[test]
+    fn run_action_a_failing_action_gives_its_note() {
+        let notes = [Cmd::ExploreFolder, Cmd::CommandPrompt, Cmd::CopyPath].map(|cmd| run_cmd(cmd, false, true).0);
+
+        assert_eq!(
+            notes,
+            [
+                Some("Volatus cannot open the folder.".to_string()),
+                Some("Volatus cannot open a command prompt.".to_string()),
+                Some("Volatus cannot copy the path.".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn run_action_a_working_action_gives_no_note() {
+        let notes = [Cmd::ExploreFolder, Cmd::CommandPrompt, Cmd::CopyPath].map(|cmd| run_cmd(cmd, false, false).0);
+
+        assert_eq!(notes, [None, None, None]);
+    }
+
+    #[test]
+    fn run_action_explore_and_copy_get_the_raw_path() {
+        let paths = [Cmd::ExploreFolder, Cmd::CopyPath].map(|cmd| run_cmd(cmd, false, false).1);
+
+        let raw = std::path::PathBuf::from("C:\\a\\f.txt");
+        assert_eq!(paths, [Some((Cmd::ExploreFolder, raw.clone())), Some((Cmd::CopyPath, raw))]);
+    }
+
+    #[test]
+    fn run_action_command_prompt_gets_the_folder_of_a_file_and_a_folder_itself() {
+        let paths = [run_cmd(Cmd::CommandPrompt, false, false).1, run_cmd(Cmd::CommandPrompt, true, false).1];
+
+        assert_eq!(
+            paths,
+            [
+                Some((Cmd::CommandPrompt, std::path::PathBuf::from("C:\\a"))),
+                Some((Cmd::CommandPrompt, std::path::PathBuf::from("C:\\a\\f.txt"))),
+            ]
+        );
+    }
+
+    #[test]
+    fn action_note_is_the_note_of_a_failed_action_only() {
+        let cmds = [Cmd::ExploreFolder, Cmd::CommandPrompt, Cmd::CopyPath, Cmd::ShowFolder, Cmd::Rescan];
+
+        let got: Vec<(Option<&str>, Option<&str>)> = cmds.iter().map(|&cmd| (action_note(cmd, true), action_note(cmd, false))).collect();
+
+        let want = vec![
+            (Some("Volatus cannot open the folder."), None),
+            (Some("Volatus cannot open a command prompt."), None),
+            (Some("Volatus cannot copy the path."), None),
+            (None, None),
+            (None, None),
+        ];
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn run_action_show_folder_and_rescan_are_not_the_actions_of_the_shell() {
+        let got = [Cmd::ShowFolder, Cmd::Rescan].map(|cmd| run_cmd(cmd, true, true));
+
+        assert_eq!(got, [(None, None), (None, None)]);
     }
 }
