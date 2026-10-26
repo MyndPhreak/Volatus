@@ -29,6 +29,7 @@ use slint::{
     ComponentHandle, Image, Model, ModelNotify, ModelRc, ModelTracker, Rgba8Pixel, SetRenderingNotifierError,
     SharedPixelBuffer, SharedString, Timer, TimerMode, VecModel, Weak,
 };
+use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -465,8 +466,8 @@ fn glow_drawn(notifier: Result<(), SetRenderingNotifierError>) -> bool {
 fn node_at(ui: &MainWindow, x: f32, y: f32) -> Option<NodeId> {
     let (x, y) = to_physical(ui, x, y);
     let moving = SESSION.with_borrow(|s| s.moving);
-    let (x, y) = picture_point(moving, f64::from(ui.get_zoom_t()), map_px(ui), x, y)?;
-    with_loaded(|l| tree_view::hit_test(&l.rects, x, y)).flatten()
+    let (t, view) = (f64::from(ui.get_zoom_t()), map_px(ui));
+    with_loaded(|l| hit_at(&l.rects, moving, t, view, x, y)).flatten()
 }
 
 /// The point of the shown picture, in its own rects' physical pixels, under the view point (x, y)
@@ -516,6 +517,8 @@ fn forget_scan(show: impl FnOnce(Option<NodeId>) -> bool) -> tip::TipAction {
         s.held = None;
         s.out_from = None;
         s.fade_next = false;
+        s.outdated = false;
+        s.follow = None;
     });
     left_map(show)
 }
@@ -833,6 +836,7 @@ fn select(ui: &MainWindow, node: NodeId) {
 }
 
 /// Where a menu was asked for.
+#[cfg_attr(not(test), expect(dead_code, reason = "the context menu entry (P4) builds it"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Source {
     /// A right-click on the treemap; the tile under the pointer is passed separately (`hit_at`).
@@ -849,41 +853,58 @@ enum Source {
 /// pointer (`Source::Map`). `None` for no item or an item that left the tree. A right-click on a
 /// tile or a row selects it, as a left-click does; on a crumb it does not (selecting an ancestor
 /// would move the map), and a key acts on the selection that already exists.
+#[cfg_attr(not(test), expect(dead_code, reason = "the context menu entry (P4) calls it"))]
 fn target_of(l: &Loaded, src: Source, hit: Option<NodeId>) -> Option<(NodeId, bool)> {
-    let _ = (l, src, hit);
-    todo!("target_of")
+    let (node, select) = match src {
+        Source::Map => (hit?, true),
+        Source::Row(i) => (l.model.rows.borrow().get(usize::try_from(i).ok()?)?.node, true),
+        Source::Crumb(i) => {
+            let i = u32::try_from(i).ok().filter(|&i| (i as usize) < l.data.counts.len())?;
+            (NodeId(i), false)
+        }
+        Source::Key => (l.selected?, false),
+    };
+    // A tile or a crumb can outlive a removal: a node that left the tree gets no menu.
+    l.data.tree.is_attached(node).then_some((node, select))
 }
 
 /// The tile of the treemap (`rects`, physical pixels) under the view point (x, y) while `moving`
 /// is at time `t`: what a left-click hits (`picture_point`).
 fn hit_at(rects: &[Rect], moving: Option<Move>, t: f64, view: (f64, f64), x: f64, y: f64) -> Option<NodeId> {
-    let _ = (rects, moving, t, view, x, y);
-    todo!("hit_at")
+    let (x, y) = picture_point(moving, t, view, x, y)?;
+    tree_view::hit_test(rects, x, y)
 }
 
 /// Runs a Volatus menu item through `act` and gives the note to show when it fails. `act` gets the
 /// command and the path to use (a command prompt gets `menu::terminal_folder`). Show this folder
 /// and Rescan are not actions of the shell: no call, no note.
+#[cfg_attr(not(test), expect(dead_code, reason = "the Volatus menu items (P4) call it"))]
 fn run_action(
     cmd: menu::Cmd,
     path: &std::path::Path,
     is_dir: bool,
     act: impl FnOnce(menu::Cmd, &std::path::Path) -> Result<(), String>,
 ) -> Option<String> {
-    let _ = (cmd, path, is_dir, act);
-    todo!("run_action")
+    let (used, note) = match cmd {
+        menu::Cmd::ExploreFolder => (Cow::Borrowed(path), "Volatus cannot open the folder."),
+        menu::Cmd::CommandPrompt => (Cow::Owned(menu::terminal_folder(path, is_dir)), "Volatus cannot open a command prompt."),
+        menu::Cmd::CopyPath => (Cow::Borrowed(path), "Volatus cannot copy the path."),
+        menu::Cmd::ShowFolder | menu::Cmd::Rescan => return None,
+    };
+    act(cmd, &used).err().map(|_| note.to_string())
 }
 
 /// True when the top bar offers Rescan: a finished scan found changed on disk.
+#[cfg_attr(not(test), expect(dead_code, reason = "the top bar (P4) shows Rescan from it"))]
 fn rescan_shown(state: &ScanState, outdated: bool) -> bool {
-    let _ = (state, outdated);
-    todo!("rescan_shown")
+    outdated && matches!(state, ScanState::Done(_))
 }
 
 /// The folder a Rescan scans, as typed (`relaunch_path`): the shown scan's root. `None` unless a
 /// scan is finished. The options stay in the session, so the scan runs with the same ones.
+#[cfg_attr(not(test), expect(dead_code, reason = "the Rescan button (P4) calls it"))]
 fn rescan_target() -> Option<String> {
-    todo!("rescan_target")
+    SESSION.with_borrow(|s| matches!(s.scan.state(), ScanState::Done(_)).then(|| relaunch_path(false, &s.scan_root)))
 }
 
 /// Replaces the shown scan with a new one.

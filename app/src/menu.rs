@@ -26,14 +26,19 @@ pub enum Disk {
 /// `Disk` of the result of `symlink_metadata`. A name-surrogate link (junction, symlink) is a
 /// `File`, as the scan stores it (never followed, size 0); any error but "not found" is `Unreadable`.
 pub fn disk_of(m: std::io::Result<std::fs::Metadata>) -> Disk {
-    let _ = m;
-    todo!("disk_of")
+    match m {
+        // std: a symlink or a junction (the name-surrogate reparse points the scan never follows).
+        Ok(m) if m.file_type().is_symlink() => Disk::File(m.len()),
+        Ok(m) if m.is_dir() => Disk::Dir,
+        Ok(m) => Disk::File(m.len()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Disk::Gone,
+        Err(_) => Disk::Unreadable,
+    }
 }
 
 /// `Disk` of `p`, read now. Plain `symlink_metadata`: the path is not followed through a link.
 pub fn read_disk(p: &Path) -> Disk {
-    let _ = p;
-    todo!("read_disk")
+    disk_of(std::fs::symlink_metadata(p))
 }
 
 /// The item a menu is for, checked against the disk before the shell sees its path.
@@ -48,14 +53,17 @@ pub enum Prepared {
 /// The path of node `n` and its disk check. `Ready` only when the disk holds a folder for a
 /// folder node, or a file for a file node; anything else, an error included, is `Changed`.
 pub fn prepare(tree: &Tree, n: NodeId, disk: impl Fn(&Path) -> Disk) -> Prepared {
-    let _ = (tree, n, disk);
-    todo!("prepare")
+    let path = tree.path(n);
+    let before = disk(&path);
+    match (&before, tree.node(n).is_dir) {
+        (Disk::Dir, true) | (Disk::File(_), false) => Prepared::Ready { path, before },
+        _ => Prepared::Changed,
+    }
 }
 
 /// True when a menu may open: a finished scan whose data is loaded.
 pub fn allowed(state: &ScanState, loaded: bool) -> bool {
-    let _ = (state, loaded);
-    todo!("allowed")
+    loaded && matches!(state, ScanState::Done(_))
 }
 
 /// A Volatus menu item. The value is the menu id.
@@ -81,8 +89,22 @@ pub enum Item {
 /// The Volatus items for a prepared item. `is_dir`: the node is a folder. `shell_ok`: the shell
 /// menu was built; if not, a disabled line says so.
 pub fn items(p: &Prepared, is_dir: bool, shell_ok: bool) -> Vec<Item> {
-    let _ = (p, is_dir, shell_ok);
-    todo!("items")
+    if matches!(p, Prepared::Changed) {
+        return vec![Item::Disabled("This item changed on disk. Rescan."), Item::Action(Cmd::Rescan, "Rescan")];
+    }
+    let mut out = vec![
+        Item::Action(Cmd::ExploreFolder, "Explore Folder"),
+        Item::Action(Cmd::CommandPrompt, "Command Prompt Here"),
+        Item::Action(Cmd::CopyPath, "Copy Path"),
+    ];
+    if is_dir {
+        out.push(Item::Action(Cmd::ShowFolder, "Show this folder"));
+    }
+    out.push(Item::Separator);
+    if !shell_ok {
+        out.push(Item::Disabled("Windows has no menu for this item."));
+    }
+    out
 }
 
 /// First menu id of the shell's items.
@@ -102,35 +124,45 @@ pub enum Picked {
 
 /// What `id` (the result of `TrackPopupMenuEx`, 0 for no pick) means. Total.
 pub fn picked(id: u32) -> Picked {
-    let _ = id;
-    todo!("picked")
+    match id {
+        1 => Picked::Volatus(Cmd::ExploreFolder),
+        2 => Picked::Volatus(Cmd::CommandPrompt),
+        3 => Picked::Volatus(Cmd::CopyPath),
+        4 => Picked::Volatus(Cmd::ShowFolder),
+        5 => Picked::Volatus(Cmd::Rescan),
+        SHELL_FIRST..=SHELL_LAST => Picked::Shell(id - SHELL_FIRST),
+        _ => Picked::Nothing,
+    }
 }
 
 /// `uFlags` of `QueryContextMenu`: `CMF_NORMAL`, plus `CMF_EXTENDEDVERBS` with Shift. Never
 /// `CMF_CANRENAME`: Volatus does not rename.
 pub fn query_flags(shift: bool) -> u32 {
-    let _ = shift;
-    todo!("query_flags")
+    if shift { CMF_EXTENDEDVERBS } else { CMF_NORMAL }
 }
 
 /// `fMask` of `CMINVOKECOMMANDINFOEX`: Unicode and a point, plus the keys held at invoke.
 pub fn invoke_mask(shift: bool, ctrl: bool) -> u32 {
-    let _ = (shift, ctrl);
-    todo!("invoke_mask")
+    let mut mask = CMIC_MASK_UNICODE | CMIC_MASK_PTINVOKE;
+    if shift {
+        mask |= CMIC_MASK_SHIFT_DOWN;
+    }
+    if ctrl {
+        mask |= CMIC_MASK_CONTROL_DOWN;
+    }
+    mask
 }
 
 /// True only for the canonical verb `delete` of the shell (ASCII case). A verb the shell could not
 /// give (`None`) is not delete: only the disk can then change the map, as "outdated".
 pub fn is_delete(verb: Option<&str>) -> bool {
-    let _ = verb;
-    todo!("is_delete")
+    verb.is_some_and(|v| v.eq_ignore_ascii_case("delete"))
 }
 
 /// True for the result of `InvokeCommand` that means the user cancelled (`COPYENGINE_E_USER_CANCELLED`).
 /// The shell's delete returns after the item is gone, so a cancelled one needs no check.
 pub fn user_cancelled(hr: i32) -> bool {
-    let _ = hr;
-    todo!("user_cancelled")
+    hr == COPYENGINE_E_USER_CANCELLED
 }
 
 /// What the map does after an action, from the disk.
@@ -149,9 +181,30 @@ pub enum Outcome {
 /// The outcome of one check. `delete`: the action was the shell's delete. `before`, `now`: the
 /// disk at the menu and at this check. `last`: no check follows.
 pub fn judge(delete: bool, before: &Disk, now: &Disk, last: bool) -> Outcome {
-    let _ = (delete, before, now, last);
-    todo!("judge")
+    match now {
+        Disk::Unreadable => Outcome::Outdated,
+        Disk::Gone if delete => Outcome::Remove,
+        _ if now == before => if last { Outcome::Nothing } else { Outcome::Wait },
+        _ => Outcome::Outdated,
+    }
 }
+
+/// `CMF_NORMAL` of shobjidl_core.h.
+const CMF_NORMAL: u32 = 0;
+/// `CMF_EXTENDEDVERBS`: the verbs Explorer shows with Shift held.
+const CMF_EXTENDEDVERBS: u32 = 0x100;
+/// `CMIC_MASK_UNICODE` (= `SEE_MASK_UNICODE`): `lpVerbW` is valid. Not defined in `windows` 0.62.2.
+const CMIC_MASK_UNICODE: u32 = 0x4000;
+/// `CMIC_MASK_PTINVOKE`: `ptInvoke` is valid.
+const CMIC_MASK_PTINVOKE: u32 = 0x2000_0000;
+/// `CMIC_MASK_SHIFT_DOWN`.
+const CMIC_MASK_SHIFT_DOWN: u32 = 0x1000_0000;
+/// `CMIC_MASK_CONTROL_DOWN`.
+const CMIC_MASK_CONTROL_DOWN: u32 = 0x4000_0000;
+/// `COPYENGINE_E_USER_CANCELLED`, the result of `InvokeCommand` after "No" or a closed dialog.
+const COPYENGINE_E_USER_CANCELLED: i32 = 0x8027_0000_u32 as i32;
+/// Times between the checks of a `Follow`: the checks run at 0 s, 0.5 s and 2 s.
+const FOLLOW_DELAYS: [Duration; 2] = [Duration::from_millis(500), Duration::from_millis(1500)];
 
 /// The checks after an action: at once, after 0.5 s and after 2 s. UI thread only; the session
 /// holds at most one, and a new menu, a scan or exit drops it.
@@ -171,30 +224,35 @@ pub struct Follow {
 
 impl Follow {
     pub fn new(node: NodeId, edits: u64, path: PathBuf, delete: bool, before: Disk) -> Self {
-        let _ = (node, edits, path, delete, before);
-        todo!("Follow::new")
+        Self { node, edits, path, delete, before, stage: 0 }
     }
 
     /// The next check, with the disk as `now`: its outcome and the time to the check after it.
     /// `None` for the time when the outcome is a decision or no check is left; after that the
     /// follow gives `(Nothing, None)`.
     pub fn step(&mut self, now: &Disk) -> (Outcome, Option<Duration>) {
-        let _ = now;
-        todo!("Follow::step")
+        if usize::from(self.stage) > FOLLOW_DELAYS.len() {
+            return (Outcome::Nothing, None);
+        }
+        let last = usize::from(self.stage) == FOLLOW_DELAYS.len();
+        let outcome = judge(self.delete, &self.before, now, last);
+        let delay = FOLLOW_DELAYS.get(usize::from(self.stage)).copied().filter(|_| outcome == Outcome::Wait);
+        // A decision, or the last check, ends the follow.
+        self.stage = if delay.is_some() { self.stage + 1 } else { FOLLOW_DELAYS.len() as u8 + 1 };
+        (outcome, delay)
     }
 }
 
 /// The folder a command prompt opens in for the item at `path`: a folder itself, a file's folder.
 pub fn terminal_folder(path: &Path, is_dir: bool) -> PathBuf {
-    let _ = (path, is_dir);
-    todo!("terminal_folder")
+    if is_dir { path.to_path_buf() } else { path.parent().unwrap_or(path).to_path_buf() }
 }
 
 /// The screen point, in physical pixels, of the window point `window` in logical pixels, for a
 /// window whose client origin is at `origin` on the screen. Rounds half away from zero.
 pub fn screen_point(window: (f32, f32), scale: f32, origin: (i32, i32)) -> (i32, i32) {
-    let _ = (window, scale, origin);
-    todo!("screen_point")
+    let at = |v: f32, o: i32| (v * scale).round() as i32 + o;
+    (at(window.0, origin.0), at(window.1, origin.1))
 }
 
 #[cfg(test)]
@@ -594,6 +652,13 @@ mod tests {
         let got = [f.step(&Disk::File(5)), f.step(&Disk::File(9))];
 
         assert_eq!(got, [(Outcome::Wait, Some(Duration::from_millis(500))), (Outcome::Outdated, None)]);
+    }
+
+    #[test]
+    fn follow_new_keeps_what_it_was_made_with() {
+        let f = follow(true);
+
+        assert_eq!((f.node, f.edits, f.path, f.delete, f.before), (NodeId(1), 0, PathBuf::from("C:\\x"), true, Disk::File(5)));
     }
 
     // ---- terminal_folder ----
