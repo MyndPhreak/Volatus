@@ -1930,6 +1930,7 @@ fn tree_key(ui: &MainWindow, key: &str) {
         }
         ("space", Some(i)) => toggle_row(ui, i as i32),
         ("enter", Some(_)) => open_selected(ui),
+        ("delete" | "shift-delete", _) => delete_ui::request(ui, key == "shift-delete"),
         _ => {}
     }
 }
@@ -1943,6 +1944,7 @@ fn map_key(ui: &MainWindow, key: &str) {
         "right" => Dir::Right,
         "enter" => return open_selected(ui),
         "backspace" => return go_up(ui),
+        "delete" | "shift-delete" => return delete_ui::request(ui, key == "shift-delete"),
         _ => return,
     };
     if let Some(n) = with_loaded(|l| nav::neighbour_rect(&l.rects, l.selected, dir)).flatten() {

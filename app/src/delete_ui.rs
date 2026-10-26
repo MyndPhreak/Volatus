@@ -1,16 +1,16 @@
-//! The delete dialog, the right-click menu and the Delete keys, wired to `scan_apply`.
+//! The delete dialog and the Delete keys, wired to `scan_apply`.
 //!
 //! The dialog shows `SESSION.delete.state`: `sync` copies `delete_flow::view` of it into the
 //! window. It runs after every delete callback here, after each message of a running delete and
 //! each try of a pending removal (`scan_apply`), and after each scan change (`show_state`,
 //! `clear`).
 //!
-//! Shift for the menu's Delete: Slint gives a menu entry no key state, so `shift_held` asks
-//! Windows when the entry is activated. Both the Shift state of the message being handled
-//! (`GetKeyState`) and the key's state now (`GetAsyncKeyState`) must say "down"; any other answer
-//! is the Recycle Bin. The keys carry their own Shift state (`Keys.event-name` in Slint).
+//! Shift for a menu's Delete: a menu entry has no key state, so `shift_held` asks Windows when
+//! the entry is used. Both the Shift state of the message being handled (`GetKeyState`) and the
+//! key's state now (`GetAsyncKeyState`) must say "down"; any other answer is the Recycle Bin. The
+//! keys carry their own Shift state (`Keys.event-name` in Slint).
 
-use super::{DeleteInfo, DeleteStep, MainWindow, SESSION, node_at, select, start_scan};
+use super::{DeleteInfo, DeleteStep, MainWindow, SESSION, start_scan};
 use crate::delete_flow::{self, DialogState, DialogView, Step, TreeAction};
 use crate::scan_apply::{self, RemoverFor, Spawn};
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
@@ -21,6 +21,7 @@ use std::rc::Rc;
 pub(crate) struct Deps {
     pub(crate) remover_for: Box<RemoverFor>,
     pub(crate) spawn: Box<Spawn>,
+    #[allow(dead_code, reason = "the shell menu's Delete reads it (Task 9 seam)")]
     pub(crate) shift_held: Box<dyn Fn() -> bool>,
 }
 
@@ -32,7 +33,8 @@ impl Deps {
 
 /// Shows the delete dialog of the session in the window.
 pub(crate) fn sync(ui: &MainWindow) {
-    let _ = ui;
+    let view = SESSION.with_borrow(|s| delete_flow::view(&s.delete.state));
+    ui.set_delete(info(&view));
 }
 
 /// The window's form of a dialog view.
@@ -75,7 +77,7 @@ fn lines(lines: &[String]) -> ModelRc<SharedString> {
     ModelRc::new(VecModel::from(lines.iter().map(|l| SharedString::from(l.as_str())).collect::<Vec<_>>()))
 }
 
-/// Delete (`shift` false) or Shift+Delete (`shift` true) on the selection: the key, or the menu.
+/// Delete (`shift` false) or Shift+Delete (`shift` true) on the selection.
 /// Nothing while a scan runs (`open_in` gives no dialog then).
 pub(crate) fn request(ui: &MainWindow, shift: bool) {
     scan_apply::request_delete(ui, shift);
@@ -84,11 +86,10 @@ pub(crate) fn request(ui: &MainWindow, shift: bool) {
 
 /// True only when Windows says Shift is down both for the message being handled and now.
 fn shift_from(queued: i16, now: i16) -> bool {
-    let _ = (queued, now);
-    false
+    queued < 0 && now < 0
 }
 
-/// The Shift key, read when the menu's Delete is activated (see the module text).
+/// The Shift key, read when a menu's Delete is used (see the module text).
 fn shift_held() -> bool {
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, GetKeyState, VK_SHIFT};
     // SAFETY: two reads of the keyboard state, with no pointers.
@@ -115,7 +116,7 @@ fn rescan(ui: &MainWindow) {
     start_scan(ui, &root.to_string_lossy());
 }
 
-/// Connects the dialog, the menus and the treemap's right button to the session.
+/// Connects the dialog to the session.
 pub(crate) fn wire(ui: &MainWindow, deps: Deps) {
     let deps = Rc::new(deps);
     let with_ui = |f: Box<dyn Fn(&MainWindow)>| {
@@ -126,10 +127,6 @@ pub(crate) fn wire(ui: &MainWindow, deps: Deps) {
             }
         }
     };
-    ui.on_menu_delete(with_ui({
-        let deps = deps.clone();
-        Box::new(move |ui| request(ui, (deps.shift_held)()))
-    }));
     ui.on_confirm_delete(with_ui({
         let deps = deps.clone();
         Box::new(move |ui| {
@@ -150,21 +147,12 @@ pub(crate) fn wire(ui: &MainWindow, deps: Deps) {
         sync(ui);
     })));
     ui.on_delete_rescan(with_ui(Box::new(rescan)));
-    ui.on_treemap_context({
-        let weak = ui.as_weak();
-        move |x, y| {
-            let Some(ui) = weak.upgrade() else { return false };
-            let Some(n) = node_at(&ui, x, y) else { return false };
-            select(&ui, n);
-            true
-        }
-    });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Data;
+    use crate::{Data, select};
     use crate::delete::{DeleteMode, DeleteTarget, Outcome, Remover, SkipReason, Skipped};
     use crate::model::{Event, ScanState, Summary};
     use crate::tree_view::file_counts;
@@ -516,21 +504,8 @@ mod tests {
         });
         ui.invoke_tree_key("delete".into());
         ui.invoke_map_key("shift-delete".into());
-        ui.invoke_menu_delete();
         assert_eq!(step(&ui), DeleteStep::Closed);
         assert!(SESSION.with_borrow(|s| s.delete.state == DialogState::Closed));
-    }
-
-    #[test]
-    fn the_menu_delete_reads_shift_when_it_is_used() {
-        let (ui, _dir) = window();
-        SHIFT.set(false);
-        ui.invoke_menu_delete();
-        assert_eq!((step(&ui), ui.get_delete().permanent), (DeleteStep::Confirm, false));
-        ui.invoke_close_delete();
-        SHIFT.set(true);
-        ui.invoke_menu_delete();
-        assert_eq!((step(&ui), ui.get_delete().permanent), (DeleteStep::Confirm, true));
     }
 
     #[test]
@@ -580,20 +555,17 @@ mod tests {
     }
 
     #[test]
-    fn a_right_click_on_a_row_selects_it_first() {
+    fn a_held_enter_does_not_confirm() {
         let (ui, _dir) = window();
-        let b = node("b.bin");
-        let rows: Vec<ElementHandle> = i_slint_backend_testing::ElementQuery::from_root(&ui)
-            .match_descendants()
-            .match_accessible_role(i_slint_backend_testing::AccessibleRole::ListItem)
-            .find_all()
-            .into_iter()
-            .filter(|e| e.accessible_label().is_some_and(|l| l.starts_with("b.bin")))
-            .collect();
-        assert!(!rows.is_empty(), "a b.bin row");
-        rows[0].mock_single_click(slint::platform::PointerEventButton::Right);
-        assert_eq!(SESSION.with_borrow(|s| s.loaded.as_ref().unwrap().selected), Some(b));
-        assert_eq!(step(&ui), DeleteStep::Closed, "the right click opens no dialog");
+        ui.invoke_tree_key("delete".into());
+        let _ = buttons(&ui, "");
+        ui.window().dispatch_event(WindowEvent::KeyPressRepeated { text: Key::Return.into() });
+        ui.window().dispatch_event(WindowEvent::KeyPressRepeated { text: Key::Space.into() });
+        assert_eq!(step(&ui), DeleteStep::Confirm, "a repeat starts nothing");
+        assert!(modes().is_empty());
+        // A new press on the default button still starts it.
+        key(&ui, Key::Return);
+        assert_eq!(step(&ui), DeleteStep::Running);
     }
 
     /// A PNG file of an RGBA picture, with no compression (stored deflate blocks).

@@ -5,6 +5,8 @@ import { Glass, GlassPanel } from "theme.slint";
 export component SettingsButton inherits Rectangle {
     /// The flyout is open.
     in property <bool> open;
+    /// False while the delete dialog shows: the gear takes no focus.
+    in property <bool> enabled: true;
     callback clicked();
 
     /// Puts the keyboard focus on the gear.
@@ -19,6 +21,7 @@ export component SettingsButton inherits Rectangle {
     border-width: focus.has-focus ? 2px : 1px;
     border-color: focus.has-focus ? Palette.accent-background : Glass.border;
     focus := FocusScope {
+        enabled: root.enabled;
         accessible-role: button;
         accessible-label: "Settings";
         accessible-action-default => { root.clicked(); }

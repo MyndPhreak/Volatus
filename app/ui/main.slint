@@ -3,7 +3,7 @@ import { Crumb, CrumbBar, FileLabel, FrameLabel, Hover, Keys, LabelKind, Placed,
 import { Glass, GlassPanel } from "theme.slint";
 import { DriveButton, StartScreen } from "start.slint";
 import { SettingsButton, SettingsFlyout } from "settings.slint";
-import { DeleteInfo, DeleteStep } from "delete.slint";
+import { DeleteDialog, DeleteInfo, DeleteStep } from "delete.slint";
 export { Crumb, FileLabel, FrameLabel, Hover, DriveButton, LabelKind, Placed, ZoomFrame, ZoomMove, DeleteInfo, DeleteStep }
 // The host writes `Palette.color-scheme` to apply the theme setting.
 export { Palette }
@@ -39,12 +39,15 @@ component HeaderCell inherits Rectangle {
     in property <bool> active;
     in property <bool> descending;
     in property <bool> right-aligned: true;
+    /// False while the delete dialog shows: the cell takes no focus.
+    in property <bool> enabled: true;
     callback clicked();
     height: 28px;
     background: touch.has-hover ? Palette.alternate-background : transparent;
     border-width: focus.has-focus ? 2px : 0px;
     border-color: Palette.accent-background;
     focus := FocusScope {
+        enabled: root.enabled;
         accessible-role: button;
         accessible-label: "Sort by \{root.name}";
         accessible-action-default => { root.clicked(); }
@@ -209,6 +212,19 @@ export component MainWindow inherits Window {
     // Delete
     /// The delete dialog, from the host (`delete_ui::sync`).
     in property <DeleteInfo> delete;
+    /// The delete dialog shows: nothing behind it takes the focus or a click.
+    private property <bool> modal: root.delete.step != DeleteStep.closed;
+    /// The delete was asked for from the treemap: the focus goes back there when the dialog closes.
+    private property <bool> delete-from-map;
+    changed modal => {
+        if (self.modal) {
+            root.settings-open = false;
+        } else if (root.delete-from-map) {
+            map.focus-map();
+        } else {
+            tree-focus.focus();
+        }
+    }
 
     /// A drive button was used. The argument is the drive root, such as "C:\".
     callback scan-drive(string);
@@ -235,15 +251,12 @@ export component MainWindow inherits Window {
     callback menu-key(float, float, float, float);
     /// A crumb was used. The argument is the crumb index: the node to open.
     callback crumb-open(int);
-    /// Key press in the file tree: "up", "down", "left", "right", "enter" or "space".
+    /// Key press in the file tree: "up", "down", "left", "right", "enter", "space", "delete" or
+    /// "shift-delete".
     callback tree-key(string);
-    /// Key press in the treemap: "up", "down", "left", "right", "enter" or "backspace".
+    /// Key press in the treemap: "up", "down", "left", "right", "enter", "backspace", "delete" or
+    /// "shift-delete".
     callback map-key(string);
-    /// A right button press on the treemap at a point in logical pixels: selects the node there.
-    /// True when a node is there (the menu then shows).
-    callback treemap-context(float, float) -> bool;
-    /// Delete in a right-click menu. The host reads the Shift key at this moment.
-    callback menu-delete();
     /// The buttons and the link of the delete dialog.
     callback confirm-delete();
     callback switch-delete-mode();
@@ -347,16 +360,18 @@ export component MainWindow inherits Window {
                         spacing: Glass.gap;
                         if root.scanning : Button {
                             text: "Cancel";
+                            enabled: !root.modal;
                             clicked => { root.cancel(); }
                         }
                         if root.show-new-scan : Button {
                             text: "New scan";
                             primary: true;
+                            enabled: !root.modal;
                             clicked => { root.new-scan(); }
                         }
                         if root.show-elevate : Button {
                             text: "Restart as administrator";
-                            enabled: !root.scanning;
+                            enabled: !root.scanning && !root.modal;
                             clicked => { root.restart-admin(); }
                         }
                         if root.outdated : Text {
@@ -367,6 +382,7 @@ export component MainWindow inherits Window {
                         }
                         if root.outdated : Button {
                             text: "Rescan";
+                            enabled: !root.modal;
                             clicked => { root.rescan(); }
                         }
                     }
@@ -442,6 +458,7 @@ export component MainWindow inherits Window {
                                 right-aligned: false;
                                 active: root.sort-key == 0;
                                 descending: root.sort-descending;
+                                enabled: !root.modal;
                                 clicked => { root.tree-sort(0); }
                             }
                             HeaderCell {
@@ -449,6 +466,7 @@ export component MainWindow inherits Window {
                                 text: "Size";
                                 active: root.sort-key == 1;
                                 descending: root.sort-descending;
+                                enabled: !root.modal;
                                 clicked => { root.tree-sort(1); }
                             }
                             HeaderCell {
@@ -457,6 +475,7 @@ export component MainWindow inherits Window {
                                 name: "percent of parent";
                                 active: root.sort-key == 2;
                                 descending: root.sort-descending;
+                                enabled: !root.modal;
                                 clicked => { root.tree-sort(2); }
                             }
                             HeaderCell {
@@ -464,14 +483,16 @@ export component MainWindow inherits Window {
                                 text: "Files";
                                 active: root.sort-key == 3;
                                 descending: root.sort-descending;
+                                enabled: !root.modal;
                                 clicked => { root.tree-sort(3); }
                             }
                         }
                         tree-focus := FocusScope {
                             vertical-stretch: 1;
+                            enabled: !root.modal;
                             accessible-role: tree;
                             accessible-label: "File tree";
-                            accessible-description: "Press the Menu key for the context menu.";
+                            accessible-description: "Press the Menu key for the context menu. Press Delete to delete the selected item.";
                             accessible-value: root.selected-row >= 0 ? root.rows[root.selected-row].name : "";
                             key-pressed(event) => {
                                 if (Keys.menu(event)) {
@@ -479,8 +500,9 @@ export component MainWindow inherits Window {
                                     root.menu-key(list.absolute-position.x / 1px, (list.absolute-position.y + clamp(list.content-y + root.selected-row * 24px, 0px, max(0px, list.height - 24px))) / 1px, list.width / 1px, 24);
                                     return accept;
                                 }
-                                if (Keys.name(event.text) == "") { return reject; }
-                                root.tree-key(Keys.name(event.text));
+                                if (Keys.event-name(event) == "") { return reject; }
+                                root.delete-from-map = false;
+                                root.tree-key(Keys.event-name(event));
                                 return accept;
                             }
                             list := ListView {
@@ -568,6 +590,7 @@ export component MainWindow inherits Window {
                         CrumbBar {
                             height: 28px;
                             crumbs: root.crumbs;
+                            enabled: !root.modal;
                             // The crumbs are rebuilt for the opened folder, so the focus goes to the
                             // map, which shows that folder.
                             open(i) => {
@@ -613,7 +636,11 @@ export component MainWindow inherits Window {
                             double-clicked(x, y) => { root.treemap-open(x, y); }
                             menu(x, y, wx, wy) => { root.treemap-menu(x, y, wx, wy); }
                             menu-key(x, y, w, h) => { root.menu-key(x, y, w, h); }
-                            key(k) => { root.map-key(k); }
+                            key(k) => {
+                                root.delete-from-map = true;
+                                root.map-key(k);
+                            }
+                            interactive: !root.modal;
                             resized(w, h) => { root.treemap-resized(w, h); }
                         }
                     }
@@ -708,7 +735,21 @@ export component MainWindow inherits Window {
             x: root.width - Glass.margin - 36px;
             y: Glass.margin + (52px - self.height) / 2;
             open: root.settings-open;
+            enabled: !root.modal;
             clicked => { root.settings-open = !root.settings-open; }
+        }
+
+        // The delete dialog, over everything.
+        if root.modal : DeleteDialog {
+            width: 100%;
+            height: 100%;
+            info: root.delete;
+            confirm => { root.confirm-delete(); }
+            cancel => { root.close-delete(); }
+            switch-mode => { root.switch-delete-mode(); }
+            stop => { root.stop-delete(); }
+            rescan => { root.delete-rescan(); }
+            restart-admin => { root.restart-admin(); }
         }
     }
 }

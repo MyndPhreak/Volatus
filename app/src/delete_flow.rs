@@ -369,7 +369,7 @@ pub struct DialogView {
 /// The dialog titles and the other fixed texts of `view` (ASD-STE100).
 pub const REFUSED_TITLE: &str = "Volatus cannot delete this item";
 pub const RUNNING_TITLE: &str = "Delete in progress";
-pub const DONE_TITLE: &str = "Result of the delete";
+pub const DONE_TITLE: &str = "Result";
 pub const CLOSE: &str = "Close";
 pub const STOP_NOTE: &str = "Volatus stops after the item in progress.";
 /// The result when the run removed nothing and skipped nothing.
@@ -377,14 +377,75 @@ pub const NOTHING_REMOVED: &str = "Volatus removed nothing.";
 
 /// What the dialog shows for `state`.
 pub fn view(state: &DialogState) -> DialogView {
-    let _ = state;
-    DialogView::default()
+    match state {
+        DialogState::Closed => DialogView::default(),
+        DialogState::Refused { text } => {
+            DialogView { step: Step::Refused, title: REFUSED_TITLE, text: text.clone(), cancel: CLOSE, ..DialogView::default() }
+        }
+        DialogState::Confirm { mode, target } => {
+            let b = buttons(*mode);
+            DialogView {
+                step: Step::Confirm,
+                title: b.action,
+                action: b.action,
+                cancel: b.cancel,
+                action_default: b.action_is_default,
+                switch: switch_text(*mode),
+                ..about(*mode, target)
+            }
+        }
+        DialogState::Running { mode, target, progress, stopping } => DialogView {
+            step: Step::Running,
+            title: RUNNING_TITLE,
+            progress_line: progress_line(*mode, *progress),
+            progress: fraction(&target.target, *progress),
+            indeterminate: *mode == DeleteMode::RecycleBin,
+            can_stop: *mode == DeleteMode::Permanent,
+            stopping: *stopping,
+            stop_note: if *stopping { STOP_NOTE } else { "" },
+            ..about(*mode, target)
+        },
+        DialogState::Done { mode, target, outcome, tree_action } => {
+            let mut result = result_lines(*mode, outcome);
+            if result.is_empty() {
+                result.push(NOTHING_REMOVED.to_string());
+            }
+            result.extend(list_line(*tree_action).map(str::to_string));
+            DialogView {
+                step: Step::Done,
+                title: DONE_TITLE,
+                cancel: CLOSE,
+                result,
+                skips: outcome.skipped.iter().map(skip_line).collect(),
+                rescan: *tree_action == TreeAction::KeepAndOfferRescan,
+                admin: admin_hint(outcome).unwrap_or(""),
+                ..about(*mode, target)
+            }
+        }
+    }
 }
 
-/// How far a permanent delete is, 0 to 1.
+/// The item part of the dialog: name, path, size, counts and what the action does.
+fn about(mode: DeleteMode, t: &TargetInfo) -> DialogView {
+    let c = confirm_text(mode, t);
+    DialogView {
+        permanent: mode == DeleteMode::Permanent,
+        name: c.name,
+        path: c.path,
+        size: c.size,
+        counts: c.counts,
+        effect: c.effect,
+        link_note: c.link_note.unwrap_or(""),
+        ..DialogView::default()
+    }
+}
+
+/// How far a permanent delete is, 0 to 1: the bytes removed of the scan's size, or the items of
+/// the scan's files and folders (the item included) when the size is 0. The scan can be old, so
+/// the value stops at 1.
 fn fraction(t: &DeleteTarget, p: RunProgress) -> f32 {
-    let _ = (t, p);
-    0.0
+    let (done, all) = if t.size > 0 { (p.bytes, t.size) } else { (p.items, t.files + t.dirs + 1) };
+    (done as f64 / all as f64).min(1.0) as f32
 }
 
 /// The checked target for Delete or Shift+Delete on `selected`, with its node; `None` (no dialog)

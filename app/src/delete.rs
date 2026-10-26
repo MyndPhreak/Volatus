@@ -21,7 +21,7 @@ pub enum Refusal {
     DriveRoot,
     Missing,
     KindChanged,
-    #[cfg_attr(not(test), expect(dead_code, reason = "delete_flow::open_for gives no dialog while a scan runs"))]
+    #[cfg_attr(not(test), expect(dead_code, reason = "scan_apply::open_in and delete_flow::open_check give no dialog while a scan runs"))]
     ScanRunning,
     /// The root or the item could not be resolved to a real path, or the environment is unknown.
     Unresolved,
