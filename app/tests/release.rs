@@ -264,8 +264,6 @@ fn the_version_bump_writes_the_app_package_version() {
 
 #[test]
 fn the_release_seed_agrees_with_app_cargo_toml() {
-    let config = config();
-    let package = root_package(&config);
     let manifest = json(".release-please-manifest.json");
     let manifest = manifest.as_object().expect("the manifest is an object");
     assert!(manifest.keys().all(|k| k == "."), "the manifest knows only the root package: {manifest:?}");
