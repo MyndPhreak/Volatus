@@ -370,7 +370,7 @@ pub fn mode_for(shift: bool) -> DeleteMode {
 pub enum SkipReason {
     Locked,
     AccessDenied,
-    #[cfg_attr(not(test), expect(dead_code, reason = "no engine maps a Windows code to it yet"))]
+    /// No engine maps a Windows code to it yet; the result text and the admin hint read it.
     NeedsAdmin,
     TooLong,
     Other(i32),

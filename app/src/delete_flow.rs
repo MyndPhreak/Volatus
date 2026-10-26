@@ -154,7 +154,6 @@ pub fn can_start(scan: &ScanState) -> bool {
 }
 
 /// The confirm text, line by line in the order the dialog shows it.
-#[cfg_attr(not(test), expect(dead_code, reason = "shown by the dialog in Task 7b"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfirmText {
     /// The name; a link is named as a link.
@@ -170,7 +169,6 @@ pub struct ConfirmText {
 }
 
 /// The dialog's buttons for a mode.
-#[cfg_attr(not(test), expect(dead_code, reason = "shown by the dialog in Task 7b"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Buttons {
     pub action: &'static str,
@@ -179,7 +177,6 @@ pub struct Buttons {
     pub action_is_default: bool,
 }
 
-#[cfg_attr(not(test), expect(dead_code, reason = "shown by the dialog in Task 7b"))]
 pub fn confirm_text(mode: DeleteMode, t: &TargetInfo) -> ConfirmText {
     ConfirmText {
         name: if t.is_link { format!("Link: {}", t.name) } else { t.name.clone() },
@@ -204,12 +201,10 @@ fn count(n: u64, one: &str, many: &str) -> String {
 }
 
 /// "12 files and 3 folders, from the scan."
-#[cfg_attr(not(test), expect(dead_code, reason = "shown by the dialog in Task 7b"))]
 pub fn counts_text(files: u64, dirs: u64) -> String {
     format!("{} and {}, from the scan.", count(files, "file", "files"), count(dirs, "folder", "folders"))
 }
 
-#[cfg_attr(not(test), expect(dead_code, reason = "shown by the dialog in Task 7b"))]
 pub fn buttons(mode: DeleteMode) -> Buttons {
     match mode {
         DeleteMode::RecycleBin => Buttons { action: "Move to Recycle Bin", cancel: "Cancel", action_is_default: true },
@@ -218,7 +213,6 @@ pub fn buttons(mode: DeleteMode) -> Buttons {
 }
 
 /// The text of the link that changes to the other mode.
-#[cfg_attr(not(test), expect(dead_code, reason = "shown by the dialog in Task 7b"))]
 pub fn switch_text(mode: DeleteMode) -> &'static str {
     match mode {
         DeleteMode::RecycleBin => "Delete permanently instead",
@@ -227,7 +221,6 @@ pub fn switch_text(mode: DeleteMode) -> &'static str {
 }
 
 /// The line under the progress bar while a delete runs.
-#[cfg_attr(not(test), expect(dead_code, reason = "shown by the dialog in Task 7b"))]
 pub fn progress_line(mode: DeleteMode, p: RunProgress) -> String {
     match mode {
         // One shell operation with no progress of its own.
@@ -237,14 +230,12 @@ pub fn progress_line(mode: DeleteMode, p: RunProgress) -> String {
 }
 
 /// The result text, one short sentence per line (`delete::summary_lines`).
-#[cfg_attr(not(test), expect(dead_code, reason = "shown by the dialog in Task 7b"))]
 pub fn result_lines(mode: DeleteMode, o: &Outcome) -> Vec<String> {
     delete::summary_lines(mode, o)
 }
 
 /// One line of the skip list: the path (no `\\?\`, through `display_name`), then the reason in
 /// plain words. The `recycle` engine's own texts are used where it has one.
-#[cfg_attr(not(test), expect(dead_code, reason = "shown by the dialog in Task 7b"))]
 pub fn skip_line(s: &Skipped) -> String {
     let reason: std::borrow::Cow<'static, str> = match crate::recycle::skip_text(s.reason) {
         Some(text) => text.into(),
@@ -272,7 +263,6 @@ fn shown_path(p: &Path) -> String {
 
 /// The label of the "Restart as administrator" button, when a skip needs more rights
 /// (`NeedsAdmin` or `AccessDenied`).
-#[cfg_attr(not(test), expect(dead_code, reason = "shown by the dialog in Task 7b"))]
 pub fn admin_hint(o: &Outcome) -> Option<&'static str> {
     o.skipped
         .iter()
@@ -312,7 +302,6 @@ pub fn refusal_for(r: Refusal, gone: impl FnOnce() -> bool) -> (String, bool) {
 }
 
 /// What the result says about the list, for a tree action (ASD-STE100).
-#[cfg_attr(not(test), expect(dead_code, reason = "shown by the dialog in Task 7b"))]
 pub fn list_line(action: TreeAction) -> Option<&'static str> {
     match action {
         TreeAction::Detach => Some("The list still shows the item. Volatus removes it when the scan data is free."),
@@ -320,6 +309,82 @@ pub fn list_line(action: TreeAction) -> Option<&'static str> {
         TreeAction::KeepAndOfferRescan => Some("The list did not change. Scan again to see the changes."),
         TreeAction::Nothing => None,
     }
+}
+
+/// Which part of the dialog shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Step {
+    #[default]
+    Closed,
+    Refused,
+    Confirm,
+    Running,
+    Done,
+}
+
+/// Everything the dialog shows for one state, as plain text (`view`). Empty text is not shown.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct DialogView {
+    pub step: Step,
+    pub title: &'static str,
+    /// The permanent delete (Shift), not the Recycle Bin.
+    pub permanent: bool,
+    pub name: String,
+    pub path: String,
+    pub size: String,
+    pub counts: String,
+    /// What the action button does (Confirm).
+    pub effect: &'static str,
+    /// For a link: only the link goes.
+    pub link_note: &'static str,
+    /// Why the item cannot be deleted (Refused).
+    pub text: String,
+    /// The action button (Confirm).
+    pub action: &'static str,
+    /// "Cancel" while the dialog asks; "Close" when it only tells.
+    pub cancel: &'static str,
+    /// Enter starts the action. False for the permanent delete: there, Cancel is the default.
+    pub action_default: bool,
+    /// The link that changes to the other mode (Confirm).
+    pub switch: &'static str,
+    pub progress_line: String,
+    /// 0 to 1 (Running, permanent delete).
+    pub progress: f32,
+    /// The bar moves with no value: the Recycle Bin gives no progress.
+    pub indeterminate: bool,
+    /// Stop shows: only for the permanent delete.
+    pub can_stop: bool,
+    pub stopping: bool,
+    pub stop_note: &'static str,
+    /// The result, one sentence per line, then what happened to the list (Done).
+    pub result: Vec<String>,
+    /// One line per item the run left in place (Done).
+    pub skips: Vec<String>,
+    /// "Scan again" shows.
+    pub rescan: bool,
+    /// The label of the "Restart as administrator" button, or "".
+    pub admin: &'static str,
+}
+
+/// The dialog titles and the other fixed texts of `view` (ASD-STE100).
+pub const REFUSED_TITLE: &str = "Volatus cannot delete this item";
+pub const RUNNING_TITLE: &str = "Delete in progress";
+pub const DONE_TITLE: &str = "Result of the delete";
+pub const CLOSE: &str = "Close";
+pub const STOP_NOTE: &str = "Volatus stops after the item in progress.";
+/// The result when the run removed nothing and skipped nothing.
+pub const NOTHING_REMOVED: &str = "Volatus removed nothing.";
+
+/// What the dialog shows for `state`.
+pub fn view(state: &DialogState) -> DialogView {
+    let _ = state;
+    DialogView::default()
+}
+
+/// How far a permanent delete is, 0 to 1.
+fn fraction(t: &DeleteTarget, p: RunProgress) -> f32 {
+    let _ = (t, p);
+    0.0
 }
 
 /// The checked target for Delete or Shift+Delete on `selected`, with its node; `None` (no dialog)
@@ -1197,5 +1262,123 @@ mod tests {
         let missing = std::env::temp_dir().join(format!("volatus-flow-{}-gone", std::process::id()));
         assert!(target_gone(&missing));
         assert!(!target_gone(&std::env::temp_dir()));
+    }
+
+    // ---- what the dialog shows (view) ----
+
+    #[test]
+    fn view_closed_shows_nothing() {
+        assert_eq!(view(&DialogState::Closed), DialogView::default());
+        assert_eq!(view(&DialogState::Closed).step, Step::Closed);
+    }
+
+    #[test]
+    fn view_refused_shows_the_reason_and_close_only() {
+        let text = delete::refusal_text(Refusal::ProtectedFolder).to_string();
+        let v = view(&DialogState::Refused { text: text.clone() });
+        assert_eq!(v.step, Step::Refused);
+        assert_eq!(v.title, REFUSED_TITLE);
+        assert_eq!(v.text, text);
+        assert_eq!((v.action, v.cancel, v.switch), ("", CLOSE, ""));
+        assert!(!v.can_stop && !v.rescan);
+    }
+
+    #[test]
+    fn view_confirm_recycle_bin_is_the_default_button() {
+        let v = view(&confirm(RecycleBin));
+        assert_eq!(v.step, Step::Confirm);
+        assert_eq!((v.action, v.cancel, v.action_default), ("Move to Recycle Bin", "Cancel", true));
+        assert_eq!(v.switch, "Delete permanently instead");
+        assert!(!v.permanent);
+        assert_eq!((v.name.as_str(), v.path.as_str()), ("big", r"C:\data\big"));
+        assert_eq!(v.size, crate::model::format_size(150, Unit::Dynamic));
+        assert_eq!(v.counts, "2 files and 1 folder, from the scan.");
+        assert!(v.effect.contains("restore it in Windows"), "{}", v.effect);
+        assert_eq!(v.link_note, "");
+    }
+
+    #[test]
+    fn view_confirm_permanent_makes_cancel_the_default() {
+        let v = view(&confirm(Permanent));
+        assert_eq!((v.action, v.cancel, v.action_default), ("Delete permanently", "Cancel", false));
+        assert_eq!(v.switch, "Move to Recycle Bin instead");
+        assert!(v.permanent);
+        assert!(v.effect.contains("no undo"), "{}", v.effect);
+    }
+
+    #[test]
+    fn view_confirm_of_a_link_says_only_the_link_goes() {
+        let v = view(&DialogState::Confirm { mode: RecycleBin, target: info(true) });
+        assert_eq!(v.name, "Link: lnk");
+        assert!(v.link_note.contains("only the link"), "{}", v.link_note);
+    }
+
+    #[test]
+    fn view_running_recycle_bin_has_a_busy_bar_and_no_stop() {
+        let v = view(&running(RecycleBin, false));
+        assert_eq!(v.step, Step::Running);
+        assert_eq!(v.title, RUNNING_TITLE);
+        assert!(v.indeterminate);
+        assert!(!v.can_stop);
+        assert_eq!(v.progress_line, "Volatus moves the item to the Recycle Bin.");
+    }
+
+    #[test]
+    fn view_running_permanent_has_stop_and_a_value() {
+        let p = RunProgress { items: 2, bytes: 75 };
+        let state = DialogState::Running { mode: Permanent, target: info(false), progress: p, stopping: false };
+        let v = view(&state);
+        assert!(v.can_stop && !v.indeterminate && !v.stopping);
+        assert_eq!(v.progress, 0.5);
+        assert_eq!(v.progress_line, progress_line(Permanent, p));
+        assert_eq!(v.stop_note, "");
+        let v = view(&running(Permanent, true));
+        assert!(v.stopping);
+        assert_eq!(v.stop_note, STOP_NOTE);
+    }
+
+    #[test]
+    fn fraction_uses_bytes_then_items_and_stops_at_one() {
+        let mut t = info(false).target;
+        assert_eq!(fraction(&t, RunProgress { items: 0, bytes: 0 }), 0.0);
+        assert_eq!(fraction(&t, RunProgress { items: 9, bytes: 300 }), 1.0);
+        // No size from the scan: the items of 2 files, 1 folder and the item itself.
+        t.size = 0;
+        assert_eq!(fraction(&t, RunProgress { items: 2, bytes: 0 }), 0.5);
+    }
+
+    #[test]
+    fn view_done_recycle_bin_says_the_space_frees_when_the_bin_is_emptied() {
+        let state = DialogState::Done { mode: RecycleBin, target: info(false), outcome: done(), tree_action: TreeAction::Detached };
+        let v = view(&state);
+        assert_eq!(v.step, Step::Done);
+        assert_eq!(v.title, DONE_TITLE);
+        assert_eq!(v.cancel, CLOSE);
+        assert!(v.result.iter().any(|l| l.contains("empty the Recycle Bin")), "{:?}", v.result);
+        assert_eq!(v.result.last().map(String::as_str), list_line(TreeAction::Detached));
+        assert!(v.skips.is_empty() && !v.rescan && v.admin.is_empty());
+    }
+
+    #[test]
+    fn view_done_with_skips_lists_them_and_offers_a_rescan_and_admin() {
+        let outcome = Outcome {
+            removed_items: 1,
+            removed_bytes: 100,
+            skipped: vec![skip(r"\\?\C:\data\big\sub\b.bin", SkipReason::AccessDenied), skip(r"C:\data\big\x", SkipReason::Locked)],
+            stopped: false,
+        };
+        let skips: Vec<String> = outcome.skipped.iter().map(skip_line).collect();
+        let state = DialogState::Done { mode: Permanent, target: info(false), outcome, tree_action: TreeAction::KeepAndOfferRescan };
+        let v = view(&state);
+        assert_eq!(v.skips, skips);
+        assert!(v.rescan);
+        assert_eq!(v.admin, "Restart as administrator");
+        assert_eq!(v.result.last().map(String::as_str), list_line(TreeAction::KeepAndOfferRescan));
+    }
+
+    #[test]
+    fn view_done_that_removed_and_skipped_nothing_says_so() {
+        let state = DialogState::Done { mode: Permanent, target: info(false), outcome: Outcome::default(), tree_action: TreeAction::Nothing };
+        assert_eq!(view(&state).result, vec![NOTHING_REMOVED.to_string()]);
     }
 }

@@ -1,0 +1,43 @@
+import { Button, ListView, Palette, ProgressIndicator } from "std-widgets.slint";
+import { Glass } from "theme.slint";
+
+/// Which part of the delete dialog shows.
+export enum DeleteStep { closed, refused, confirm, running, done }
+
+/// What the delete dialog shows. All text comes from the host (`delete_flow::view`).
+export struct DeleteInfo {
+    step: DeleteStep,
+    title: string,
+    /// The permanent delete (Shift), not the Recycle Bin.
+    permanent: bool,
+    name: string,
+    path: string,
+    size: string,
+    counts: string,
+    /// What the action button does, in plain words.
+    effect: string,
+    /// For a link: only the link goes. Else "".
+    link-note: string,
+    /// Why the item cannot be deleted (refused).
+    text: string,
+    action: string,
+    /// "Cancel" while the dialog asks, "Close" after.
+    cancel: string,
+    /// Enter starts the action. False for the permanent delete: there, Cancel is the default.
+    action-default: bool,
+    /// The link that changes to the other mode.
+    switch-text: string,
+    progress-line: string,
+    /// 0 to 1, when not indeterminate.
+    progress: float,
+    indeterminate: bool,
+    /// Stop shows: the permanent delete runs.
+    can-stop: bool,
+    stopping: bool,
+    stop-note: string,
+    result: [string],
+    skips: [string],
+    rescan: bool,
+    /// The label of the "Restart as administrator" button, or "".
+    admin: string,
+}

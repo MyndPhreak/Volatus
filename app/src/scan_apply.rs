@@ -13,7 +13,8 @@
 //! identity of its data). A dialog, a job or a pending removal of another scan never touches the
 //! shown tree; a new scan closes the dialog (`scan_changed`).
 //!
-//! The dialog text and the state machine are in `delete_flow`; the Slint dialog comes in Task 7b.
+//! The dialog text and the state machine are in `delete_flow`; the Slint dialog, the menu and the
+//! keys are in `delete_ui`, which shows the dialog again (`delete_ui::sync`) after each call here.
 
 use super::{
     Data, Loaded, MainWindow, SESSION, Session, count_types, crumb, drop_hover, refresh_drives, relayout, select,
@@ -302,8 +303,6 @@ fn mark_list(s: &mut Session, p: Pending, removed: bool) {
 /// The dialog for Delete (`shift` false) or Shift+Delete on the selection, with the real file
 /// system and the scan root AS TYPED (the policy resolves it itself). An item gone from the disk
 /// leaves the tree.
-#[cfg_attr(not(test), expect(dead_code, reason = "called by the dialog and the keys in Task 7b"))]
-#[cfg_attr(test, allow(dead_code, reason = "needs a window; its decision is open_in"))]
 pub(crate) fn request_delete(ui: &MainWindow, shift: bool) {
     let check = |root: &Path, target: &Path, is_dir: bool| delete::check_target(root, target, is_dir, &RealFs);
     if SESSION.with_borrow_mut(|s| open_in(s, shift, check, delete_flow::is_link, delete_flow::target_gone)) {
@@ -318,13 +317,11 @@ fn step(s: &mut Session, event: DialogEvent) {
 }
 
 /// The link that changes between the Recycle Bin and the permanent delete.
-#[cfg_attr(not(test), expect(dead_code, reason = "called by the dialog in Task 7b"))]
 pub(crate) fn switch_delete_mode() {
     SESSION.with_borrow_mut(|s| step(s, DialogEvent::SwitchMode));
 }
 
 /// Cancel, Esc or Close. Does nothing while a delete runs.
-#[cfg_attr(not(test), expect(dead_code, reason = "called by the dialog in Task 7b"))]
 pub(crate) fn close_delete() {
     SESSION.with_borrow_mut(|s| {
         step(s, DialogEvent::Close);
@@ -335,7 +332,6 @@ pub(crate) fn close_delete() {
 }
 
 /// Stop: the permanent delete ends after the item in progress. The Recycle Bin has no Stop.
-#[cfg_attr(not(test), expect(dead_code, reason = "called by the dialog in Task 7b"))]
 pub(crate) fn stop_delete() {
     SESSION.with_borrow_mut(|s| {
         step(s, DialogEvent::Stop);
@@ -346,19 +342,35 @@ pub(crate) fn stop_delete() {
 }
 
 /// The engine for a mode. `owner` is the window handle the shell's own windows belong to.
-fn remover_for(mode: DeleteMode, owner: Option<isize>) -> Arc<dyn Remover> {
+pub(crate) fn remover_for(mode: DeleteMode, owner: Option<isize>) -> Arc<dyn Remover> {
     match mode {
         DeleteMode::RecycleBin => Arc::new(Recycle::new(owner)),
         DeleteMode::Permanent => Arc::new(Purge),
     }
 }
 
+/// Where a delete runs: `spawn_delete` (a worker thread) in the app. `Err` when nothing ran.
+pub(crate) type Spawn = dyn Fn(Arc<dyn Remover>, DeleteTarget, u64, Arc<AtomicBool>, Box<dyn Fn(DeleteMsg) + Send>) -> std::io::Result<()>;
+
+/// The engine for a mode and the window handle: `remover_for` in the app.
+pub(crate) type RemoverFor = dyn Fn(DeleteMode, Option<isize>) -> Arc<dyn Remover>;
+
+/// `spawn_delete` as a `Spawn`.
+pub(crate) fn spawn_worker(
+    remover: Arc<dyn Remover>,
+    target: DeleteTarget,
+    generation: u64,
+    stop: Arc<AtomicBool>,
+    post: Box<dyn Fn(DeleteMsg) + Send>,
+) -> std::io::Result<()> {
+    delete_flow::spawn_delete(remover, target, generation, stop, post).map(drop)
+}
+
 /// The action button of the confirm dialog: `begin_confirm` with the real policy, then the delete
-/// on a worker thread, tagged with the scan generation. `owner` is the window handle for the
-/// Recycle Bin's shell windows.
-#[cfg_attr(not(test), expect(dead_code, reason = "called by the dialog in Task 7b"))]
-#[cfg_attr(test, allow(dead_code, reason = "needs a window; its decisions are begin_confirm and handle_msg"))]
-pub(crate) fn confirm_delete(ui: &MainWindow, owner: Option<isize>) {
+/// through `spawn` (a worker thread in the app), tagged with the scan generation. `owner` is the
+/// window handle for the Recycle Bin's shell windows; `remover_for` picks the engine (the tests
+/// give a fake one).
+pub(crate) fn confirm_delete(ui: &MainWindow, owner: Option<isize>, remover_for: &RemoverFor, spawn: &Spawn) {
     let check = |root: &Path, target: &Path, is_dir: bool| delete::check_target(root, target, is_dir, &RealFs);
     let Some(Start { mode, target, generation, stop }) = SESSION.with_borrow_mut(|s| begin_confirm(s, check)) else {
         return;
@@ -373,7 +385,7 @@ pub(crate) fn confirm_delete(ui: &MainWindow, owner: Option<isize>) {
             }
         });
     };
-    if let Err(e) = delete_flow::spawn_delete(remover_for(mode, owner), target.clone(), generation, stop, post) {
+    if let Err(e) = spawn(remover_for(mode, owner), target.clone(), generation, stop, Box::new(post)) {
         // Nothing ran: the result says so and the tree stays.
         eprintln!("Could not start the delete: {e}");
         let outcome = delete_flow::failed_outcome(&target);
@@ -381,16 +393,15 @@ pub(crate) fn confirm_delete(ui: &MainWindow, owner: Option<isize>) {
     }
 }
 
-/// `handle_msg` on the session, then the removal when it says so.
-#[cfg_attr(test, allow(dead_code, reason = "needs a window; its decisions are handle_msg and step_pending"))]
-fn on_delete_msg(ui: &MainWindow, msg: DeleteMsg) {
+/// `handle_msg` on the session, then the removal when it says so, then the dialog shows it.
+pub(crate) fn on_delete_msg(ui: &MainWindow, msg: DeleteMsg) {
     if SESSION.with_borrow_mut(|s| handle_msg(s, msg)) {
         apply_pending(ui);
     }
+    crate::delete_ui::sync(ui);
 }
 
 /// Tries the pending removal now; while a worker holds the data, a timer tries again.
-#[cfg_attr(test, allow(dead_code, reason = "needs a window; its decision is step_pending"))]
 fn apply_pending(ui: &MainWindow) {
     match SESSION.with_borrow_mut(|s| step_pending(s, false)) {
         PendingStep::Applied => refresh_after_remove(ui),
@@ -400,7 +411,6 @@ fn apply_pending(ui: &MainWindow) {
 }
 
 /// One timer try of the pending removal, after `APPLY_RETRY`, then the next while it is busy.
-#[cfg_attr(test, allow(dead_code, reason = "needs a window; its decision is step_pending"))]
 fn retry_later(ui: &MainWindow) {
     let weak = ui.as_weak();
     Timer::single_shot(APPLY_RETRY, move || {
@@ -414,22 +424,26 @@ fn retry_later(ui: &MainWindow) {
             }
             PendingStep::Idle | PendingStep::Dropped => {}
         }
+        // The dialog text says whether the item left the list.
+        crate::delete_ui::sync(&ui);
     });
 }
 
 /// A worker let go of its clone of the scan's data: a pending removal may apply now.
-#[cfg_attr(test, allow(dead_code, reason = "needs a window; its decision is step_pending"))]
 pub(crate) fn data_released(ui: &MainWindow) {
-    if SESSION.with_borrow_mut(|s| step_pending(s, false)) == PendingStep::Applied {
-        refresh_after_remove(ui);
+    match SESSION.with_borrow_mut(|s| step_pending(s, false)) {
+        PendingStep::Applied => {
+            refresh_after_remove(ui);
+            crate::delete_ui::sync(ui);
+        }
+        PendingStep::Dropped => crate::delete_ui::sync(ui),
+        PendingStep::Idle | PendingStep::Busy | PendingStep::GaveUp => {}
     }
 }
 
 /// Redraws everything after `remove_from`: no picture or hover of the old tree stays, a new
-/// layout starts (it bumps `layout_seq`), the crumbs and rows are rebuilt, the selection shows,
-/// the footer totals are counted again from the whole scan and the drive list (free space) is
-/// read again.
-#[cfg_attr(test, allow(dead_code, reason = "needs a window"))]
+/// layout starts, the crumbs and rows are rebuilt, the selection shows, the footer totals are
+/// counted again from the whole scan and the drive list (free space) is read again.
 fn refresh_after_remove(ui: &MainWindow) {
     SESSION.with_borrow_mut(|s| {
         s.held = None;

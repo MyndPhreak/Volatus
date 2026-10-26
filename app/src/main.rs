@@ -13,6 +13,7 @@ mod browse;
 mod cli;
 mod delete;
 mod delete_flow;
+mod delete_ui;
 mod drives;
 mod elevate;
 mod footer;
@@ -600,6 +601,7 @@ fn show_state(ui: &MainWindow) {
     ui.set_show_elevate(offer);
     ui.set_outdated(SESSION.with_borrow(|s| rescan_shown(&state, s.outdated)));
     ui.set_scan_title(SESSION.with_borrow(|s| model::scan_title(&s.scan_root)).into());
+    delete_ui::sync(ui);
 }
 
 fn with_loaded<R>(f: impl FnOnce(&mut Loaded) -> R) -> Option<R> {
@@ -1687,6 +1689,7 @@ fn clear(ui: &MainWindow) {
     do_tip(ui, tip);
     ui.set_has_selection(false);
     ui.set_selected_row(-1);
+    delete_ui::sync(ui);
 }
 
 /// Queues `event` for the UI thread. Dropped if a newer scan has started or the scan was cancelled.
@@ -2275,6 +2278,7 @@ fn main() {
         }
     });
     wire_tree_and_treemap(&ui);
+    delete_ui::wire(&ui, delete_ui::Deps::real());
 
     ui.show().expect("show window");
     let weak = ui.as_weak();

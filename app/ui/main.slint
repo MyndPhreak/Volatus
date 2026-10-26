@@ -3,7 +3,8 @@ import { Crumb, CrumbBar, FileLabel, FrameLabel, Hover, Keys, LabelKind, Placed,
 import { Glass, GlassPanel } from "theme.slint";
 import { DriveButton, StartScreen } from "start.slint";
 import { SettingsButton, SettingsFlyout } from "settings.slint";
-export { Crumb, FileLabel, FrameLabel, Hover, DriveButton, LabelKind, Placed, ZoomFrame, ZoomMove }
+import { DeleteInfo, DeleteStep } from "delete.slint";
+export { Crumb, FileLabel, FrameLabel, Hover, DriveButton, LabelKind, Placed, ZoomFrame, ZoomMove, DeleteInfo, DeleteStep }
 // The host writes `Palette.color-scheme` to apply the theme setting.
 export { Palette }
 
@@ -205,6 +206,10 @@ export component MainWindow inherits Window {
     /// A row of the folder tree has the keyboard focus.
     out property <bool> tree-has-focus: tree-focus.has-focus;
 
+    // Delete
+    /// The delete dialog, from the host (`delete_ui::sync`).
+    in property <DeleteInfo> delete;
+
     /// A drive button was used. The argument is the drive root, such as "C:\".
     callback scan-drive(string);
     callback choose-folder();
@@ -234,6 +239,18 @@ export component MainWindow inherits Window {
     callback tree-key(string);
     /// Key press in the treemap: "up", "down", "left", "right", "enter" or "backspace".
     callback map-key(string);
+    /// A right button press on the treemap at a point in logical pixels: selects the node there.
+    /// True when a node is there (the menu then shows).
+    callback treemap-context(float, float) -> bool;
+    /// Delete in a right-click menu. The host reads the Shift key at this moment.
+    callback menu-delete();
+    /// The buttons and the link of the delete dialog.
+    callback confirm-delete();
+    callback switch-delete-mode();
+    callback stop-delete();
+    /// Cancel, Close or Esc. The host does nothing while a delete runs.
+    callback close-delete();
+    callback delete-rescan();
     callback treemap-resized(float, float);
     /// The pointer moved over the treemap, with no button down, to a point in logical pixels.
     callback treemap-hover(float, float);
