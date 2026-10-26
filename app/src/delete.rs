@@ -2,7 +2,9 @@
 //! The checks come first and fail closed: an unknown target is refused, never deleted.
 
 #![cfg_attr(not(test), expect(dead_code, reason = "wired in the UI task"))]
+#![cfg_attr(test, allow(dead_code, reason = "tests do not use every item; wired in the UI task"))]
 
+use crate::model::{Unit, format_size};
 use scan::NodeId;
 use std::path::{Path, PathBuf};
 
@@ -119,14 +121,36 @@ pub fn check_target_in(
     fs: &dyn Probe,
     env: &Env,
 ) -> Result<(), Refusal> {
-    let _ = (root, target, is_dir, fs, env);
-    Err(Refusal::ProtectedFolder)
+    let (r, t) = (norm(root), norm(target));
+    if !within(&t, &r) {
+        return Err(Refusal::NotUnderRoot);
+    }
+    // A drive root is named before the root check below, so a scan of `C:\` says "drive root".
+    let bare_drive = t.len() == 2 && t.ends_with(':');
+    if bare_drive || scan::is_volume_root(target) {
+        return Err(Refusal::DriveRoot);
+    }
+    if t == r {
+        return Err(Refusal::NotUnderRoot);
+    }
+    // `protected_folders` lists `Windows` first: it guards everything inside; the rest, only itself.
+    let list: Vec<String> = protected_folders(env).iter().map(|p| norm(p)).collect();
+    let hit = list.iter().enumerate().any(|(i, p)| if i == 0 { within(&t, p) } else { t == *p });
+    if hit {
+        return Err(Refusal::ProtectedFolder);
+    }
+    if !fs.exists(target) {
+        return Err(Refusal::Missing);
+    }
+    if fs.is_dir(target) != is_dir {
+        return Err(Refusal::KindChanged);
+    }
+    Ok(())
 }
 
 /// Plain Delete is the Recycle Bin. Only Shift gives the permanent delete.
 pub fn mode_for(shift: bool) -> DeleteMode {
-    let _ = shift;
-    DeleteMode::Permanent
+    if shift { DeleteMode::Permanent } else { DeleteMode::RecycleBin }
 }
 
 /// Why one item was not removed.
@@ -157,13 +181,47 @@ pub struct Outcome {
 
 /// Maps a Win32 error code to a skip reason.
 pub fn reason_from_win32(code: i32) -> SkipReason {
-    SkipReason::Other(code)
+    match code {
+        5 => SkipReason::AccessDenied,
+        32 | 33 => SkipReason::Locked,
+        206 => SkipReason::TooLong,
+        other => SkipReason::Other(other),
+    }
 }
 
 /// The result text, one short sentence per line (ASD-STE100).
 pub fn summary_lines(mode: DeleteMode, o: &Outcome) -> Vec<String> {
-    let _ = (mode, o);
-    Vec::new()
+    let mut lines = Vec::new();
+    if o.removed_items > 0 {
+        match mode {
+            DeleteMode::RecycleBin => {
+                lines.push(format!("Moved {} to the Recycle Bin.", items(o.removed_items)));
+                lines.push("Disk space is freed only when you empty the Recycle Bin.".to_string());
+            }
+            DeleteMode::Permanent => {
+                lines.push(format!("Deleted {}.", items(o.removed_items)));
+                lines.push(format!("Freed {}.", format_size(o.removed_bytes, Unit::Dynamic)));
+            }
+        }
+    }
+    if o.stopped {
+        lines.push("You stopped the delete.".to_string());
+        lines.push("Items that Volatus removed stay removed.".to_string());
+    }
+    if !o.skipped.is_empty() {
+        lines.push(format!("Skipped {}.", items(o.skipped.len() as u64)));
+        lines.push("The list shows the reason for each item.".to_string());
+    }
+    if o.skipped.iter().any(|s| s.reason == SkipReason::NeedsAdmin) {
+        lines.push("Windows needs administrator rights to remove some items.".to_string());
+        lines.push("Restart as administrator, then delete them again.".to_string());
+    }
+    lines
+}
+
+/// "1 item", "3 items".
+fn items(n: u64) -> String {
+    if n == 1 { "1 item".to_string() } else { format!("{n} items") }
 }
 
 #[cfg(test)]
