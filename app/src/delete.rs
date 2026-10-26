@@ -85,15 +85,28 @@ impl Probe for RealFs {
     }
 }
 
+/// The verbatim (`\\?\`) form of an absolute drive path, built from its text alone. Win32 drops a
+/// trailing dot or space from a name and would reach a sibling; a verbatim path keeps the name.
+/// `/` counts as `\` and empty names (`a\\b`, a trailing `\`) are dropped. `None` for any other
+/// kind of path and for a `.` or `..` name: folding those by text could name another item.
+fn verbatim(_p: &Path) -> Option<PathBuf> {
+    None
+}
+
 /// `GetLongPathNameW`: long names for every part of `p`. It does not follow a link.
 fn long_name(p: &Path) -> Option<PathBuf> {
+    path_api(p, windows_sys::Win32::Storage::FileSystem::GetLongPathNameW)
+}
+
+/// Calls a Win32 path function of the `GetLongPathNameW` shape, growing the buffer to the size
+/// it asks for. `None` when the call fails.
+fn path_api(p: &Path, f: unsafe extern "system" fn(*const u16, *mut u16, u32) -> u32) -> Option<PathBuf> {
     use std::os::windows::ffi::{OsStrExt, OsStringExt};
-    use windows_sys::Win32::Storage::FileSystem::GetLongPathNameW;
     let wide: Vec<u16> = p.as_os_str().encode_wide().chain(Some(0)).collect();
     let mut buf = vec![0u16; 1024];
     loop {
         // SAFETY: `wide` is NUL-terminated; `buf` has the length passed.
-        let n = unsafe { GetLongPathNameW(wide.as_ptr(), buf.as_mut_ptr(), buf.len() as u32) } as usize;
+        let n = unsafe { f(wide.as_ptr(), buf.as_mut_ptr(), buf.len() as u32) } as usize;
         match n {
             0 => return None,
             n if n < buf.len() => return Some(PathBuf::from(std::ffi::OsString::from_wide(&buf[..n]))),
@@ -635,9 +648,39 @@ mod tests {
     }
 
     #[test]
-    fn a_root_with_dot_dot_is_resolved_before_the_checks() {
-        let fs = all_dirs(&[]);
-        assert_eq!(check(r"C:\x\..", r"C:\x\..\Windows\System32", &fs), Err(Refusal::ProtectedFolder));
+    fn a_dot_or_dot_dot_name_in_the_root_or_the_item_is_unresolved() {
+        let fs = all_dirs(&[r"C:\data\x"]);
+        for (root, t) in [
+            (r"C:\x\..", r"C:\x\..\Windows\System32"),
+            (r"C:\data\.", r"C:\data\x"),
+            (r"C:\data", r"C:\data\sub\..\x"),
+            (r"C:\data", r"C:\data\.\x"),
+        ] {
+            assert_eq!(check(root, t, &fs), Err(Refusal::Unresolved), "{root} {t}");
+        }
+    }
+
+    #[test]
+    fn verbatim_is_built_from_the_text_and_refuses_dot_names() {
+        for (p, want) in [
+            (r"C:\a\b", Some(r"\\?\C:\a\b")),
+            (r"C:\pd.\child ", Some(r"\\?\C:\pd.\child ")),
+            (r"C:/a//b\", Some(r"\\?\C:\a\b")),
+            (r"\\?\D:\x.", Some(r"\\?\D:\x.")),
+            (r"C:\", Some(r"\\?\C:\")),
+            (r"C:\a\.\b", None),
+            (r"C:\a\..\b", None),
+            (r"\\?\C:\a\..", None),
+            (r"C:", None),
+            (r"C:a", None),
+            (r"\a", None),
+            (r"a\b", None),
+            (r"\\server\share\x", None),
+            (r"\\?\UNC\server\share\x", None),
+            (r"\\.\C:\x", None),
+        ] {
+            assert_eq!(verbatim(Path::new(p)), want.map(PathBuf::from), "{p}");
+        }
     }
 
     #[test]
@@ -797,7 +840,7 @@ mod tests {
     #[test]
     fn ok_returns_the_resolved_path() {
         let fs = all_dirs(&[r"C:\data\x"]);
-        let got = check_target_in(Path::new(r"C:\data"), Path::new(r"C:\data\SUB\..\x"), true, &fs, &env());
+        let got = check_target_in(Path::new(r"C:\data"), Path::new(r"C:\DATA\X"), true, &fs, &env());
         assert_eq!(got, Ok(PathBuf::from(r"c:\data\x")));
     }
 
@@ -856,18 +899,17 @@ mod tests {
     }
 
     /// Real file system tests. Every path is under one unique directory in the temp folder that
-    /// the test creates and removes. A case is skipped (and says so) only when the OS refuses to
-    /// create its fixture.
+    /// the test creates and removes. A case runs only when the OS creates its fixture; a case it
+    /// cannot run says so on the real stderr (`skipped`), so a skip is never a silent pass.
     mod real {
         use super::*;
         use std::fs;
-        use std::os::windows::ffi::OsStrExt;
 
-        /// A unique directory, canonical (verbatim) form. Removed on drop; a junction inside is
+        /// A unique directory, canonical (verbatim) form. Removed on drop; a link inside is
         /// removed first, so nothing outside is ever followed.
         struct Dir {
             base: PathBuf,
-            junctions: std::cell::RefCell<Vec<PathBuf>>,
+            links: std::cell::RefCell<Vec<PathBuf>>,
         }
 
         impl Dir {
@@ -875,37 +917,76 @@ mod tests {
                 let plain = std::env::temp_dir().join(format!("volatus-delete-{}-{tag}", std::process::id()));
                 let _ = fs::remove_dir_all(&plain);
                 fs::create_dir_all(&plain).expect("temp dir");
-                Dir { base: fs::canonicalize(&plain).expect("canonical"), junctions: Default::default() }
+                Dir { base: fs::canonicalize(&plain).expect("canonical"), links: Default::default() }
             }
             /// `mklink /J`. `None` (skip) if the OS refuses.
             fn junction(&self, name: &str, to: &Path) -> Option<PathBuf> {
                 let link = self.base.join(name);
-                let plain = |p: &Path| p.to_string_lossy().trim_start_matches(r"\\?\").to_string();
                 let ok = std::process::Command::new("cmd")
-                    .args(["/c", "mklink", "/J", &plain(&link), &plain(to)])
+                    .args(["/c", "mklink", "/J"])
+                    .arg(plain(&link))
+                    .arg(plain(to))
                     .output()
                     .is_ok_and(|o| o.status.success());
                 if ok {
-                    self.junctions.borrow_mut().push(link.clone());
+                    self.links.borrow_mut().push(link.clone());
                     Some(link)
                 } else {
-                    eprintln!("skipped: mklink /J was refused");
+                    skipped("junction item (mklink /J was refused)");
                     None
                 }
+            }
+            /// `pd\child\plain-mark` and `pd.\child\dot-mark`: two folders Win32 sees as one name.
+            /// False (skip) if the OS refuses the trailing dot.
+            fn dot_pair(&self) -> bool {
+                fs::create_dir_all(self.base.join("pd").join("child")).unwrap();
+                fs::write(self.base.join("pd").join("child").join("plain-mark"), b"x").unwrap();
+                if fs::create_dir_all(self.base.join("pd.").join("child")).is_err() {
+                    skipped("trailing dot in a parent or root (the OS refused the name pd.)");
+                    return false;
+                }
+                fs::write(self.base.join("pd.").join("child").join("dot-mark"), b"x").unwrap();
+                true
+            }
+            /// An environment whose Windows folder and profile are real folders in this
+            /// directory, so the result never depends on where the real ones are. `None` (skip)
+            /// if the temp folder itself is under a folder every volume protects.
+            fn env(&self) -> Option<Env> {
+                if on_any_volume(&norm(&self.base)).is_some() {
+                    skipped("policy on the real file system (the temp folder is in a protected folder)");
+                    return None;
+                }
+                let (win, profile) = (self.base.join("win"), self.base.join("profile"));
+                fs::create_dir(&win).unwrap();
+                fs::create_dir(&profile).unwrap();
+                let text = |p: &Path| plain(p).to_string_lossy().into_owned();
+                Some(Env { windir: text(&win), user_profile: text(&profile), ..Env::default() })
             }
         }
 
         impl Drop for Dir {
             fn drop(&mut self) {
-                for j in self.junctions.borrow().iter() {
+                for j in self.links.borrow().iter() {
                     let _ = fs::remove_dir(j);
                 }
                 let _ = fs::remove_dir_all(&self.base);
             }
         }
 
+        /// Writes to the real stderr, which the test harness does not capture, so the skip shows
+        /// in every `cargo test` run.
+        fn skipped(guard: &str) {
+            use std::io::Write;
+            let _ = writeln!(std::io::stderr(), "SKIPPED real file system guard: {guard}");
+        }
+
         fn plain(p: &Path) -> PathBuf {
             PathBuf::from(p.to_string_lossy().trim_start_matches(r"\\?\"))
+        }
+
+        /// `GetShortPathNameW`, buffer grown to the size it asks for.
+        fn short_name(p: &Path) -> Option<PathBuf> {
+            path_api(p, windows_sys::Win32::Storage::FileSystem::GetShortPathNameW)
         }
 
         #[test]
@@ -913,13 +994,41 @@ mod tests {
             let d = Dir::new("dot");
             fs::create_dir(d.base.join("dotdir")).unwrap();
             if fs::create_dir(d.base.join("dotdir.")).is_err() {
-                eprintln!("skipped: the OS refused a name with a trailing dot");
+                skipped("trailing dot in the item name (the OS refused the name dotdir.)");
                 return;
             }
             fs::write(d.base.join("dotdir.").join("mark"), b"x").unwrap();
             let got = RealFs.resolve_target(&plain(&d.base.join("dotdir."))).expect("resolves");
-            assert_eq!(got.file_name().unwrap(), "dotdir.", "{got:?}");
+            assert_eq!(got, d.base.join("dotdir."));
             assert!(got.join("mark").exists(), "{got:?} is not the dotdir. folder");
+        }
+
+        #[test]
+        fn a_trailing_dot_in_a_parent_stays_itself() {
+            let d = Dir::new("parentdot");
+            if !d.dot_pair() {
+                return;
+            }
+            let item = d.base.join("pd.").join("child");
+            let got = RealFs.resolve_target(&plain(&item)).expect("resolves");
+            assert_eq!(got, item);
+            assert!(got.join("dot-mark").exists(), "{got:?} is not pd.\\child");
+            let Some(env) = d.env() else { return };
+            assert_eq!(check_target_in(&plain(&d.base), &plain(&item), true, &RealFs, &env), Ok(item));
+        }
+
+        #[test]
+        fn a_root_with_a_trailing_dot_is_not_its_sibling() {
+            let d = Dir::new("rootdot");
+            if !d.dot_pair() {
+                return;
+            }
+            let Some(env) = d.env() else { return };
+            let (dot, bare) = (d.base.join("pd."), d.base.join("pd"));
+            let check = |root: &Path, t: &Path| check_target_in(&plain(root), &plain(t), true, &RealFs, &env);
+            assert_eq!(check(&dot, &dot.join("child")), Ok(dot.join("child")));
+            assert_eq!(check(&dot, &bare.join("child")), Err(Refusal::NotUnderRoot));
+            assert_eq!(check(&bare, &dot.join("child")), Err(Refusal::NotUnderRoot));
         }
 
         #[test]
@@ -934,23 +1043,33 @@ mod tests {
         }
 
         #[test]
+        fn a_directory_symlink_item_is_not_followed() {
+            let d = Dir::new("dirlink");
+            fs::create_dir(d.base.join("other")).unwrap();
+            let link = d.base.join("link");
+            if let Err(e) = std::os::windows::fs::symlink_dir(d.base.join("other"), &link) {
+                skipped(&format!("directory symlink item (the OS refused it without elevation: {e})"));
+                return;
+            }
+            d.links.borrow_mut().push(link.clone());
+            let got = RealFs.resolve_target(&plain(&link)).expect("resolves");
+            assert_eq!(got, link);
+        }
+
+        #[test]
         fn a_short_name_of_a_junction_item_becomes_its_long_name() {
             let d = Dir::new("shortlink");
             fs::create_dir(d.base.join("other")).unwrap();
             let Some(link) = d.junction("a long junction name", &d.base.join("other")) else { return };
-            let wide: Vec<u16> = link.as_os_str().encode_wide().chain(Some(0)).collect();
-            let mut buf = [0u16; 1024];
-            // SAFETY: `wide` is NUL-terminated and `buf` is 1024 wide chars, as the length says.
-            let n = unsafe {
-                windows_sys::Win32::Storage::FileSystem::GetShortPathNameW(wide.as_ptr(), buf.as_mut_ptr(), 1024)
-            } as usize;
-            let short = PathBuf::from(String::from_utf16_lossy(&buf[..n]));
-            if n == 0 || short == link {
-                eprintln!("skipped: no 8.3 name for the junction (8.3 names are off)");
-                return;
-            }
+            let short = match short_name(&link) {
+                Some(s) if s != link => s,
+                _ => {
+                    skipped("short name of a junction item (no 8.3 name: 8.3 names are off)");
+                    return;
+                }
+            };
             let got = RealFs.resolve_target(&plain(&short)).expect("resolves");
-            assert_eq!(got.file_name().unwrap(), "a long junction name", "{got:?}");
+            assert_eq!(got, link);
         }
 
         #[test]
@@ -964,9 +1083,8 @@ mod tests {
         #[test]
         fn a_missing_item_is_missing_and_a_missing_parent_is_unresolved() {
             let d = Dir::new("missing");
+            let Some(env) = d.env() else { return };
             let root = plain(&d.base);
-            // The profile and Windows folder must exist for real, so read the real environment.
-            let env = Env::from_lookup(|k| std::env::var(k).ok()).expect("a real environment");
             let got = check_target_in(&root, &root.join("nope"), true, &RealFs, &env);
             assert_eq!(got, Err(Refusal::Missing));
             let got = check_target_in(&root, &root.join("no").join("x"), true, &RealFs, &env);
