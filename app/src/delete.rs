@@ -46,9 +46,11 @@ pub struct DeleteTarget {
 pub trait Probe {
     fn exists(&self, p: &Path) -> bool;
     fn is_dir(&self, p: &Path) -> bool;
-    /// The real path of `p` (links, `..` and trailing dots resolved), or `None` if unknown.
+    /// The real path of `p` (links and 8.3 names resolved), or `None` if unknown. The policy
+    /// passes the root verbatim; the protected entries come as the environment gives them.
     fn resolve(&self, p: &Path) -> Option<PathBuf>;
-    /// The real path of the item to delete. A link item stays the link.
+    /// The real path of the item to delete. A link item stays the link. The policy passes it
+    /// verbatim.
     fn resolve_target(&self, p: &Path) -> Option<PathBuf>;
 }
 
@@ -65,19 +67,23 @@ impl Probe for RealFs {
     fn resolve(&self, p: &Path) -> Option<PathBuf> {
         std::fs::canonicalize(p).ok()
     }
-    /// The parent is resolved and the LITERAL name joined onto it, giving a verbatim (`\\?\`) path:
-    /// Win32 would drop a trailing dot or space and reach a sibling. All further calls use that
-    /// path. A link item (junction or symlink) is not followed; only its final name is made long,
-    /// so a short name cannot hide a protected link. Any other item is canonicalized, so an 8.3
-    /// short name becomes the long name. An item that is gone keeps the joined path; `exists` then
-    /// says `Missing`. A parent that cannot be resolved gives `None`.
+    /// The whole path is made verbatim (`\\?\`) from its text first: Win32 would drop a trailing
+    /// dot or space in any name, the parent's too, and reach a sibling. A `.` or `..` name gives
+    /// `None`. The parent is resolved and the LITERAL name joined onto it. Any reparse point
+    /// (junction, symlink or other) counts as a link and is not followed; only its final name is
+    /// made long, so a short name cannot hide a protected link. Any other item is canonicalized,
+    /// so an 8.3 short name becomes the long name. An item that is gone keeps the joined path;
+    /// `exists` then says `Missing`. A parent that cannot be resolved gives `None`.
     fn resolve_target(&self, p: &Path) -> Option<PathBuf> {
+        use std::os::windows::fs::MetadataExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+        let p = verbatim(p)?;
         let (Some(parent), Some(name)) = (p.parent(), p.file_name()) else {
-            return std::fs::canonicalize(p).ok();
+            return std::fs::canonicalize(&p).ok();
         };
         let literal = std::fs::canonicalize(parent).ok()?.join(name);
         match std::fs::symlink_metadata(&literal) {
-            Ok(m) if m.file_type().is_symlink() => long_name(&literal),
+            Ok(m) if m.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 => long_name(&literal),
             Ok(_) => std::fs::canonicalize(&literal).ok(),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(literal),
             Err(_) => None,
@@ -89,8 +95,28 @@ impl Probe for RealFs {
 /// trailing dot or space from a name and would reach a sibling; a verbatim path keeps the name.
 /// `/` counts as `\` and empty names (`a\\b`, a trailing `\`) are dropped. `None` for any other
 /// kind of path and for a `.` or `..` name: folding those by text could name another item.
-fn verbatim(_p: &Path) -> Option<PathBuf> {
-    None
+fn verbatim(p: &Path) -> Option<PathBuf> {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    let (slash, back, colon, dot) = (u16::from(b'/'), u16::from(b'\\'), u16::from(b':'), u16::from(b'.'));
+    let w: Vec<u16> = p.as_os_str().encode_wide().map(|c| if c == slash { back } else { c }).collect();
+    let prefix: Vec<u16> = r"\\?\".encode_utf16().collect();
+    let rest = w.strip_prefix(prefix.as_slice()).unwrap_or(&w);
+    let [letter, c, b, names @ ..] = rest else { return None };
+    if !(u8::try_from(*letter).is_ok_and(|l| l.is_ascii_alphabetic()) && *c == colon && *b == back) {
+        return None;
+    }
+    let mut out = prefix;
+    out.extend([*letter, colon, back]);
+    for (i, name) in names.split(|c| *c == back).filter(|n| !n.is_empty()).enumerate() {
+        if name == [dot] || name == [dot, dot] {
+            return None;
+        }
+        if i > 0 {
+            out.push(back);
+        }
+        out.extend_from_slice(name);
+    }
+    Some(PathBuf::from(std::ffi::OsString::from_wide(&out)))
 }
 
 /// `GetLongPathNameW`: long names for every part of `p`. It does not follow a link.
@@ -194,11 +220,17 @@ pub fn refusal_text(r: Refusal) -> &'static str {
     }
 }
 
-/// Lowercase, `\\?\` stripped, `/` as `\`, trailing dots and spaces of each name dropped (Windows
-/// ignores them), trailing separators trimmed. The form paths compare in.
-fn norm(p: &Path) -> String {
+/// Lowercase, `\\?\` stripped, `/` as `\`, trailing separators trimmed. Names stay as they are,
+/// so `pd.` and `pd` differ: the form the root and the item compare in.
+fn norm_exact(p: &Path) -> String {
     let s = p.to_string_lossy().to_lowercase().replace('/', r"\");
-    let s = s.strip_prefix(r"\\?\").unwrap_or(&s);
+    s.strip_prefix(r"\\?\").unwrap_or(&s).trim_end_matches('\\').to_string()
+}
+
+/// `norm_exact` with the trailing dots and spaces of each name dropped too (Win32 ignores them).
+/// The form the protected list compares in: looser, so it refuses more.
+fn norm(p: &Path) -> String {
+    let s = norm_exact(p);
     let parts: Vec<&str> =
         s.split('\\').map(|c| if c == "." || c == ".." { c } else { c.trim_end_matches(['.', ' ']) }).collect();
     parts.join(r"\").trim_end_matches('\\').to_string()
@@ -209,11 +241,15 @@ fn within(child: &str, parent: &str) -> bool {
     child == parent || child.strip_prefix(parent).is_some_and(|rest| rest.starts_with('\\'))
 }
 
-/// Checks the item against the scan root, the protected list and the disk. The root and the item
-/// are resolved first (`..`, links, trailing dots); if either cannot be resolved the result is
+/// Checks the item against the scan root, the protected list and the disk. A network path is
+/// `NotLocal`. The root and the item are made verbatim (`\\?\`) from their text, so a trailing dot
+/// or space stays part of its name; a relative path, a `.` or `..` name, or an item with no name
+/// is `Unresolved`. Then they are resolved on the disk (8.3 names; links in the root and in the
+/// item's parent; a link item stays the link); if either cannot be resolved the result is
 /// `Unresolved`. Then, in this order: `NotUnderRoot`, `DriveRoot`, `NotUnderRoot` (the root
-/// itself), `ProtectedFolder`, `Missing`, `KindChanged`. Reads the real environment for the
-/// protected list; if that is unknown, everything is `Unresolved`.
+/// itself), `ProtectedFolder`, `Missing`, `KindChanged`. The Ok value is the resolved item path,
+/// the one the caller must delete. Reads the real environment for the protected list; if that is
+/// unknown, everything is `Unresolved`.
 pub fn check_target(root: &Path, target: &Path, is_dir: bool, fs: &dyn Probe) -> Result<PathBuf, Refusal> {
     check_target_with(|k| std::env::var(k).ok(), root, target, is_dir, fs)
 }
@@ -264,21 +300,28 @@ pub fn check_target_in(
     if !root.is_absolute() || !target.is_absolute() || (target.file_name().is_none() && !drive_root) {
         return Err(Refusal::Unresolved);
     }
+    // Verbatim before the disk sees either path: Win32 would drop a trailing dot or space in any
+    // name and reach a sibling. A `.` or `..` name is refused, not folded.
+    let (Some(root), Some(target)) = (verbatim(root), verbatim(target)) else {
+        return Err(Refusal::Unresolved);
+    };
     // A miss here never falls back to the raw path: the text of a path proves nothing.
-    let root = fs.resolve(root).ok_or(Refusal::Unresolved)?;
-    let target = fs.resolve_target(target).ok_or(Refusal::Unresolved)?;
+    let root = fs.resolve(&root).ok_or(Refusal::Unresolved)?;
+    let target = fs.resolve_target(&target).ok_or(Refusal::Unresolved)?;
     let (r, t) = (norm(&root), norm(&target));
     if is_unc(&r) || is_unc(&t) || !is_local(&r) || !is_local(&t) {
         return Err(Refusal::NotLocal);
     }
-    if !within(&t, &r) {
+    // The root and the item compare with their names exact: `pd.` is not `pd`.
+    let (re, te) = (norm_exact(&root), norm_exact(&target));
+    if !within(&te, &re) {
         return Err(Refusal::NotUnderRoot);
     }
     // A drive root is named before the root check below, so a scan of `C:\` says "drive root".
     if t.len() == 2 || scan::is_volume_root(&target) {
         return Err(Refusal::DriveRoot);
     }
-    if t == r {
+    if te == re {
         return Err(Refusal::NotUnderRoot);
     }
     // Each environment entry is compared as given and as resolved (8.3 names, links). The Windows
