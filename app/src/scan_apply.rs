@@ -92,22 +92,25 @@ struct Pending {
 
 /// A confirm is allowed only on the scan the dialog was opened on, while no scan runs.
 pub(crate) fn may_confirm(opened: Option<Origin>, now: Option<Origin>, scan: &ScanState) -> bool {
-    let _ = (opened, now, scan);
-    true
+    opened.is_some() && opened == now && delete_flow::can_start(scan)
 }
 
 /// The tree action a finished delete keeps: the run's own only when the message is of this job
 /// (`msg_generation`) and the window still shows the job's scan; else `Nothing`, as a rescan or
 /// a new scan already shows the disk as it is.
 pub(crate) fn finished_action(job: Origin, msg_generation: u64, now: Option<Origin>, action: TreeAction) -> TreeAction {
-    let _ = (job, msg_generation, now);
-    action
+    if msg_generation == job.generation && now == Some(job) { action } else { TreeAction::Nothing }
 }
 
 /// A new scan starts or the shown scan is dropped: the dialog closes unless a delete runs (its
 /// result is then dropped by its origin), and a pending removal and the notice go.
 pub(crate) fn scan_changed(s: &mut Session) {
-    let _ = s;
+    if !matches!(s.delete.state, DialogState::Running { .. }) {
+        s.delete.state = DialogState::Closed;
+        s.delete.opened = None;
+    }
+    s.delete.pending = None;
+    s.delete.notice = None;
 }
 
 /// Opens the dialog on the selection when none is open. `check` is the policy, `is_link` the link
@@ -223,10 +226,6 @@ pub(crate) enum PendingStep {
 /// worker let go of its clone does not. `layout_seq` goes up only when the tree changes, so a
 /// busy try never drops a layout.
 pub(crate) fn step_pending(s: &mut Session, timer: bool) -> PendingStep {
-    let _ = timer;
-    if s.delete.pending.is_some() {
-        return PendingStep::Idle;
-    }
     let Some(p) = s.delete.pending else { return PendingStep::Idle };
     if origin_of(s) != Some(p.origin) {
         s.delete.pending = None;

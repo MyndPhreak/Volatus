@@ -93,6 +93,7 @@ pub fn next(state: DialogState, event: DialogEvent) -> DialogState {
         (S::Closed, E::Open { shift, target: Ok(target) }) => S::Confirm { mode: delete::mode_for(shift), target },
         (S::Closed, E::Open { target: Err(r), .. }) => S::Refused { text: delete::refusal_text(r).to_string() },
         (S::Confirm { mode, target }, E::SwitchMode) => S::Confirm { mode: other(mode), target },
+        (S::Confirm { .. }, E::Refuse { text }) => S::Refused { text },
         (S::Confirm { mode, target }, E::Confirm) => {
             S::Running { mode, target, progress: RunProgress::default(), stopping: false }
         }
@@ -132,7 +133,10 @@ fn other(mode: DeleteMode) -> DeleteMode {
 /// refused before anything changed (`recycle::left_in_place`), is `Nothing`. A rescan would show
 /// the same disk.
 pub fn tree_action(outcome: &Outcome, mode: DeleteMode, target_gone: bool) -> TreeAction {
-    let refused_by_bin = mode == DeleteMode::RecycleBin && crate::recycle::left_in_place(SkipReason::Locked);
+    let refused_by_bin = mode == DeleteMode::RecycleBin
+        && outcome.removed_items == 0
+        && !outcome.skipped.is_empty()
+        && outcome.skipped.iter().all(|s| crate::recycle::left_in_place(s.reason));
     if target_gone {
         TreeAction::Detach
     } else if refused_by_bin {
@@ -288,22 +292,32 @@ pub const GONE_KEPT: &str = "This item is already gone. Scan again to update the
 /// The check just before the delete: `Ok` only when it gives the same resolved path as the check
 /// at Open (`opened`). Else the text for the dialog: the refusal's, or `CHANGED_TEXT`.
 pub fn recheck(opened: &Path, again: Result<PathBuf, Refusal>) -> Result<(), String> {
-    let _ = (opened, again);
-    Ok(())
+    match again {
+        Ok(p) if p == opened => Ok(()),
+        Ok(_) => Err(CHANGED_TEXT.to_string()),
+        Err(r) => Err(delete::refusal_text(r).to_string()),
+    }
 }
 
 /// The text for a refusal at Open, and whether the item leaves the tree. Only a `Missing` item
 /// that `gone` (a strict "not found" check) confirms leaves it; `gone` is asked for `Missing` only.
 pub fn refusal_for(r: Refusal, gone: impl FnOnce() -> bool) -> (String, bool) {
-    let _ = gone;
-    (delete::refusal_text(r).to_string(), false)
+    if r == Refusal::Missing && gone() {
+        (GONE_PENDING.to_string(), true)
+    } else {
+        (delete::refusal_text(r).to_string(), false)
+    }
 }
 
 /// What the result says about the list, for a tree action (ASD-STE100).
 #[cfg_attr(not(test), expect(dead_code, reason = "shown by the dialog in Task 7b"))]
 pub fn list_line(action: TreeAction) -> Option<&'static str> {
-    let _ = action;
-    None
+    match action {
+        TreeAction::Detach => Some("The list still shows the item. Volatus removes it when the scan data is free."),
+        TreeAction::Detached => Some("Volatus removed the item from the list."),
+        TreeAction::KeepAndOfferRescan => Some("The list did not change. Scan again to see the changes."),
+        TreeAction::Nothing => None,
+    }
 }
 
 /// The checked target for Delete or Shift+Delete on `selected`, with its node; `None` (no dialog)

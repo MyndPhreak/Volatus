@@ -326,8 +326,7 @@ pub fn skip_text(r: SkipReason) -> Option<&'static str> {
 /// the shell never got the path (`PATH_REFUSED`), the sink refused the item before any delete
 /// (`NOT_RECYCLABLE`), or the bin said the item is too large.
 pub fn left_in_place(r: SkipReason) -> bool {
-    let _ = (r, PATH_REFUSED, NOT_RECYCLABLE, DE_FILE_TOO_LARGE, HR_RECYCLE_SIZE_TOO_BIG);
-    false
+    matches!(r, SkipReason::Other(PATH_REFUSED | NOT_RECYCLABLE | DE_FILE_TOO_LARGE | HR_RECYCLE_SIZE_TOO_BIG))
 }
 
 /// COM on this thread for one operation: `CoInitializeEx` (apartment-threaded), balanced by
