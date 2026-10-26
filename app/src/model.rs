@@ -164,8 +164,54 @@ pub fn shows_start(state: &ScanState) -> bool {
     !matches!(state, ScanState::Scanning { .. } | ScanState::Done(_))
 }
 
-/// Binary units, one decimal above 1 KB: `1.5 MB`.
-pub fn format_size(bytes: u64) -> String {
+/// How the window shows a size: `Dynamic` picks the unit per value, the others fix it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Unit {
+    #[default]
+    Dynamic,
+    Byte,
+    Kb,
+    Mb,
+    Gb,
+    Tb,
+}
+
+impl Unit {
+    pub const ALL: [Unit; 6] = [Unit::Dynamic, Unit::Byte, Unit::Kb, Unit::Mb, Unit::Gb, Unit::Tb];
+
+    /// The unit at position `i` in `ALL`; an unknown index is `Dynamic`.
+    pub fn from_index(i: i32) -> Unit {
+        usize::try_from(i).ok().and_then(|i| Unit::ALL.get(i).copied()).unwrap_or_default()
+    }
+
+    /// The position of this unit in `ALL`.
+    pub fn index(self) -> i32 {
+        Unit::ALL.iter().position(|&u| u == self).unwrap_or(0) as i32
+    }
+}
+
+/// Binary units. `Dynamic`: one decimal above 1 KB, `1.5 MB`. A fixed unit: one decimal, digits
+/// grouped, `2,048.0 GB`; a non-empty size below 0.05 of the unit is `< 0.1 GB`.
+pub fn format_size(bytes: u64, unit: Unit) -> String {
+    let (label, power) = match unit {
+        Unit::Dynamic => return format_size_dynamic(bytes),
+        Unit::Byte => return format!("{} B", group_digits(bytes)),
+        Unit::Kb => ("KB", 1),
+        Unit::Mb => ("MB", 2),
+        Unit::Gb => ("GB", 3),
+        Unit::Tb => ("TB", 4),
+    };
+    let v = bytes as f64 / 1024f64.powi(power);
+    if bytes > 0 && v < 0.05 {
+        return format!("< 0.1 {label}");
+    }
+    let one_decimal = format!("{v:.1}");
+    let (whole, tenth) = one_decimal.split_once('.').unwrap_or((&one_decimal, "0"));
+    // `v` is at most 2^64 / 1024, so `whole` always fits a u64.
+    format!("{}.{tenth} {label}", group_digits(whole.parse().unwrap_or(0)))
+}
+
+fn format_size_dynamic(bytes: u64) -> String {
     const UNITS: [&str; 7] = ["B", "KB", "MB", "GB", "TB", "PB", "EB"];
     if bytes < 1024 {
         return format!("{bytes} B");
@@ -372,7 +418,7 @@ pub fn offer_for(state: &ScanState, root: Option<&Path>, is_admin: bool) -> bool
 
 /// Text for the status banner in each state. Never empty. `offer_elevation` is the result of
 /// [`offer_elevation`] for the finished scan: the restart hint shows only when the button does.
-pub fn banner_text(state: &ScanState, offer_elevation: bool) -> String {
+pub fn banner_text(state: &ScanState, offer_elevation: bool, unit: Unit) -> String {
     match state {
         ScanState::Idle => "Select a drive or a folder to scan.".into(),
         ScanState::Scanning { files, dirs } => {
@@ -386,7 +432,7 @@ pub fn banner_text(state: &ScanState, offer_elevation: bool) -> String {
             let hint = if offer_elevation && s.method == Method::Walk { " Restart as administrator to scan a whole drive faster." } else { "" };
             format!(
                 "{name}. {} in {} files and {} folders. {} skipped. {}.{hint}",
-                format_size(s.total),
+                format_size(s.total, unit),
                 group_digits(s.files),
                 group_digits(s.dirs),
                 group_digits(s.skipped),
@@ -422,8 +468,69 @@ mod tests {
             (u64::MAX, "16.0 EB"),
         ];
         for (n, want) in cases {
-            assert_eq!(format_size(n), want, "input {n}");
+            assert_eq!(format_size(n, Unit::Dynamic), want, "input {n}");
         }
+    }
+
+    #[test]
+    fn format_size_dynamic_matches_the_old_values() {
+        let cases: [(u64, &str); 9] = [
+            (0, "0 B"),
+            (1023, "1023 B"),
+            (1024, "1.0 KB"),
+            (1536, "1.5 KB"),
+            (1024 * 1024, "1.0 MB"),
+            (5 * 1024 * 1024 * 1024 / 2, "2.5 GB"),
+            (1024u64.pow(4), "1.0 TB"),
+            (1024u64.pow(5), "1.0 PB"),
+            (u64::MAX, "16.0 EB"),
+        ];
+        for (n, want) in cases {
+            assert_eq!(format_size(n, Unit::Dynamic), want, "input {n}");
+        }
+    }
+
+    #[test]
+    fn format_size_fixed_units_known_values() {
+        let cases: [(u64, Unit, &str); 4] = [
+            (1536, Unit::Kb, "1.5 KB"),
+            (1024 * 1024, Unit::Mb, "1.0 MB"),
+            (2 * 1024u64.pow(4), Unit::Gb, "2,048.0 GB"),
+            (3 * 1024u64.pow(3) / 2, Unit::Mb, "1,536.0 MB"),
+        ];
+        for (n, unit, want) in cases {
+            assert_eq!(format_size(n, unit), want, "input {n} in {unit:?}");
+        }
+    }
+
+    #[test]
+    fn format_size_byte_shows_a_whole_number_with_separators() {
+        assert_eq!(format_size(1_234_567, Unit::Byte), "1,234,567 B");
+        assert_eq!(format_size(u64::MAX, Unit::Byte), "18,446,744,073,709,551,615 B");
+    }
+
+    #[test]
+    fn format_size_tiny_non_empty_file_in_a_big_unit() {
+        let cases: [(u64, Unit, &str); 4] = [
+            (1, Unit::Mb, "< 0.1 MB"),
+            (51, Unit::Kb, "< 0.1 KB"),
+            (52, Unit::Kb, "0.1 KB"),
+            (0, Unit::Mb, "0.0 MB"),
+        ];
+        for (n, unit, want) in cases {
+            assert_eq!(format_size(n, unit), want, "input {n} in {unit:?}");
+        }
+    }
+
+    #[test]
+    fn unit_index_roundtrip_and_unknown_index_is_dynamic() {
+        for (i, unit) in Unit::ALL.into_iter().enumerate() {
+            assert_eq!(unit.index(), i as i32, "{unit:?}");
+            assert_eq!(Unit::from_index(i as i32), unit, "index {i}");
+        }
+        assert_eq!(Unit::from_index(-1), Unit::Dynamic);
+        assert_eq!(Unit::from_index(6), Unit::Dynamic);
+        assert_eq!(Unit::from_index(i32::MAX), Unit::Dynamic);
     }
 
     // ---- group_digits ----
@@ -707,7 +814,7 @@ mod tests {
     // ---- banner_text ----
     #[test]
     fn banner_text_idle_tells_user_what_to_do() {
-        assert_eq!(banner_text(&ScanState::Idle, false), "Select a drive or a folder to scan.");
+        assert_eq!(banner_text(&ScanState::Idle, false, Unit::Dynamic), "Select a drive or a folder to scan.");
     }
 
     // ---- shows_start ----
@@ -756,19 +863,25 @@ mod tests {
 
     #[test]
     fn banner_text_scanning_shows_counts() {
-        let t = banner_text(&ScanState::Scanning { files: 1234, dirs: 5 }, false);
+        let t = banner_text(&ScanState::Scanning { files: 1234, dirs: 5 }, false, Unit::Dynamic);
         assert_eq!(t, "Scanning. 1,234 files, 5 folders so far.");
     }
 
     #[test]
     fn banner_text_done_mft_shows_method_counts_size_and_time() {
-        let t = banner_text(&ScanState::Done(summary(Method::Mft, 0)), false);
+        let t = banner_text(&ScanState::Done(summary(Method::Mft, 0)), false, Unit::Dynamic);
         assert_eq!(t, "Fast scan (MFT). 3.0 MB in 1,234 files and 56 folders. 0 skipped. 2.5 s.");
     }
 
     #[test]
+    fn banner_text_done_uses_the_unit() {
+        let t = banner_text(&ScanState::Done(summary(Method::Mft, 0)), false, Unit::Byte);
+        assert_eq!(t, "Fast scan (MFT). 3,145,728 B in 1,234 files and 56 folders. 0 skipped. 2.5 s.");
+    }
+
+    #[test]
     fn banner_text_done_walk_says_standard_scan_and_why_slower() {
-        let t = banner_text(&ScanState::Done(summary(Method::Walk, 0)), true);
+        let t = banner_text(&ScanState::Done(summary(Method::Walk, 0)), true, Unit::Dynamic);
         assert_eq!(
             t,
             "Standard scan. 3.0 MB in 1,234 files and 56 folders. 0 skipped. 2.5 s. Restart as administrator to scan a whole drive faster."
@@ -777,13 +890,13 @@ mod tests {
 
     #[test]
     fn banner_text_done_walk_without_offer_has_no_restart_hint() {
-        let t = banner_text(&ScanState::Done(summary(Method::Walk, 0)), false);
+        let t = banner_text(&ScanState::Done(summary(Method::Walk, 0)), false, Unit::Dynamic);
         assert_eq!(t, "Standard scan. 3.0 MB in 1,234 files and 56 folders. 0 skipped. 2.5 s.");
     }
 
     #[test]
     fn banner_text_done_mft_with_offer_has_no_restart_hint() {
-        let t = banner_text(&ScanState::Done(summary(Method::Mft, 0)), true);
+        let t = banner_text(&ScanState::Done(summary(Method::Mft, 0)), true, Unit::Dynamic);
         assert_eq!(t, "Fast scan (MFT). 3.0 MB in 1,234 files and 56 folders. 0 skipped. 2.5 s.");
     }
 
@@ -801,30 +914,30 @@ mod tests {
         ];
         for (method, root, admin, want) in cases {
             let offer = offer_elevation(method, Path::new(root), admin);
-            let t = banner_text(&ScanState::Done(summary(method, 0)), offer);
+            let t = banner_text(&ScanState::Done(summary(method, 0)), offer, Unit::Dynamic);
             assert_eq!(t.contains(hint), want, "{method:?} {root} admin={admin}: {t}");
         }
     }
 
     #[test]
     fn banner_text_done_with_skipped_shows_skipped_count() {
-        let t = banner_text(&ScanState::Done(summary(Method::Walk, 7)), false);
+        let t = banner_text(&ScanState::Done(summary(Method::Walk, 7)), false, Unit::Dynamic);
         assert!(t.contains("7 skipped."), "{t}");
     }
 
     #[test]
     fn banner_text_error_prefixes_message() {
-        assert_eq!(banner_text(&ScanState::Error("Access denied.".into()), false), "Scan failed. Access denied.");
+        assert_eq!(banner_text(&ScanState::Error("Access denied.".into()), false, Unit::Dynamic), "Scan failed. Access denied.");
     }
 
     #[test]
     fn banner_text_error_with_empty_message_is_still_not_blank() {
-        assert_eq!(banner_text(&ScanState::Error(String::new()), false), "Scan failed.");
+        assert_eq!(banner_text(&ScanState::Error(String::new()), false, Unit::Dynamic), "Scan failed.");
     }
 
     #[test]
     fn banner_text_cancelled_says_no_result() {
-        assert_eq!(banner_text(&ScanState::Cancelled, false), "Scan stopped. There is no result.");
+        assert_eq!(banner_text(&ScanState::Cancelled, false, Unit::Dynamic), "Scan stopped. There is no result.");
     }
 
     // ---- Summary ----
@@ -1359,6 +1472,6 @@ mod tests {
     #[test]
     fn banner_text_error_message_with_a_hidden_character_shows_a_placeholder() {
         let m = "Could not read D:\\x\u{202E}y.".to_string();
-        assert_eq!(banner_text(&ScanState::Error(m), false), format!("Scan failed. Could not read D:\\x{FFFD}y."));
+        assert_eq!(banner_text(&ScanState::Error(m), false, Unit::Dynamic), format!("Scan failed. Could not read D:\\x{FFFD}y."));
     }
 }

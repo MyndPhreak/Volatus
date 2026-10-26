@@ -1,7 +1,7 @@
 //! The drives the start screen offers: ready fixed and removable drives, with their size.
 //! The Win32 calls sit behind `DriveApi`, so the rules are unit tested with a fake.
 
-use crate::model::format_size;
+use crate::model::{Unit, format_size};
 use std::os::windows::ffi::OsStrExt;
 use std::ptr::null_mut;
 use windows_sys::Win32::Storage::FileSystem::{GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW, QueryDosDeviceW};
@@ -196,7 +196,7 @@ impl DriveApi for Win32Drives {
 }
 
 /// The buttons for `drives`, sorted by letter.
-pub fn drive_buttons(drives: &[DriveInfo]) -> Vec<DriveButton> {
+pub fn drive_buttons(drives: &[DriveInfo], unit: Unit) -> Vec<DriveButton> {
     let mut sorted: Vec<&DriveInfo> = drives.iter().collect();
     sorted.sort_by_key(|d| d.letter);
     sorted
@@ -210,7 +210,7 @@ pub fn drive_buttons(drives: &[DriveInfo]) -> Vec<DriveButton> {
             let (detail, used) = match d.space {
                 Some((total, free)) => {
                     let used = if total == 0 || free > total { 0.0 } else { ((total - free) as f64 / total as f64) as f32 };
-                    (format!("{} free of {}", format_size(free), format_size(total)), used)
+                    (format!("{} free of {}", format_size(free, unit), format_size(total, unit)), used)
                 }
                 None => ("Size unknown.".to_string(), 0.0),
             };
@@ -451,7 +451,7 @@ mod tests {
     }
 
     fn one(d: DriveInfo) -> DriveButton {
-        let mut v = drive_buttons(&[d]);
+        let mut v = drive_buttons(&[d], Unit::Dynamic);
         assert_eq!(v.len(), 1);
         v.remove(0)
     }
@@ -481,11 +481,18 @@ mod tests {
         let total = tb * 18 / 10;
         let free = gb * 412;
         let b = one(info('C', "", DriveKind::Fixed, Some((total, free))));
-        assert_eq!(b.detail, format!("{} free of {}", format_size(free), format_size(total)));
+        assert_eq!(b.detail, format!("{} free of {}", format_size(free, Unit::Dynamic), format_size(total, Unit::Dynamic)));
         assert!(b.detail.starts_with("412.0 GB free of 1.8 TB"), "{}", b.detail);
         assert!(b.size_known);
         let want = ((total - free) as f64 / total as f64) as f32;
         assert!((b.used - want).abs() < 1e-6, "used {}", b.used);
+    }
+
+    #[test]
+    fn drive_detail_uses_the_unit_for_free_and_total() {
+        let tb = 1024u64.pow(4);
+        let v = drive_buttons(&[info('C', "", DriveKind::Fixed, Some((2 * tb, tb)))], Unit::Byte);
+        assert_eq!(v[0].detail, "1,099,511,627,776 B free of 2,199,023,255,552 B");
     }
 
     #[test]
@@ -522,6 +529,7 @@ mod tests {
     fn drive_buttons_sorts_by_letter() {
         let v = drive_buttons(
             &[info('E', "", DriveKind::Removable, None), info('C', "", DriveKind::Fixed, None), info('D', "", DriveKind::Fixed, None)],
+            Unit::Dynamic,
         );
         let roots: Vec<&str> = v.iter().map(|b| b.root.as_str()).collect();
         assert_eq!(roots, ["C:\\", "D:\\", "E:\\"]);
@@ -529,6 +537,6 @@ mod tests {
 
     #[test]
     fn drive_buttons_no_drives_gives_no_buttons() {
-        assert!(drive_buttons(&[]).is_empty());
+        assert!(drive_buttons(&[], Unit::Dynamic).is_empty());
     }
 }

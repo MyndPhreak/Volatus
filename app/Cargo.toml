@@ -11,13 +11,14 @@ path = "src/main.rs"
 [dependencies]
 scan = { path = "../scan" }
 treemap = { path = "../treemap" }
-slint = { version = "1.18.1", features = ["raw-window-handle-06"] }
+slint = { version = "1.18.1", features = ["raw-window-handle-06", "unstable-winit-030"] }
 window-vibrancy = "0.8"
 rfd = "0.17"
 # Copy Path (context menu). Already in the lock through Slint's winit backend: no new package.
 arboard = { version = "3.7", default-features = false }
 # The window's HWND for the shell menu (`shell::window_hwnd`). Already in the lock through Slint.
 raw-window-handle = "0.6"
+serde_json = "1.0.154"
 
 [build-dependencies]
 slint-build = "1.18.1"
@@ -35,7 +36,6 @@ windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Graphics_
 # tests/release.rs reads the release-please files and app/Cargo.toml (both crates already in the lock).
 [dev-dependencies]
 roxmltree = "0.21.1"
-serde_json = "1.0.154"
 toml = "1.1.8"
 
 # The installer: `cargo wix -p app` (WiX Toolset v3) builds wix/main.wxs into

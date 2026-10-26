@@ -2,7 +2,10 @@ import { Button, ProgressIndicator, Palette, ListView } from "std-widgets.slint"
 import { Crumb, CrumbBar, FileLabel, FrameLabel, Hover, Keys, LabelKind, Placed, TreemapView, ZoomFrame, ZoomMove } from "treemap.slint";
 import { Glass, GlassPanel } from "theme.slint";
 import { DriveButton, StartScreen } from "start.slint";
+import { SettingsButton, SettingsFlyout } from "settings.slint";
 export { Crumb, FileLabel, FrameLabel, Hover, DriveButton, LabelKind, Placed, ZoomFrame, ZoomMove }
+// The host writes `Palette.color-scheme` to apply the theme setting.
+export { Palette }
 
 /// One visible line of the file tree. Text is formatted by the host.
 export struct TreeRow {
@@ -89,7 +92,8 @@ export component MainWindow inherits Window {
     // The window must start transparent so the Mica backdrop shows through (set at window creation).
     // If Mica is not available, the host sets `mica` to false and the Fluent palette fills the window.
     in property <bool> mica: true;
-    /// The system theme is dark. The host draws the treemap for it.
+    /// The window is dark (the host sets `Palette.color-scheme` from the theme setting). The host
+    /// draws the treemap for it.
     out property <bool> dark: Palette.color-scheme == ColorScheme.dark;
     changed dark => { root.theme-changed(); }
     background: root.mica ? transparent : Palette.background;
@@ -173,6 +177,34 @@ export component MainWindow inherits Window {
     in property <bool> show-elevate;
     in property <string> elevate-note;
 
+    // Settings
+    /// The settings flyout is open. The gear and Esc change it.
+    in-out property <bool> settings-open;
+    /// The chosen theme: 0 Follow Windows, 1 Light, 2 Dark.
+    in property <int> theme-choice;
+    /// The chosen unit of sizes: 0 Dynamic, 1 Byte, 2 KB, 3 MB, 4 GB, 5 TB.
+    in property <int> unit-choice;
+    /// Why the settings are not saved, or "".
+    in property <string> settings-error;
+    /// A theme was chosen in the flyout. The argument is its index, as in `theme-choice`.
+    callback theme-chosen(int);
+    /// A unit was chosen in the flyout. The argument is its index, as in `unit-choice`.
+    callback unit-chosen(int);
+    /// The parts of the window that show. The host writes them from the settings.
+    in property <bool> show-header: true;
+    in property <bool> show-tree: true;
+    in property <bool> show-strip: true;
+    in property <bool> show-chips: true;
+    in property <bool> show-labels: true;
+    /// Height of the footer panel (the host's `footer_height`): 0 hides it.
+    in property <length> footer-height: 48px;
+    /// A part was shown (true) or hidden (false) in the flyout. The first argument is its index in
+    /// the host's `Part::ALL`: 0 header, 1 folder tree, 2 file type strip, 3 file type chips,
+    /// 4 tile labels.
+    callback part-toggled(int, bool);
+    /// A row of the folder tree has the keyboard focus.
+    out property <bool> tree-has-focus: tree-focus.has-focus;
+
     /// A drive button was used. The argument is the drive root, such as "C:\".
     callback scan-drive(string);
     callback choose-folder();
@@ -222,8 +254,9 @@ export component MainWindow inherits Window {
     callback theme-changed();
 
     // Widths of the number columns of the file tree, and the room kept free for its scroll bar
-    // (the Fluent scroll bar is 14 px, drawn over the list).
-    private property <length> size-column: 76px;
+    // (the Fluent scroll bar is 14 px, drawn over the list). The host sets the Size column for
+    // the unit, so a size in Byte, KB or MB is not cut.
+    in property <length> size-column: 76px;
     private property <length> percent-column: 60px;
     private property <length> files-column: 72px;
     private property <length> scrollbar-room: 16px;
@@ -231,6 +264,11 @@ export component MainWindow inherits Window {
     /// The move of the picture over the treemap starts now.
     public function start-zoom() {
         map.start-zoom();
+    }
+
+    /// Gives the map the keyboard focus.
+    public function focus-map() {
+        map.focus-map();
     }
 
     /// Scrolls the file tree so row `i` is inside the view.
@@ -242,363 +280,418 @@ export component MainWindow inherits Window {
         }
     }
 
-    if root.start-screen : StartScreen {
-        width: 100%;
-        height: 100%;
-        drives: root.drive-buttons;
-        loading: root.drives-loading;
-        admin-note: root.admin-note;
-        message: root.banner;
-        message-is-error: root.banner-is-error;
-        browsing: root.browsing;
-        restart-note: root.elevate-note;
-        scan-drive(drive) => { root.scan-drive(drive); }
-        choose-folder => { root.choose-folder(); }
-        restart-admin => { root.restart-admin(); }
-    }
-    // The results stay in the tree while the start screen shows, so the file tree keeps its scroll
-    // function; hidden, they take no input.
-    VerticalLayout {
-        visible: !root.start-screen;
-        width: 100%;
-        height: 100%;
-        padding: Glass.margin;
-        spacing: Glass.gap;
-        // Top bar: the buttons, then the scanned drive or folder and the scan summary. Always
-        // 52 px high, and the progress line under it is always 3 px, so the map keeps its size
-        // when a scan ends (a size change would lay the map out a second time).
-        HorizontalLayout {
-            height: 52px;
+    // Esc closes the flyout from anywhere: this scope sees each key before the focused element
+    // and takes only Esc while the flyout is open. It never takes the focus itself.
+    FocusScope {
+        focus-on-click: false;
+        focus-on-tab-navigation: false;
+        capture-key-pressed(event) => {
+            if (root.settings-open && event.text == Key.Escape) {
+                root.settings-open = false;
+                gear.take-focus();
+                return accept;
+            }
+            return reject;
+        }
+
+        if root.start-screen : StartScreen {
+            width: 100%;
+            height: 100%;
+            drives: root.drive-buttons;
+            settings-open: root.settings-open;
+            loading: root.drives-loading;
+            admin-note: root.admin-note;
+            message: root.banner;
+            message-is-error: root.banner-is-error;
+            browsing: root.browsing;
+            restart-note: root.elevate-note;
+            scan-drive(drive) => { root.scan-drive(drive); }
+            choose-folder => { root.choose-folder(); }
+            restart-admin => { root.restart-admin(); }
+        }
+        // The results stay in the tree while the start screen shows, so the file tree keeps its scroll
+        // function; hidden, they take no input.
+        VerticalLayout {
+            visible: !root.start-screen;
+            width: 100%;
+            height: 100%;
+            padding: Glass.margin;
             spacing: Glass.gap;
-            // The buttons keep their own height, centred in the bar.
-            VerticalLayout {
-                alignment: center;
-                HorizontalLayout {
-                    spacing: Glass.gap;
-                    if root.scanning : Button {
-                        text: "Cancel";
-                        clicked => { root.cancel(); }
+            // Top bar: the buttons, then the scanned drive or folder and the scan summary. Always
+            // 52 px high, and the progress line under it is always 3 px, so the map keeps its size
+            // when a scan ends (a size change would lay the map out a second time).
+            HorizontalLayout {
+                height: 52px;
+                spacing: Glass.gap;
+                // The buttons keep their own height, centred in the bar.
+                VerticalLayout {
+                    alignment: center;
+                    HorizontalLayout {
+                        spacing: Glass.gap;
+                        if root.scanning : Button {
+                            text: "Cancel";
+                            clicked => { root.cancel(); }
+                        }
+                        if root.show-new-scan : Button {
+                            text: "New scan";
+                            primary: true;
+                            clicked => { root.new-scan(); }
+                        }
+                        if root.show-elevate : Button {
+                            text: "Restart as administrator";
+                            enabled: !root.scanning;
+                            clicked => { root.restart-admin(); }
+                        }
+                        if root.outdated : Text {
+                            text: "Files changed after this scan.";
+                            vertical-alignment: center;
+                            color: Glass.dim;
+                            accessible-role: text;
+                        }
+                        if root.outdated : Button {
+                            text: "Rescan";
+                            clicked => { root.rescan(); }
+                        }
                     }
-                    if root.show-new-scan : Button {
-                        text: "New scan";
-                        primary: true;
-                        clicked => { root.new-scan(); }
+                }
+                // Takes the free width, so the buttons keep their own width.
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    alignment: center;
+                    padding-left: 4px;
+                    // "Header" hides only these two texts; the bar keeps its height and buttons.
+                    Text {
+                        visible: root.show-header;
+                        text: root.scan-title;
+                        font-weight: 600;
+                        overflow: elide;
+                        accessible-role: text;
                     }
-                    if root.show-elevate : Button {
-                        text: "Restart as administrator";
-                        enabled: !root.scanning;
-                        clicked => { root.restart-admin(); }
+                    // Two lines at most, so the timing line still shows in a narrow window.
+                    Text {
+                        visible: root.show-header;
+                        text: root.banner;
+                        font-size: 12px;
+                        max-height: 32px;
+                        wrap: word-wrap;
+                        overflow: elide;
+                        color: root.banner-is-error ? #d13438 : Glass.dim;
+                        accessible-role: text;
                     }
-                    if root.outdated : Text {
-                        text: "Files changed after this scan.";
+                }
+                // The gear sits over this room, so the summary text never goes under it.
+                Rectangle { width: 40px; }
+            }
+            Rectangle {
+                height: 3px;
+                if root.scanning : ProgressIndicator {
+                    width: 100%;
+                    height: 100%;
+                    indeterminate: true;
+                    accessible-label: "Scan progress";
+                }
+            }
+            if root.elevate-note != "" : Text {
+                text: root.elevate-note;
+                wrap: word-wrap;
+                color: #d13438;
+                accessible-role: text;
+            }
+
+            HorizontalLayout {
+                // No gap beside a hidden sidebar: the map takes its room.
+                spacing: root.show-tree ? Glass.gap : 0px;
+                // Sidebar: the file tree. Each pane has `preferred-width: 0px`, so the free space is
+                // shared 27 : 73 (a layout cannot take a width from the window width itself); the
+                // sidebar never goes under 340 px. Hidden, it stays in the tree with no width (not
+                // `if`), so the list keeps its scroll position.
+                GlassPanel {
+                    visible: root.show-tree;
+                    horizontal-stretch: root.show-tree ? 27 : 0;
+                    preferred-width: 0px;
+                    min-width: root.show-tree ? 340px : 0px;
+                    // A length has no "no limit" value, so shown it gets one that no screen reaches.
+                    max-width: root.show-tree ? 100000px : 0px;
+                    VerticalLayout {
+                        padding: 4px;
+                        // The right padding keeps the last header over its column: the rows leave
+                        // room for the scroll bar, which is drawn over the list.
+                        HorizontalLayout {
+                            padding-left: 2px;
+                            padding-right: 2px + root.scrollbar-room;
+                            HeaderCell {
+                                horizontal-stretch: 1;
+                                text: "Name";
+                                right-aligned: false;
+                                active: root.sort-key == 0;
+                                descending: root.sort-descending;
+                                clicked => { root.tree-sort(0); }
+                            }
+                            HeaderCell {
+                                width: root.size-column;
+                                text: "Size";
+                                active: root.sort-key == 1;
+                                descending: root.sort-descending;
+                                clicked => { root.tree-sort(1); }
+                            }
+                            HeaderCell {
+                                width: root.percent-column;
+                                text: "%";
+                                name: "percent of parent";
+                                active: root.sort-key == 2;
+                                descending: root.sort-descending;
+                                clicked => { root.tree-sort(2); }
+                            }
+                            HeaderCell {
+                                width: root.files-column;
+                                text: "Files";
+                                active: root.sort-key == 3;
+                                descending: root.sort-descending;
+                                clicked => { root.tree-sort(3); }
+                            }
+                        }
+                        tree-focus := FocusScope {
+                            vertical-stretch: 1;
+                            accessible-role: tree;
+                            accessible-label: "File tree";
+                            accessible-description: "Press the Menu key for the context menu.";
+                            accessible-value: root.selected-row >= 0 ? root.rows[root.selected-row].name : "";
+                            key-pressed(event) => {
+                                if (Keys.menu(event)) {
+                                    // The selected row, kept inside the list when it is scrolled away.
+                                    root.menu-key(list.absolute-position.x / 1px, (list.absolute-position.y + clamp(list.content-y + root.selected-row * 24px, 0px, max(0px, list.height - 24px))) / 1px, list.width / 1px, 24);
+                                    return accept;
+                                }
+                                if (Keys.name(event.text) == "") { return reject; }
+                                root.tree-key(Keys.name(event.text));
+                                return accept;
+                            }
+                            list := ListView {
+                                accessible-label: "Rows of the file tree";
+                                // Inside the focus ring, so the ring does not cover the last column.
+                                x: 2px;
+                                y: 2px;
+                                width: parent.width - 4px;
+                                height: parent.height - 4px;
+                                for row[i] in root.rows : Rectangle {
+                                    height: 24px;
+                                    border-radius: 4px;
+                                    accessible-role: list-item;
+                                    accessible-label: row.spoken;
+                                    accessible-item-selected: i == root.selected-row;
+                                    accessible-item-index: i;
+                                    background: i == root.selected-row ? Palette.selection-background : (row-touch.has-hover ? Palette.alternate-background : transparent);
+                                    row-touch := TouchArea {
+                                        clicked => { root.tree-select(i); tree-focus.focus(); }
+                                        // `clicked` does not fire for the right button.
+                                        pointer-event(event) => {
+                                            if (event.kind == PointerEventKind.up && event.button == PointerEventButton.right) {
+                                                tree-focus.focus();
+                                                root.tree-menu(i, (self.absolute-position.x + self.mouse-x) / 1px, (self.absolute-position.y + self.mouse-y) / 1px);
+                                            }
+                                        }
+                                    }
+                                    HorizontalLayout {
+                                        padding-right: root.scrollbar-room;
+                                        Rectangle {
+                                            horizontal-stretch: 1;
+                                            HorizontalLayout {
+                                                padding-left: 4px + row.depth * 16px;
+                                                spacing: 4px;
+                                                Rectangle {
+                                                    width: 16px;
+                                                    if row.has-children : Text {
+                                                        text: row.expanded ? "-" : "+";
+                                                        vertical-alignment: center;
+                                                        horizontal-alignment: center;
+                                                        accessible-role: button;
+                                                        accessible-label: row.expanded ? "Collapse \{row.name}" : "Expand \{row.name}";
+                                                    }
+                                                    if row.has-children : TouchArea {
+                                                        clicked => { root.tree-toggle(i); tree-focus.focus(); }
+                                                        // Above the row's TouchArea: a right-click here opens the row's menu too.
+                                                        pointer-event(event) => {
+                                                            if (event.kind == PointerEventKind.up && event.button == PointerEventButton.right) {
+                                                                tree-focus.focus();
+                                                                root.tree-menu(i, (self.absolute-position.x + self.mouse-x) / 1px, (self.absolute-position.y + self.mouse-y) / 1px);
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                Text {
+                                                    text: row.name;
+                                                    vertical-alignment: center;
+                                                    overflow: elide;
+                                                    accessible-role: none;
+                                                    color: i == root.selected-row ? Palette.selection-foreground : Palette.foreground;
+                                                }
+                                            }
+                                        }
+                                        NumberCell { width: root.size-column; text: row.size; text-color: i == root.selected-row ? Palette.selection-foreground : Palette.foreground; }
+                                        NumberCell { width: root.percent-column; text: row.percent; text-color: i == root.selected-row ? Palette.selection-foreground : Palette.foreground; }
+                                        NumberCell { width: root.files-column; text: row.files; text-color: i == root.selected-row ? Palette.selection-foreground : Palette.foreground; }
+                                    }
+                                }
+                            }
+                            Rectangle {
+                                border-radius: 4px;
+                                border-width: tree-focus.has-focus ? 2px : 0px;
+                                border-color: Palette.accent-background;
+                            }
+                        }
+                    }
+                }
+                // Main area: the crumbs, then the treemap.
+                GlassPanel {
+                    horizontal-stretch: 73;
+                    preferred-width: 0px;
+                    VerticalLayout {
+                        padding: 4px;
+                        spacing: 4px;
+                        CrumbBar {
+                            height: 28px;
+                            crumbs: root.crumbs;
+                            // The crumbs are rebuilt for the opened folder, so the focus goes to the
+                            // map, which shows that folder.
+                            open(i) => {
+                                root.crumb-open(i);
+                                map.focus-map();
+                            }
+                            menu(i, x, y) => { root.crumb-menu(i, x, y); }
+                            menu-key(i, x, y, w, h) => { root.crumb-menu-key(i, x, y, w, h); }
+                        }
+                        map := TreemapView {
+                            vertical-stretch: 1;
+                            source: root.treemap;
+                            note: root.map-note;
+                            value: root.map-value;
+                            // "Tile labels" hides the names on tiles and frames; hover and tooltips stay.
+                            labels: root.show-labels ? root.labels : [];
+                            file-labels: root.show-labels ? root.file-labels : [];
+                            layout-width: root.layout-width;
+                            layout-height: root.layout-height;
+                            has-selection: root.has-selection;
+                            selection-x: root.selection-x;
+                            selection-y: root.selection-y;
+                            selection-width: root.selection-width;
+                            selection-height: root.selection-height;
+                            hover: root.hover;
+                            glow: root.glow;
+                            tip-visible: root.tip-visible;
+                            tip-x: root.tip-x;
+                            tip-y: root.tip-y;
+                            zoom-image: root.zoom-image;
+                            zoom: root.zoom;
+                            zoom-shown: root.zoom-shown;
+                            zoom-running: root.zoom-running;
+                            zoom-duration: root.zoom-duration;
+                            hovered(x, y) => { root.treemap-hover(x, y); }
+                            left => { root.treemap-leave(); }
+                            hide-tip(scrolled) => { root.treemap-hide-tip(scrolled); }
+                            tip-position(pointer, size, extent, gap) => { return root.tip-position(pointer, size, extent, gap); }
+                            break-points(path) => { return root.tip-break-points(path); }
+                            zoom-frame(m, t) => { return root.zoom-frame(m, t); }
+                            place(p, kind, from-w, from-h, to-w, to-h) => { return root.place-label(p, kind, from-w, from-h, to-w, to-h); }
+                            clicked(x, y) => { root.treemap-click(x, y); }
+                            double-clicked(x, y) => { root.treemap-open(x, y); }
+                            menu(x, y, wx, wy) => { root.treemap-menu(x, y, wx, wy); }
+                            menu-key(x, y, w, h) => { root.menu-key(x, y, w, h); }
+                            key(k) => { root.map-key(k); }
+                            resized(w, h) => { root.treemap-resized(w, h); }
+                        }
+                    }
+                }
+            }
+
+            // File-type footer, the full width: a strip with one part per type and the chips under
+            // it, in the tile colours. Always there and always the same height, so the map keeps its
+            // size when a scan is shown or the chips arrive (a size change would lay the map out a
+            // second time). It changes size only when the strip and the chips are both hidden or
+            // shown (the host's `footer_height`); then it leaves the layout, with its gap.
+            if root.footer-height > 0 : GlassPanel {
+                height: root.footer-height;
+                VerticalLayout {
+                    // With one row hidden, the other stays in the middle of the panel.
+                    alignment: center;
+                    padding-left: 10px;
+                    padding-right: 10px;
+                    padding-top: 8px;
+                    padding-bottom: 8px;
+                    spacing: 6px;
+                    if root.types-counting || (root.type-chips.length == 0 && root.rows.length > 0) : Text {
+                        height: 32px;
+                        // The tree has rows only while a scan is shown; with no rows there is no text.
+                        text: root.types-counting ? "Counting file types." : "No file sizes to show.";
                         vertical-alignment: center;
                         color: Glass.dim;
                         accessible-role: text;
                     }
-                    if root.outdated : Button {
-                        text: "Rescan";
-                        clicked => { root.rescan(); }
-                    }
-                }
-            }
-            // Takes the free width, so the buttons keep their own width.
-            VerticalLayout {
-                horizontal-stretch: 1;
-                alignment: center;
-                padding-left: 4px;
-                Text {
-                    text: root.scan-title;
-                    font-weight: 600;
-                    overflow: elide;
-                    accessible-role: text;
-                }
-                // Two lines at most, so the timing line still shows in a narrow window.
-                Text {
-                    text: root.banner;
-                    font-size: 12px;
-                    max-height: 32px;
-                    wrap: word-wrap;
-                    overflow: elide;
-                    color: root.banner-is-error ? #d13438 : Glass.dim;
-                    accessible-role: text;
-                }
-            }
-        }
-        Rectangle {
-            height: 3px;
-            if root.scanning : ProgressIndicator {
-                width: 100%;
-                height: 100%;
-                indeterminate: true;
-                accessible-label: "Scan progress";
-            }
-        }
-        if root.elevate-note != "" : Text {
-            text: root.elevate-note;
-            wrap: word-wrap;
-            color: #d13438;
-            accessible-role: text;
-        }
-
-        HorizontalLayout {
-            spacing: Glass.gap;
-            // Sidebar: the file tree. Each pane has `preferred-width: 0px`, so the free space is
-            // shared 27 : 73 (a layout cannot take a width from the window width itself); the
-            // sidebar never goes under 340 px.
-            GlassPanel {
-                horizontal-stretch: 27;
-                preferred-width: 0px;
-                min-width: 340px;
-                VerticalLayout {
-                    padding: 4px;
-                    // The right padding keeps the last header over its column: the rows leave
-                    // room for the scroll bar, which is drawn over the list.
-                    HorizontalLayout {
-                        padding-left: 2px;
-                        padding-right: 2px + root.scrollbar-room;
-                        HeaderCell {
-                            horizontal-stretch: 1;
-                            text: "Name";
-                            right-aligned: false;
-                            active: root.sort-key == 0;
-                            descending: root.sort-descending;
-                            clicked => { root.tree-sort(0); }
-                        }
-                        HeaderCell {
-                            width: root.size-column;
-                            text: "Size";
-                            active: root.sort-key == 1;
-                            descending: root.sort-descending;
-                            clicked => { root.tree-sort(1); }
-                        }
-                        HeaderCell {
-                            width: root.percent-column;
-                            text: "%";
-                            name: "percent of parent";
-                            active: root.sort-key == 2;
-                            descending: root.sort-descending;
-                            clicked => { root.tree-sort(2); }
-                        }
-                        HeaderCell {
-                            width: root.files-column;
-                            text: "Files";
-                            active: root.sort-key == 3;
-                            descending: root.sort-descending;
-                            clicked => { root.tree-sort(3); }
-                        }
-                    }
-                    tree-focus := FocusScope {
-                        vertical-stretch: 1;
-                        accessible-role: tree;
-                        accessible-label: "File tree";
-                        accessible-description: "Press the Menu key for the context menu.";
-                        accessible-value: root.selected-row >= 0 ? root.rows[root.selected-row].name : "";
-                        key-pressed(event) => {
-                            if (Keys.menu(event)) {
-                                // The selected row, kept inside the list when it is scrolled away.
-                                root.menu-key(list.absolute-position.x / 1px, (list.absolute-position.y + clamp(list.content-y + root.selected-row * 24px, 0px, max(0px, list.height - 24px))) / 1px, list.width / 1px, 24);
-                                return accept;
-                            }
-                            if (Keys.name(event.text) == "") { return reject; }
-                            root.tree-key(Keys.name(event.text));
-                            return accept;
-                        }
-                        list := ListView {
-                            accessible-label: "Rows of the file tree";
-                            // Inside the focus ring, so the ring does not cover the last column.
-                            x: 2px;
-                            y: 2px;
-                            width: parent.width - 4px;
-                            height: parent.height - 4px;
-                            for row[i] in root.rows : Rectangle {
-                                height: 24px;
-                                border-radius: 4px;
-                                accessible-role: list-item;
-                                accessible-label: row.spoken;
-                                accessible-item-selected: i == root.selected-row;
-                                accessible-item-index: i;
-                                background: i == root.selected-row ? Palette.selection-background : (row-touch.has-hover ? Palette.alternate-background : transparent);
-                                row-touch := TouchArea {
-                                    clicked => { root.tree-select(i); tree-focus.focus(); }
-                                    // `clicked` does not fire for the right button.
-                                    pointer-event(event) => {
-                                        if (event.kind == PointerEventKind.up && event.button == PointerEventButton.right) {
-                                            tree-focus.focus();
-                                            root.tree-menu(i, (self.absolute-position.x + self.mouse-x) / 1px, (self.absolute-position.y + self.mouse-y) / 1px);
-                                        }
-                                    }
-                                }
-                                HorizontalLayout {
-                                    padding-right: root.scrollbar-room;
-                                    Rectangle {
-                                        horizontal-stretch: 1;
-                                        HorizontalLayout {
-                                            padding-left: 4px + row.depth * 16px;
-                                            spacing: 4px;
-                                            Rectangle {
-                                                width: 16px;
-                                                if row.has-children : Text {
-                                                    text: row.expanded ? "-" : "+";
-                                                    vertical-alignment: center;
-                                                    horizontal-alignment: center;
-                                                    accessible-role: button;
-                                                    accessible-label: row.expanded ? "Collapse \{row.name}" : "Expand \{row.name}";
-                                                }
-                                                if row.has-children : TouchArea {
-                                                    clicked => { root.tree-toggle(i); tree-focus.focus(); }
-                                                    // Above the row's TouchArea: a right-click here opens the row's menu too.
-                                                    pointer-event(event) => {
-                                                        if (event.kind == PointerEventKind.up && event.button == PointerEventButton.right) {
-                                                            tree-focus.focus();
-                                                            root.tree-menu(i, (self.absolute-position.x + self.mouse-x) / 1px, (self.absolute-position.y + self.mouse-y) / 1px);
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            Text {
-                                                text: row.name;
-                                                vertical-alignment: center;
-                                                overflow: elide;
-                                                accessible-role: none;
-                                                color: i == root.selected-row ? Palette.selection-foreground : Palette.foreground;
-                                            }
-                                        }
-                                    }
-                                    NumberCell { width: root.size-column; text: row.size; text-color: i == root.selected-row ? Palette.selection-foreground : Palette.foreground; }
-                                    NumberCell { width: root.percent-column; text: row.percent; text-color: i == root.selected-row ? Palette.selection-foreground : Palette.foreground; }
-                                    NumberCell { width: root.files-column; text: row.files; text-color: i == root.selected-row ? Palette.selection-foreground : Palette.foreground; }
-                                }
-                            }
-                        }
-                        Rectangle {
-                            border-radius: 4px;
-                            border-width: tree-focus.has-focus ? 2px : 0px;
-                            border-color: Palette.accent-background;
-                        }
-                    }
-                }
-            }
-            // Main area: the crumbs, then the treemap.
-            GlassPanel {
-                horizontal-stretch: 73;
-                preferred-width: 0px;
-                VerticalLayout {
-                    padding: 4px;
-                    spacing: 4px;
-                    CrumbBar {
-                        height: 28px;
-                        crumbs: root.crumbs;
-                        // The crumbs are rebuilt for the opened folder, so the focus goes to the
-                        // map, which shows that folder.
-                        open(i) => {
-                            root.crumb-open(i);
-                            map.focus-map();
-                        }
-                        menu(i, x, y) => { root.crumb-menu(i, x, y); }
-                        menu-key(i, x, y, w, h) => { root.crumb-menu-key(i, x, y, w, h); }
-                    }
-                    map := TreemapView {
-                        vertical-stretch: 1;
-                        source: root.treemap;
-                        note: root.map-note;
-                        value: root.map-value;
-                        labels: root.labels;
-                        file-labels: root.file-labels;
-                        layout-width: root.layout-width;
-                        layout-height: root.layout-height;
-                        has-selection: root.has-selection;
-                        selection-x: root.selection-x;
-                        selection-y: root.selection-y;
-                        selection-width: root.selection-width;
-                        selection-height: root.selection-height;
-                        hover: root.hover;
-                        glow: root.glow;
-                        tip-visible: root.tip-visible;
-                        tip-x: root.tip-x;
-                        tip-y: root.tip-y;
-                        zoom-image: root.zoom-image;
-                        zoom: root.zoom;
-                        zoom-shown: root.zoom-shown;
-                        zoom-running: root.zoom-running;
-                        zoom-duration: root.zoom-duration;
-                        hovered(x, y) => { root.treemap-hover(x, y); }
-                        left => { root.treemap-leave(); }
-                        hide-tip(scrolled) => { root.treemap-hide-tip(scrolled); }
-                        tip-position(pointer, size, extent, gap) => { return root.tip-position(pointer, size, extent, gap); }
-                        break-points(path) => { return root.tip-break-points(path); }
-                        zoom-frame(m, t) => { return root.zoom-frame(m, t); }
-                        place(p, kind, from-w, from-h, to-w, to-h) => { return root.place-label(p, kind, from-w, from-h, to-w, to-h); }
-                        clicked(x, y) => { root.treemap-click(x, y); }
-                        double-clicked(x, y) => { root.treemap-open(x, y); }
-                        menu(x, y, wx, wy) => { root.treemap-menu(x, y, wx, wy); }
-                        menu-key(x, y, w, h) => { root.menu-key(x, y, w, h); }
-                        key(k) => { root.map-key(k); }
-                        resized(w, h) => { root.treemap-resized(w, h); }
-                    }
-                }
-            }
-        }
-
-        // File-type footer, the full width: a strip with one part per type and the chips under
-        // it, in the tile colours. Always there and always the same height, so the map keeps its
-        // size when a scan is shown or the chips arrive (a size change would lay the map out a
-        // second time).
-        GlassPanel {
-            height: 48px;
-            VerticalLayout {
-                padding-left: 10px;
-                padding-right: 10px;
-                padding-top: 8px;
-                padding-bottom: 8px;
-                spacing: 6px;
-                if root.types-counting || (root.type-chips.length == 0 && root.rows.length > 0) : Text {
-                    height: 32px;
-                    // The tree has rows only while a scan is shown; with no rows there is no text.
-                    text: root.types-counting ? "Counting file types." : "No file sizes to show.";
-                    vertical-alignment: center;
-                    color: Glass.dim;
-                    accessible-role: text;
-                }
-                if !root.types-counting && root.type-chips.length > 0 : Rectangle {
-                    height: 10px;
-                    border-radius: 3px;
-                    clip: true;
-                    HorizontalLayout {
-                        spacing: 1px;
-                        for chip in root.type-chips : Rectangle {
-                            horizontal-stretch: chip.share;
-                            min-width: 0px;
-                            preferred-width: 0px;
-                            background: chip.color;
-                        }
-                    }
-                }
-                if !root.types-counting && root.type-chips.length > 0 : HorizontalLayout {
-                    height: 16px;
-                    spacing: 12px;
-                    alignment: start;
-                    for chip in root.type-chips : HorizontalLayout {
-                        spacing: 4px;
-                        VerticalLayout {
-                            alignment: center;
-                            Rectangle {
-                                width: 9px;
-                                height: 9px;
-                                border-radius: 2px;
+                    if root.show-strip && !root.types-counting && root.type-chips.length > 0 : Rectangle {
+                        height: 10px;
+                        border-radius: 3px;
+                        clip: true;
+                        HorizontalLayout {
+                            spacing: 1px;
+                            for chip in root.type-chips : Rectangle {
+                                horizontal-stretch: chip.share;
+                                min-width: 0px;
+                                preferred-width: 0px;
                                 background: chip.color;
                             }
                         }
-                        Text {
-                            text: chip.label + " " + chip.percent;
-                            vertical-alignment: center;
-                            overflow: elide;
-                            color: Palette.foreground.transparentize(20%);
-                            accessible-role: text;
-                            accessible-label: chip.spoken;
+                    }
+                    if root.show-chips && !root.types-counting && root.type-chips.length > 0 : HorizontalLayout {
+                        height: 16px;
+                        spacing: 12px;
+                        alignment: start;
+                        for chip in root.type-chips : HorizontalLayout {
+                            spacing: 4px;
+                            VerticalLayout {
+                                alignment: center;
+                                Rectangle {
+                                    width: 9px;
+                                    height: 9px;
+                                    border-radius: 2px;
+                                    background: chip.color;
+                                }
+                            }
+                            Text {
+                                text: chip.label + " " + chip.percent;
+                                vertical-alignment: center;
+                                overflow: elide;
+                                color: Palette.foreground.transparentize(20%);
+                                accessible-role: text;
+                                accessible-label: chip.spoken;
+                            }
                         }
                     }
                 }
             }
+        }
+
+        // The flyout, over the right edge under the top bar, and the gear, above both screens.
+        if root.settings-open : SettingsFlyout {
+            x: root.width - Glass.margin - self.width;
+            y: Glass.margin + 52px + Glass.gap;
+            theme-choice: root.theme-choice;
+            unit-choice: root.unit-choice;
+            error: root.settings-error;
+            shown: [root.show-header, root.show-tree, root.show-strip, root.show-chips, root.show-labels];
+            theme-chosen(i) => { root.theme-chosen(i); }
+            unit-chosen(i) => { root.unit-chosen(i); }
+            part-toggled(i, on) => { root.part-toggled(i, on); }
+            close => {
+                root.settings-open = false;
+                gear.take-focus();
+            }
+        }
+        // Centred in the 40 px room at the right end of the top bar. On the start screen it stays
+        // right of the scroll bar and of the centred drive list.
+        gear := SettingsButton {
+            x: root.width - Glass.margin - 36px;
+            y: Glass.margin + (52px - self.height) / 2;
+            open: root.settings-open;
+            clicked => { root.settings-open = !root.settings-open; }
         }
     }
 }

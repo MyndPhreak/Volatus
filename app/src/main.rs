@@ -19,12 +19,13 @@ mod model;
 mod motion;
 mod nav;
 mod shell;
+mod settings;
 mod tip;
 mod tree_view;
 
 use browse::BrowseState;
 use model::{
-    Event, ScanControl, ScanState, Summary, TimingRun, append_timing, banner_text, scan_error_message, with_options, format_size,
+    Event, ScanControl, ScanState, Summary, TimingRun, Unit, append_timing, banner_text, scan_error_message, with_options, format_size,
     group_digits, offer_for, shows_start, timing_for_state,
 };
 use nav::{Dir, TreeMove};
@@ -35,8 +36,9 @@ use slint::{
 };
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
+use settings::{Part, Settings, ThemeChoice};
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
@@ -86,6 +88,9 @@ struct RowModel {
     data: RefCell<std::sync::Weak<Data>>,
     rows: RefCell<Vec<Row>>,
     notify: ModelNotify,
+    /// The unit of the size column. Kept here, not read from the session: the list can ask for a
+    /// row while the session is borrowed.
+    unit: Cell<Unit>,
 }
 
 impl RowModel {
@@ -108,7 +113,7 @@ impl Model for RowModel {
         let tree = &data.tree;
         let node = tree.node(row.node);
         let parent_size = node.parent.map_or(node.size, |p| tree.node(p).size);
-        let (name, size) = (model::display_name(tree.name(row.node)), format_size(node.size));
+        let (name, size) = (model::display_name(tree.name(row.node)), format_size(node.size, self.unit.get()));
         let (percent, files) = (tree_view::format_percent(node.size, parent_size), data.counts[row.node.0 as usize]);
         Some(TreeRow {
             spoken: tree_view::row_spoken(&name, &size, &percent, files).into(),
@@ -197,6 +202,272 @@ struct Session {
     outdated: bool,
     /// The checks after a menu action that are still to come. At most one; a new menu or scan drops it.
     follow: Option<menu::Follow>,
+    /// The user's settings, as applied to the window.
+    settings: Settings,
+    /// Where the settings are saved. `None`: they are never saved (no `APPDATA`, or the file
+    /// could not be kept before a save would replace it, see `adopt_settings`).
+    settings_path: Option<PathBuf>,
+}
+
+/// The text the flyout shows when the settings are not saved.
+const SAVE_ERROR: &str = "Settings could not be saved.";
+
+/// A part of the window that shows a size, so it is synced again when the unit changes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Site {
+    /// The tree rows.
+    Rows,
+    /// The footer chips.
+    Types,
+    /// The treemap value of the selected node for a screen reader.
+    Selection,
+    /// The scan summary on the top bar or the start screen.
+    Banner,
+    /// The labels on the map and the hover tooltip (a new layout makes both again).
+    Map,
+    /// The drive cards of the start screen.
+    Drives,
+    /// The width of the Size column of the tree.
+    Column,
+}
+
+/// Every part that is synced again after a unit change (`resync_after_unit_change`).
+fn sites_after_unit_change() -> &'static [Site] {
+    &[Site::Rows, Site::Types, Site::Selection, Site::Banner, Site::Map, Site::Drives, Site::Column]
+}
+
+/// Puts the settings loaded from `path` into the session. A file that was not kept
+/// (`Loaded::NotKept`) is never saved over, and no path means nowhere to save: both give the
+/// text for `settings-error` at once. Else the text is "".
+fn adopt_settings(s: &mut Session, path: Option<PathBuf>, (settings, loaded): (Settings, settings::Loaded)) -> &'static str {
+    s.settings = settings;
+    s.settings_path = path.filter(|_| loaded != settings::Loaded::NotKept);
+    if s.settings_path.is_some() { "" } else { SAVE_ERROR }
+}
+
+/// Saves the session settings with `save`. Returns the text for `settings-error`: "" when saved,
+/// `SAVE_ERROR` when the save failed or the settings must not be saved. The settings stay as they
+/// are either way.
+fn persist_with(s: &mut Session, save: impl FnOnce(&Path, &Settings) -> std::io::Result<()>) -> &'static str {
+    let Some(path) = s.settings_path.as_deref() else {
+        return SAVE_ERROR;
+    };
+    match save(path, &s.settings) {
+        Ok(()) => "",
+        Err(e) => {
+            eprintln!("Settings could not be saved to {}: {e}", path.display());
+            SAVE_ERROR
+        }
+    }
+}
+
+/// The window is dark for `choice` when Windows is dark or not (`system_dark`).
+fn effective_dark(choice: ThemeChoice, system_dark: bool) -> bool {
+    choice.forced_dark().unwrap_or(system_dark)
+}
+
+/// The theme the winit window is set to for `choice`: `None` follows Windows.
+fn winit_theme_for(choice: ThemeChoice) -> Option<slint::winit_030::winit::window::Theme> {
+    use slint::winit_030::winit::window::Theme;
+    choice.forced_dark().map(|dark| if dark { Theme::Dark } else { Theme::Light })
+}
+
+/// The biggest folder the Size column is made for: 4 TiB.
+const SIZE_COLUMN_SAMPLE: u64 = 4 << 40;
+/// The Size column width for Dynamic, GB and TB, where every size fits (logical pixels).
+const SIZE_COLUMN_MIN: f32 = 76.0;
+
+/// The width of the Size column of the tree for `unit`, in logical pixels: room for the size of a
+/// 4 TiB folder in that unit (`estimated_text_width`), and never less than `SIZE_COLUMN_MIN`.
+fn size_column_width(unit: Unit) -> f32 {
+    // `NumberCell` keeps 6 px at its right; 2 px more is room for the estimate to be wrong.
+    let text = estimated_text_width(&format_size(SIZE_COLUMN_SAMPLE, unit)) + 8.0;
+    text.ceil().max(SIZE_COLUMN_MIN)
+}
+
+/// A high estimate of the width of a size text in the tree font, in logical pixels. Measured at
+/// 100%: a digit is about 6 px, and a space and "B" together about 11 px.
+fn estimated_text_width(text: &str) -> f32 {
+    text.chars()
+        .map(|c| match c {
+            '0'..='9' => 7.0,
+            ',' | '.' | ' ' => 3.5,
+            'M' => 9.0,
+            'G' => 8.0,
+            _ => 7.5,
+        })
+        .sum()
+}
+
+/// Where the keyboard focus is, as far as hiding a part cares.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Focus {
+    /// A row of the folder tree.
+    Tree,
+    /// The treemap.
+    Map,
+    /// Anything else: the flyout, the gear, a button.
+    Other,
+}
+
+/// Height of the footer panel, in logical pixels: 0 when the strip and the chips are both hidden.
+fn footer_height(strip: bool, chips: bool) -> f32 {
+    if strip || chips { 48.0 } else { 0.0 }
+}
+
+/// Where the focus goes when `part` is hidden while the focus is at `focus`. A hidden tree must not
+/// keep the focus: it goes to the map, so the arrow keys still move the selection.
+fn focus_after_hide(part: Part, focus: Focus) -> Focus {
+    match (part, focus) {
+        (Part::Tree, Focus::Tree) => Focus::Map,
+        _ => focus,
+    }
+}
+
+/// The values of the window's `show-header`, `show-tree`, `show-strip`, `show-chips` and
+/// `show-labels`, in `Part::ALL` order.
+fn show_flags(s: &Settings) -> [bool; 5] {
+    Part::ALL.map(|p| s.shown(p))
+}
+
+/// Shows or hides `part` in the session settings, then saves them with `save`. Returns the text
+/// for `settings-error`, as `persist_with` does.
+fn toggle_part_with(s: &mut Session, part: Part, on: bool, save: impl FnOnce(&Path, &Settings) -> std::io::Result<()>) -> &'static str {
+    s.settings.set_shown(part, on);
+    persist_with(s, save)
+}
+
+/// Writes the five `show-*` properties and the footer height from the session settings.
+fn apply_shown(ui: &MainWindow) {
+    let [header, tree, strip, chips, labels] = SESSION.with_borrow(|s| show_flags(&s.settings));
+    ui.set_show_header(header);
+    ui.set_show_tree(tree);
+    ui.set_show_strip(strip);
+    ui.set_show_chips(chips);
+    ui.set_show_labels(labels);
+    ui.set_footer_height(footer_height(strip, chips));
+}
+
+/// Saves the session settings and shows in the flyout whether that worked.
+fn persist(ui: &MainWindow) {
+    let error = SESSION.with_borrow_mut(|s| persist_with(s, settings::save));
+    ui.set_settings_error(error.into());
+}
+
+/// Pushes the session settings into the flyout. The theme itself is applied by `apply_theme`,
+/// which needs the window to exist.
+fn apply_settings(ui: &MainWindow) {
+    let s = SESSION.with_borrow(|s| s.settings.clone());
+    ui.set_theme_choice(s.theme.index());
+    ui.set_unit_choice(s.unit.index());
+    ui.set_size_column(size_column_width(s.unit));
+    apply_shown(ui);
+    // A forced scheme is written before the window shows, so the first frame has it. Follow
+    // Windows waits for `apply_theme`: the system theme is known once the window exists.
+    if let Some(dark) = s.theme.forced_dark() {
+        let scheme = if dark { slint::language::ColorScheme::Dark } else { slint::language::ColorScheme::Light };
+        ui.global::<Palette>().set_color_scheme(scheme);
+    }
+}
+
+/// Applies the theme setting: always writes `Palette.color-scheme` (a write cannot be undone, so
+/// Follow Windows writes the system theme too), sets the winit window theme (`winit_theme_for`),
+/// and Mica with the same dark mode, which also sets the title bar. An unknown system theme keeps
+/// the scheme the window has. The `dark` property then follows and `theme-changed` redraws the map
+/// and the chips.
+fn apply_theme(ui: &MainWindow) {
+    use slint::winit_030::{WinitWindowAccessor, winit::window::Theme as WinitTheme};
+    let choice = SESSION.with_borrow(|s| s.settings.theme);
+    // winit 0.30 keeps `theme()` as the system theme whatever `set_theme` is given: its
+    // `set_theme` only calls `try_theme` and does not change `current_theme`.
+    let system = ui
+        .window()
+        .with_winit_window(|w| {
+            w.set_theme(winit_theme_for(choice));
+            w.theme()
+        })
+        .flatten()
+        .map(|t| t == WinitTheme::Dark);
+    let dark = effective_dark(choice, system.unwrap_or_else(|| ui.get_dark()));
+    let scheme = if dark { slint::language::ColorScheme::Dark } else { slint::language::ColorScheme::Light };
+    ui.global::<Palette>().set_color_scheme(scheme);
+    if ui.get_mica()
+        && let Err(e) = window_vibrancy::apply_mica(ui.window().window_handle(), Some(dark))
+    {
+        eprintln!("Mica is not available: {e}");
+        ui.set_mica(false);
+    }
+}
+
+/// Syncs every part that shows a size (`sites_after_unit_change`) after the unit changed.
+fn resync_after_unit_change(ui: &MainWindow) {
+    for site in sites_after_unit_change() {
+        match site {
+            Site::Rows => sync_rows(ui),
+            Site::Types => sync_types(ui),
+            Site::Selection => sync_selection(ui),
+            Site::Banner => show_state(ui),
+            Site::Map => relayout(ui),
+            // The start screen lists the drives again each time it shows.
+            Site::Drives if ui.get_start_screen() => refresh_drives(ui),
+            Site::Drives => {}
+            Site::Column => ui.set_size_column(size_column_width(current_unit())),
+        }
+    }
+}
+
+/// Wires the flyout: each choice is applied at once and saved.
+fn wire_settings(ui: &MainWindow) {
+    ui.on_theme_chosen({
+        let weak = ui.as_weak();
+        move |i| {
+            let Some(ui) = weak.upgrade() else { return };
+            let choice = ThemeChoice::from_index(i);
+            SESSION.with_borrow_mut(|s| s.settings.theme = choice);
+            ui.set_theme_choice(choice.index());
+            apply_theme(&ui);
+            persist(&ui);
+        }
+    });
+    ui.on_unit_chosen({
+        let weak = ui.as_weak();
+        move |i| {
+            let Some(ui) = weak.upgrade() else { return };
+            let unit = Unit::from_index(i);
+            SESSION.with_borrow_mut(|s| s.settings.unit = unit);
+            ui.set_unit_choice(unit.index());
+            persist(&ui);
+            resync_after_unit_change(&ui);
+        }
+    });
+    // A part shown or hidden: the layout change reaches the map through `treemap-resized`.
+    ui.on_part_toggled({
+        let weak = ui.as_weak();
+        move |i, on| {
+            let Some(ui) = weak.upgrade() else { return };
+            let Some(part) = usize::try_from(i).ok().and_then(|i| Part::ALL.get(i).copied()) else { return };
+            let error = SESSION.with_borrow_mut(|s| toggle_part_with(s, part, on, settings::save));
+            ui.set_settings_error(error.into());
+            apply_shown(&ui);
+            let focus = if ui.get_tree_has_focus() { Focus::Tree } else { Focus::Other };
+            let next = if on { focus } else { focus_after_hide(part, focus) };
+            if next != focus && next == Focus::Map {
+                ui.invoke_focus_map();
+            }
+        }
+    });
+}
+
+/// Says in the log how the settings file was read, when it was not read cleanly.
+fn report_load(loaded: &settings::Loaded) {
+    match loaded {
+        settings::Loaded::Fresh | settings::Loaded::Ok => {}
+        settings::Loaded::Partial(fields) => {
+            eprintln!("Settings: these fields were wrong and use their defaults: {}. The file is kept as settings.json.bad.", fields.join(", "));
+        }
+        settings::Loaded::Damaged => eprintln!("Settings: the file could not be read. Defaults are used. The file is kept as settings.json.bad."),
+        settings::Loaded::NotKept => eprintln!("Settings: the file could not be read or kept. Defaults are used and no setting is saved."),
+    }
 }
 
 /// A finished layout of folder `root`: its rects in physical pixels, its picture and its labels.
@@ -247,6 +518,8 @@ thread_local! {
         launch_path: None,
         outdated: false,
         follow: None,
+        settings: Settings::default(),
+        settings_path: None,
     });
     /// Starts one relayout after the window stops changing the treemap size.
     static RESIZE_TIMER: Timer = Timer::default();
@@ -287,7 +560,7 @@ fn show_state(ui: &MainWindow) {
     let offer = SESSION.with_borrow(|s| offer_for(&state, s.resolved_root.as_deref(), elevate::is_admin()));
     let line = SESSION.with_borrow(|s| timing_for_state(&state, s.run.as_ref().and_then(TimingRun::line)));
     let (threads, notices) = SESSION.with_borrow(|s| (s.flags.threads, s.notices.clone()));
-    let banner = with_options(banner_text(&state, offer), &state, threads, &notices);
+    let banner = with_options(banner_text(&state, offer, current_unit()), &state, threads, &notices);
     ui.set_banner(append_timing(banner, line.as_deref()).into());
     ui.set_show_elevate(offer);
     ui.set_outdated(SESSION.with_borrow(|s| rescan_shown(&state, s.outdated)));
@@ -300,9 +573,11 @@ fn with_loaded<R>(f: impl FnOnce(&mut Loaded) -> R) -> Option<R> {
 
 /// Rebuilds the visible tree rows and the sort and selection markers.
 fn sync_rows(ui: &MainWindow) {
+    let unit = current_unit();
     let Some((selected, key, descending)) = with_loaded(|l| {
         let rows = tree_view::flatten(&l.data.tree, &l.data.counts, &l.view);
         let selected = l.selected.and_then(|n| tree_view::row_index(&rows, n));
+        l.model.unit.set(unit);
         l.model.set_rows(rows);
         (selected, l.view.key, l.view.descending)
     }) else {
@@ -318,7 +593,8 @@ fn sync_rows(ui: &MainWindow) {
 /// The treemap value for a screen reader names the selected node.
 fn sync_selection(ui: &MainWindow) {
     let scale = ui.window().scale_factor() as f64;
-    let value = with_loaded(|l| l.selected.map(|n| tree_view::map_value(&l.data.tree, n))).flatten();
+    let unit = current_unit();
+    let value = with_loaded(|l| l.selected.map(|n| tree_view::map_value(&l.data.tree, n, unit))).flatten();
     ui.set_map_value(value.unwrap_or_default().into());
     let bounds = with_loaded(|l| {
         let shown = tree_view::outline_node(&l.data.tree, &l.rects, l.selected?)?;
@@ -383,6 +659,7 @@ fn spawn_layout(ui: &MainWindow, LayoutJob { data, root, generation, seq, size: 
     let theme = if ui.get_dark() { Theme::Dark } else { Theme::Light };
     let (w, h) = ((lw * scale).round() as u32, (lh * scale).round() as u32);
     let weak = ui.as_weak();
+    let unit = current_unit();
     std::thread::spawn(move || {
         let chrome = Chrome::scaled(f64::from(scale));
         let rects = treemap::layout_framed(&data.tree, root, w, h, chrome);
@@ -390,7 +667,7 @@ fn spawn_layout(ui: &MainWindow, LayoutJob { data, root, generation, seq, size: 
             let px = treemap::render_framed(&data.tree, &rects, w, h, chrome, theme);
             SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(&px, w, h)
         });
-        let labels = map_labels(&data.tree, &rects, chrome, f64::from(scale), theme);
+        let labels = map_labels(&data.tree, &rects, chrome, f64::from(scale), theme, unit);
         // Err means the event loop has stopped: nothing left to update.
         let _ = slint::invoke_from_event_loop(move || {
             let current = SESSION.with_borrow(|s| (s.scan.generation(), s.layout_seq));
@@ -402,12 +679,12 @@ fn spawn_layout(ui: &MainWindow, LayoutJob { data, root, generation, seq, size: 
 }
 
 /// The labels of the frames in `rects` (physical pixels) for the window, in logical pixels.
-fn frame_labels(tree: &Tree, rects: &[Rect], chrome: Chrome, scale: f64) -> Vec<FrameLabel> {
+fn frame_labels(tree: &Tree, rects: &[Rect], chrome: Chrome, scale: f64, unit: Unit) -> Vec<FrameLabel> {
     let px = |v: f64| (v / scale) as f32;
     treemap::label_spots(tree, rects, chrome, LABEL_MIN_WIDTH * scale, LABEL_CAP)
         .iter()
         .map(|r| {
-            let (name, size) = tree_view::frame_label(tree, r.node);
+            let (name, size) = tree_view::frame_label(tree, r.node, unit);
             FrameLabel { x: px(r.x), y: px(r.y), width: px(r.w), height: px(r.h), name: name.into(), size: size.into() }
         })
         .collect()
@@ -415,13 +692,13 @@ fn frame_labels(tree: &Tree, rects: &[Rect], chrome: Chrome, scale: f64) -> Vec<
 
 /// The labels of the file tiles in `rects` (physical pixels) for the window, in logical pixels:
 /// at most `cap`, the largest tiles first, with the text colour of each tile in `theme`.
-fn file_labels(tree: &Tree, rects: &[Rect], scale: f64, theme: Theme, cap: usize) -> Vec<FileLabel> {
+fn file_labels(tree: &Tree, rects: &[Rect], scale: f64, theme: Theme, cap: usize, unit: Unit) -> Vec<FileLabel> {
     let px = |v: f64| (v / scale) as f32;
     let (min_w, min_h) = treemap::file_label_min(scale);
     treemap::file_label_spots(tree, rects, min_w, min_h, cap)
         .iter()
         .map(|r| {
-            let (name, size) = tree_view::file_label(tree, r.node);
+            let (name, size) = tree_view::file_label(tree, r.node, unit);
             let [red, green, blue] = treemap::filetype::ink(treemap::filetype::colour(treemap::filetype::category_of(&name), theme));
             FileLabel {
                 x: px(r.x),
@@ -439,9 +716,9 @@ fn file_labels(tree: &Tree, rects: &[Rect], scale: f64, theme: Theme, cap: usize
 
 /// All labels of the map under the one `LABEL_CAP`: the frames first, then the file tiles in the
 /// room the frames leave.
-fn map_labels(tree: &Tree, rects: &[Rect], chrome: Chrome, scale: f64, theme: Theme) -> (Vec<FrameLabel>, Vec<FileLabel>) {
-    let frames = frame_labels(tree, rects, chrome, scale);
-    let files = file_labels(tree, rects, scale, theme, LABEL_CAP.saturating_sub(frames.len()));
+fn map_labels(tree: &Tree, rects: &[Rect], chrome: Chrome, scale: f64, theme: Theme, unit: Unit) -> (Vec<FrameLabel>, Vec<FileLabel>) {
+    let frames = frame_labels(tree, rects, chrome, scale, unit);
+    let files = file_labels(tree, rects, scale, theme, LABEL_CAP.saturating_sub(frames.len()), unit);
     (frames, files)
 }
 
@@ -458,7 +735,7 @@ fn note_hover(node: Option<NodeId>) -> bool {
 /// What the window shows for hovered `node` in the shown `rects` (physical pixels), in logical
 /// pixels: a file tile lifts in its file-type colour in `theme` and keeps its label when the tile
 /// is big enough for one; a folder frame gets a highlight. Not visible when `node` is not drawn.
-fn hover_of(data: &Data, rects: &[Rect], node: NodeId, scale: f64, theme: Theme) -> Hover {
+fn hover_of(data: &Data, rects: &[Rect], node: NodeId, scale: f64, theme: Theme, unit: Unit) -> Hover {
     let Some((x, y, w, h)) = tree_view::selection_bounds(rects, node) else {
         return Hover::default();
     };
@@ -466,8 +743,8 @@ fn hover_of(data: &Data, rects: &[Rect], node: NodeId, scale: f64, theme: Theme)
     let px = |v: f64| (v / scale) as f32;
     let [red, green, blue] = treemap::filetype::colour(treemap::filetype::category_of(tree.name(node)), theme);
     // The same label rules as on the map, for the tile alone at its own origin (none for a folder).
-    let label = file_labels(tree, &[Rect { node, x: 0.0, y: 0.0, w, h }], scale, theme, 1).pop();
-    let (title, detail) = tree_view::tooltip_lines(tree, &data.counts, node);
+    let label = file_labels(tree, &[Rect { node, x: 0.0, y: 0.0, w, h }], scale, theme, 1, unit).pop();
+    let (title, detail) = tree_view::tooltip_lines(tree, &data.counts, node, unit);
     Hover {
         visible: true,
         x: px(x),
@@ -579,7 +856,8 @@ fn drop_hover(ui: &MainWindow) {
 fn show_hover(ui: &MainWindow, node: Option<NodeId>) -> bool {
     let scale = f64::from(ui.window().scale_factor());
     let theme = if ui.get_dark() { Theme::Dark } else { Theme::Light };
-    let hover = node.and_then(|n| with_loaded(|l| hover_of(&l.data, &l.rects, n, scale, theme))).unwrap_or_default();
+    let unit = current_unit();
+    let hover = node.and_then(|n| with_loaded(|l| hover_of(&l.data, &l.rects, n, scale, theme, unit))).unwrap_or_default();
     let shown = hover.visible;
     ui.set_hover(hover);
     shown
@@ -1103,8 +1381,12 @@ fn rescan(ui: &MainWindow) {
 /// Replaces the shown scan with a new one.
 fn install(ui: &MainWindow, data: Arc<Data>) {
     let root = data.tree.root();
-    let model =
-        Rc::new(RowModel { data: RefCell::new(Arc::downgrade(&data)), rows: RefCell::new(Vec::new()), notify: ModelNotify::default() });
+    let model = Rc::new(RowModel {
+        data: RefCell::new(Arc::downgrade(&data)),
+        rows: RefCell::new(Vec::new()),
+        notify: ModelNotify::default(),
+        unit: Cell::new(current_unit()),
+    });
     ui.set_rows(ModelRc::from(model.clone()));
     SESSION.with_borrow_mut(|s| {
         s.loaded = Some(Loaded {
@@ -1314,24 +1596,31 @@ fn chips_of(l: &Loaded) -> Option<Vec<footer::Chip>> {
 /// Pushes the footer chips into the window, in the tile colours of the current theme.
 fn sync_types(ui: &MainWindow) {
     let theme = if ui.get_dark() { Theme::Dark } else { Theme::Light };
+    let unit = current_unit();
     let (counting, chips) = with_loaded(|l| match chips_of(l) {
         None => (true, Vec::new()),
-        Some(chips) => (false, chips.iter().map(|c| type_chip(c, theme)).collect()),
+        Some(chips) => (false, chips.iter().map(|c| type_chip(c, theme, unit)).collect()),
     })
     .unwrap_or_default();
     ui.set_types_counting(counting);
     ui.set_type_chips(ModelRc::new(VecModel::from(chips)));
 }
 
+/// The unit every size in the window shows in: the session setting. Not to be called while the
+/// session is borrowed (the tree rows keep their own copy, `RowModel::unit`).
+fn current_unit() -> Unit {
+    SESSION.with_borrow(|s| s.settings.unit)
+}
+
 /// The window's form of chip `c`, in its tile colour in `theme`.
-fn type_chip(c: &footer::Chip, theme: Theme) -> TypeChip {
+fn type_chip(c: &footer::Chip, theme: Theme, unit: Unit) -> TypeChip {
     let [r, g, b] = treemap::filetype::colour(c.category, theme);
     TypeChip {
         label: c.label.as_str().into(),
         percent: c.percent.as_str().into(),
         share: c.share,
         color: slint::Color::from_rgb_u8(r, g, b),
-        spoken: footer::spoken(c).into(),
+        spoken: footer::spoken(c, unit).into(),
     }
 }
 
@@ -1453,11 +1742,12 @@ fn refresh_drives(ui: &MainWindow) {
         s.drives_seq
     });
     ui.set_drives_loading(true);
+    let unit = current_unit();
     let weak = ui.as_weak();
     std::thread::spawn(move || {
         let list = drives::list();
         let note = drives::admin_note(&list, elevate::is_admin());
-        let buttons = drives::drive_buttons(&list);
+        let buttons = drives::drive_buttons(&list, unit);
         // Err means the event loop has stopped: nothing left to update.
         let _ = slint::invoke_from_event_loop(move || {
             let Some(ui) = weak.upgrade() else { return };
@@ -1860,7 +2150,15 @@ fn main() {
     attach_parent_console();
     let args = cli::parse_args(std::env::args().skip(1));
     apply_args(&args);
+    // The settings are read before the first size is formatted (the banner, the drive cards).
+    let path = settings::settings_path();
+    let loaded = path.as_deref().map_or((Settings::default(), settings::Loaded::Fresh), settings::load);
+    report_load(&loaded.1);
+    let settings_error = SESSION.with_borrow_mut(|s| adopt_settings(s, path, loaded));
     let ui = MainWindow::new().expect("create window");
+    ui.set_settings_error(settings_error.into());
+    apply_settings(&ui);
+    wire_settings(&ui);
     // The renderer is chosen when the window is made (winit falls back to software when OpenGL
     // cannot start), so the answer is final here. The notifier counts the frames drawn and starts
     // the folder argument's scan after the first one.
@@ -1884,7 +2182,7 @@ fn main() {
     }
     // A folder to scan opens on the results screen: the start screen would show for one frame.
     if shows_start_at_launch(args.path.as_deref()) {
-        ui.set_banner(with_options(banner_text(&ScanState::Idle, false), &ScanState::Idle, None, &args.notices).into());
+        ui.set_banner(with_options(banner_text(&ScanState::Idle, false, current_unit()), &ScanState::Idle, None, &args.notices).into());
     } else {
         ui.set_start_screen(false);
     }
@@ -1934,13 +2232,24 @@ fn main() {
     let weak = ui.as_weak();
     slint::invoke_from_event_loop(move || {
         let Some(ui) = weak.upgrade() else { return };
-        let handle = ui.window().window_handle();
-        if let Err(e) = window_vibrancy::apply_mica(&handle, None) {
-            eprintln!("Mica is not available: {e}");
-            ui.set_mica(false);
-        }
+        apply_theme(&ui);
+        // A change of the Windows theme: winit has just set the title bar to the system theme, so
+        // the setting is applied again, after Slint has seen the event too.
+        use slint::winit_030::{EventResult, WinitWindowAccessor, winit::event::WindowEvent};
+        let weak = ui.as_weak();
+        ui.window().on_winit_window_event(move |_, event| {
+            if matches!(event, WindowEvent::ThemeChanged(_)) {
+                let weak = weak.clone();
+                Timer::single_shot(Duration::ZERO, move || {
+                    if let Some(ui) = weak.upgrade() {
+                        apply_theme(&ui);
+                    }
+                });
+            }
+            EventResult::Propagate
+        });
     })
-    .expect("queue Mica setup");
+    .expect("queue theme and Mica setup");
     // Started with a folder (also by "Restart as administrator"): scan it after the first frame,
     // so the window draws before the walker takes the CPUs. A window that never draws
     // (minimised, hidden) starts it after `LAUNCH_FALLBACK`.
@@ -1984,7 +2293,7 @@ fn restart_admin(path: &str, launch: impl FnOnce(&str, cli::Flags) -> Result<(),
 
 #[cfg(test)]
 mod tests {
-    use super::{
+    use super::{Unit,
         Data, FILE_LABEL_TWO_LINES, FileLabel, FrameLabel, Hover, LABEL_CAP, ZoomFrame, ZoomMove, frame_at,
         Loaded, RowModel, SESSION, file_labels, frame_labels, glow_drawn, hover_of, map_labels, note_hover, restart_admin,
         Move, picture_point, zoom_frame_at, take_launch_path, forget_scan, gate_hover, left_map,
@@ -2022,7 +2331,7 @@ mod tests {
         let tree = rollup(0, entries).unwrap().tree;
         let f = tree.children(tree.root()).next().unwrap();
         let rects = [Rect { node: f, x: 0.0, y: 0.0, w, h }];
-        frame_labels(&tree, &rects, Chrome::scaled(scale), scale).iter().map(|l| (l.x, l.y, l.width, l.height)).collect()
+        frame_labels(&tree, &rects, Chrome::scaled(scale), scale, Unit::Dynamic).iter().map(|l| (l.x, l.y, l.width, l.height)).collect()
     }
 
     /// 28 x 24 is the smallest frame with a band; its band is 24 px, the narrowest label.
@@ -2060,7 +2369,7 @@ mod tests {
     /// The file labels of one file "clip0.mp4" of 10 bytes drawn as the physical rect (x, y, w, h).
     fn file_labels_of_one_tile(x: f64, y: f64, w: f64, h: f64, scale: f64, theme: Theme) -> Vec<FileLabel> {
         let (tree, _, files) = flat(0, &[10]);
-        file_labels(&tree, &[Rect { node: files[0], x, y, w, h }], scale, theme, usize::MAX)
+        file_labels(&tree, &[Rect { node: files[0], x, y, w, h }], scale, theme, usize::MAX, Unit::Dynamic)
     }
 
     fn geometry(labels: &[FileLabel]) -> Vec<(f32, f32, f32, f32, bool)> {
@@ -2124,7 +2433,7 @@ mod tests {
     #[test]
     fn file_labels_folder_gets_none() {
         let (tree, dirs, _) = flat(1, &[]);
-        let labels = file_labels(&tree, &[Rect { node: dirs[0], x: 0.0, y: 0.0, w: 400.0, h: 300.0 }], 1.0, Theme::Dark, usize::MAX);
+        let labels = file_labels(&tree, &[Rect { node: dirs[0], x: 0.0, y: 0.0, w: 400.0, h: 300.0 }], 1.0, Theme::Dark, usize::MAX, Unit::Dynamic);
         assert!(labels.is_empty());
     }
 
@@ -2133,7 +2442,7 @@ mod tests {
         let (tree, dirs, fs) = flat(frames, &vec![10; files]);
         let mut rects: Vec<Rect> = dirs.iter().map(|&n| Rect { node: n, x: 0.0, y: 0.0, w: 100.0, h: 50.0 }).collect();
         rects.extend(fs.iter().enumerate().map(|(i, &n)| Rect { node: n, x: 0.0, y: 0.0, w: 50.0 + i as f64, h: 20.0 }));
-        map_labels(&tree, &rects, Chrome::scaled(1.0), 1.0, Theme::Dark)
+        map_labels(&tree, &rects, Chrome::scaled(1.0), 1.0, Theme::Dark, Unit::Dynamic)
     }
 
     #[test]
@@ -2185,7 +2494,12 @@ mod tests {
         let (tree, folder, file) = spoofed();
         let data = Arc::new(Data { counts: crate::tree_view::file_counts(&tree), tree });
         let row = |node| crate::tree_view::Row { node, depth: 0, expanded: false, has_children: false };
-        let model = RowModel { data: RefCell::new(Arc::downgrade(&data)), rows: RefCell::new(vec![row(folder), row(file)]), notify: ModelNotify::default() };
+        let model = RowModel {
+            data: RefCell::new(Arc::downgrade(&data)),
+            rows: RefCell::new(vec![row(folder), row(file)]),
+            notify: ModelNotify::default(),
+            unit: std::cell::Cell::new(Unit::Dynamic),
+        };
 
         let names: Vec<String> = (0..2).map(|i| slint::Model::row_data(&model, i).unwrap().name.to_string()).collect();
 
@@ -2197,7 +2511,7 @@ mod tests {
     fn frame_labels_name_shows_a_placeholder() {
         let (tree, folder, _) = spoofed();
         let rects = [Rect { node: folder, x: 0.0, y: 0.0, w: 200.0, h: 100.0 }];
-        let names: Vec<String> = frame_labels(&tree, &rects, Chrome::scaled(1.0), 1.0).iter().map(|l| l.name.to_string()).collect();
+        let names: Vec<String> = frame_labels(&tree, &rects, Chrome::scaled(1.0), 1.0, Unit::Dynamic).iter().map(|l| l.name.to_string()).collect();
         assert_eq!(names, ["d\u{FFFD}x\\"]);
     }
 
@@ -2205,7 +2519,7 @@ mod tests {
     fn file_labels_name_shows_a_placeholder() {
         let (tree, _, file) = spoofed();
         let rects = [Rect { node: file, x: 0.0, y: 0.0, w: 200.0, h: 100.0 }];
-        let names: Vec<String> = file_labels(&tree, &rects, 1.0, Theme::Dark, usize::MAX).iter().map(|l| l.name.to_string()).collect();
+        let names: Vec<String> = file_labels(&tree, &rects, 1.0, Theme::Dark, usize::MAX, Unit::Dynamic).iter().map(|l| l.name.to_string()).collect();
         assert_eq!(names, ["invoice\u{FFFD}fdp.exe"]);
     }
 
@@ -2213,7 +2527,7 @@ mod tests {
     fn hover_of_label_name_shows_a_placeholder() {
         let (tree, _, file) = spoofed();
         let data = Data { counts: crate::tree_view::file_counts(&tree), tree };
-        let hover = hover_of(&data, &[Rect { node: file, x: 0.0, y: 0.0, w: 200.0, h: 100.0 }], file, 1.0, Theme::Dark);
+        let hover = hover_of(&data, &[Rect { node: file, x: 0.0, y: 0.0, w: 200.0, h: 100.0 }], file, 1.0, Theme::Dark, Unit::Dynamic);
         assert_eq!(hover.label.name.as_str(), "invoice\u{FFFD}fdp.exe");
     }
 
@@ -2245,7 +2559,7 @@ mod tests {
         let (tree, dirs, files) = if folder { flat(1, &[]) } else { flat(0, &[10]) };
         let node = if folder { dirs[0] } else { files[0] };
         let data = Data { counts: crate::tree_view::file_counts(&tree), tree };
-        hover_of(&data, &[Rect { node, x, y, w, h }], node, scale, theme)
+        hover_of(&data, &[Rect { node, x, y, w, h }], node, scale, theme, Unit::Dynamic)
     }
 
     fn place(h: &Hover) -> (bool, f32, f32, f32, f32) {
@@ -2308,7 +2622,7 @@ mod tests {
     fn hover_of_node_not_drawn_is_not_visible() {
         let (tree, _, files) = flat(0, &[10]);
         let data = Data { counts: crate::tree_view::file_counts(&tree), tree };
-        assert!(!hover_of(&data, &[], files[0], 1.0, Theme::Dark).visible);
+        assert!(!hover_of(&data, &[], files[0], 1.0, Theme::Dark, Unit::Dynamic).visible);
     }
 
     // ---- moving picture ----
@@ -2554,7 +2868,12 @@ mod tests {
 
     fn loaded(data: &Arc<Data>) -> Loaded {
         let root = data.tree.root();
-        let model = Rc::new(RowModel { data: RefCell::new(Arc::downgrade(data)), rows: RefCell::new(Vec::new()), notify: ModelNotify::default() });
+        let model = Rc::new(RowModel {
+            data: RefCell::new(Arc::downgrade(data)),
+            rows: RefCell::new(Vec::new()),
+            notify: ModelNotify::default(),
+            unit: std::cell::Cell::new(Unit::Dynamic),
+        });
         Loaded {
             data: data.clone(),
             model,
@@ -3595,5 +3914,262 @@ mod tests {
         let got = [Cmd::ShowFolder, Cmd::Rescan].map(|cmd| run_cmd(cmd, true, true));
 
         assert_eq!(got, [(None, None), (None, None)]);
+    }
+
+    // ---- settings ----
+    use super::{
+        SAVE_ERROR, Settings, Site, ThemeChoice, adopt_settings, current_unit, effective_dark, persist_with,
+        sites_after_unit_change,
+    };
+    use crate::settings;
+    use std::cell::Cell;
+    use std::path::{Path, PathBuf};
+
+    fn path() -> PathBuf {
+        PathBuf::from("C:\\Users\\test\\AppData\\Roaming\\Volatus\\settings.json")
+    }
+
+    fn custom() -> Settings {
+        Settings { theme: ThemeChoice::Dark, unit: Unit::Gb, show_tree: false, ..Settings::default() }
+    }
+
+    #[test]
+    fn unit_change_resyncs_every_size_site() {
+        use Site::*;
+        assert_eq!(sites_after_unit_change(), &[Rows, Types, Selection, Banner, Map, Drives, Column]);
+    }
+
+    // ---- Size column ----
+    use super::{size_column_width, winit_theme_for};
+    use crate::model::format_size;
+
+    /// 4 TiB: the biggest folder the Size column is made for.
+    const FOUR_TB: u64 = 4 * 1024 * 1024 * 1024 * 1024;
+
+    #[test]
+    fn size_column_width_keeps_76_px_where_the_text_fits() {
+        for unit in [Unit::Dynamic, Unit::Gb, Unit::Tb] {
+            assert_eq!(size_column_width(unit), 76.0, "{unit:?}");
+        }
+    }
+
+    #[test]
+    fn size_column_width_fits_a_4_tb_folder_in_byte_kb_and_mb() {
+        let texts = [Unit::Byte, Unit::Kb, Unit::Mb].map(|u| format_size(FOUR_TB, u));
+        assert_eq!(texts, ["4,398,046,511,104 B", "4,294,967,296.0 KB", "4,194,304.0 MB"]);
+
+        let widths = [Unit::Byte, Unit::Kb, Unit::Mb].map(size_column_width);
+
+        // From the estimate: 7 px a digit, 3.5 px for ",", "." and the space, 7.5 to 9 px a
+        // letter, and 8 px for the cell padding (`NumberCell` keeps 6 px) and a little room.
+        assert_eq!(widths, [124.0, 118.0, 95.0]);
+    }
+
+    #[test]
+    fn size_column_width_leaves_room_for_the_name_in_the_narrowest_sidebar() {
+        // main.slint: the sidebar is at least 340 px; its padding (2 x 4 px), the list inset
+        // (4 px), the scroll bar room (16 px), the % column (60 px) and the Files column (72 px).
+        let fixed = 8.0 + 4.0 + 16.0 + 60.0 + 72.0;
+        for unit in Unit::ALL {
+            let name = 340.0 - fixed - size_column_width(unit);
+            assert!(name >= 40.0, "{unit:?}: {name} px for the name");
+        }
+    }
+
+    #[test]
+    fn winit_theme_for_forces_light_and_dark_and_follows_windows_with_none() {
+        use slint::winit_030::winit::window::Theme;
+        assert_eq!(ThemeChoice::ALL.map(winit_theme_for), [None, Some(Theme::Light), Some(Theme::Dark)]);
+    }
+
+    #[test]
+    fn session_before_loading_is_todays_behaviour() {
+        let (settings, kept) = SESSION.with_borrow(|s| (s.settings.clone(), s.settings_path.clone()));
+        assert_eq!((settings, kept, current_unit()), (Settings::default(), None, Unit::Dynamic));
+    }
+
+    #[test]
+    fn session_starts_with_the_loaded_settings() {
+        let error = SESSION.with_borrow_mut(|s| adopt_settings(s, Some(path()), (custom(), settings::Loaded::Ok)));
+
+        let (settings, kept) = SESSION.with_borrow(|s| (s.settings.clone(), s.settings_path.clone()));
+        assert_eq!((settings, kept, error, current_unit()), (custom(), Some(path()), "", Unit::Gb));
+    }
+
+    #[test]
+    fn a_failed_save_keeps_the_setting_and_reports_it() {
+        SESSION.with_borrow_mut(|s| {
+            adopt_settings(s, Some(path()), (Settings::default(), settings::Loaded::Fresh));
+            s.settings.unit = Unit::Mb;
+        });
+        let calls = Cell::new(0);
+
+        let error = SESSION.with_borrow_mut(|s| {
+            persist_with(s, |_, _| {
+                calls.set(calls.get() + 1);
+                Err(std::io::Error::other("disk full"))
+            })
+        });
+
+        assert_eq!((error, calls.get(), current_unit()), (SAVE_ERROR, 1, Unit::Mb));
+    }
+
+    #[test]
+    fn a_good_save_writes_the_session_settings_to_the_path() {
+        SESSION.with_borrow_mut(|s| adopt_settings(s, Some(path()), (custom(), settings::Loaded::Ok)));
+        let seen = RefCell::new(None);
+
+        let error = SESSION.with_borrow_mut(|s| {
+            persist_with(s, |p: &Path, set: &Settings| {
+                *seen.borrow_mut() = Some((p.to_path_buf(), set.clone()));
+                Ok(())
+            })
+        });
+
+        assert_eq!((error, seen.into_inner()), ("", Some((path(), custom()))));
+    }
+
+    #[test]
+    fn a_file_kept_as_bad_is_saved_over() {
+        let error = SESSION.with_borrow_mut(|s| adopt_settings(s, Some(path()), (Settings::default(), settings::Loaded::Damaged)));
+        let calls = Cell::new(0);
+
+        let saved = SESSION.with_borrow_mut(|s| {
+            persist_with(s, |_, _| {
+                calls.set(calls.get() + 1);
+                Ok(())
+            })
+        });
+
+        assert_eq!((error, saved, calls.get()), ("", "", 1));
+    }
+
+    /// Settings that must not be saved: every save is skipped and reported, and the change stays.
+    fn never_saved(path: Option<PathBuf>, loaded: settings::Loaded) {
+        let error = SESSION.with_borrow_mut(|s| adopt_settings(s, path, (Settings::default(), loaded)));
+        SESSION.with_borrow_mut(|s| s.settings.unit = Unit::Kb);
+        let calls = Cell::new(0);
+
+        let saves: Vec<&str> = (0..2)
+            .map(|_| {
+                SESSION.with_borrow_mut(|s| {
+                    persist_with(s, |_, _| {
+                        calls.set(calls.get() + 1);
+                        Ok(())
+                    })
+                })
+            })
+            .collect();
+
+        assert_eq!((error, saves, calls.get(), current_unit()), (SAVE_ERROR, vec![SAVE_ERROR, SAVE_ERROR], 0, Unit::Kb));
+    }
+
+    #[test]
+    fn a_file_that_was_not_kept_is_never_saved_over() {
+        never_saved(Some(path()), settings::Loaded::NotKept);
+    }
+
+    #[test]
+    fn settings_with_no_path_are_never_saved() {
+        never_saved(None, settings::Loaded::Fresh);
+    }
+
+    #[test]
+    fn effective_dark_light_and_dark_ignore_the_system_and_follow_windows_returns_it() {
+        for system in [false, true] {
+            let got = ThemeChoice::ALL.map(|c| effective_dark(c, system));
+            assert_eq!(got, [system, false, true], "system dark: {system}");
+        }
+    }
+
+    #[test]
+    fn row_model_row_size_uses_the_unit_of_the_model() {
+        let (tree, _, files) = flat(0, &[1_234_567]);
+        let data = Arc::new(Data { counts: crate::tree_view::file_counts(&tree), tree });
+        let row = crate::tree_view::Row { node: files[0], depth: 0, expanded: false, has_children: false };
+        let model = RowModel { data: RefCell::new(Arc::downgrade(&data)), rows: RefCell::new(vec![row]), notify: ModelNotify::default(), unit: Cell::new(Unit::Byte) };
+
+        let byte = slint::Model::row_data(&model, 0).unwrap();
+        model.unit.set(Unit::Kb);
+        let kb = slint::Model::row_data(&model, 0).unwrap();
+
+        assert_eq!((byte.size.as_str(), kb.size.as_str()), ("1,234,567 B", "1,205.6 KB"));
+        assert!(byte.spoken.contains("1,234,567 B"), "{}", byte.spoken);
+    }
+
+    // ---- show or hide the parts ----
+    use super::{Focus, footer_height, focus_after_hide, show_flags, toggle_part_with};
+    use crate::settings::Part;
+
+    #[test]
+    fn footer_height_is_zero_only_when_the_strip_and_the_chips_are_both_hidden() {
+        assert_eq!(footer_height(true, true), 48.0);
+        assert_eq!(footer_height(true, false), 48.0);
+        assert_eq!(footer_height(false, true), 48.0);
+        assert_eq!(footer_height(false, false), 0.0);
+    }
+
+    #[test]
+    fn focus_after_hide_moves_the_focus_from_a_hidden_tree_to_the_map() {
+        assert_eq!(focus_after_hide(Part::Tree, Focus::Tree), Focus::Map);
+        for focus in [Focus::Map, Focus::Other] {
+            assert_eq!(focus_after_hide(Part::Tree, focus), focus, "tree hidden, focus at {focus:?}");
+        }
+        for part in Part::ALL.into_iter().filter(|&p| p != Part::Tree) {
+            for focus in [Focus::Tree, Focus::Map, Focus::Other] {
+                assert_eq!(focus_after_hide(part, focus), focus, "{part:?} hidden, focus at {focus:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn show_flags_follow_settings() {
+        for bits in 0u8..32 {
+            let mut s = Settings::default();
+            let want: [bool; 5] = std::array::from_fn(|i| bits & (1 << i) != 0);
+            for (part, on) in Part::ALL.into_iter().zip(want) {
+                s.set_shown(part, on);
+            }
+            assert_eq!(show_flags(&s), want, "bits {bits:05b}");
+        }
+    }
+
+    #[test]
+    fn toggle_part_saves_once_and_never_after_not_kept() {
+        SESSION.with_borrow_mut(|s| adopt_settings(s, Some(path()), (Settings::default(), settings::Loaded::Fresh)));
+        let calls = Cell::new(0);
+        let saved = RefCell::new(None);
+
+        let error = SESSION.with_borrow_mut(|s| {
+            toggle_part_with(s, Part::Tree, false, |_, set: &Settings| {
+                calls.set(calls.get() + 1);
+                *saved.borrow_mut() = Some(set.clone());
+                Ok(())
+            })
+        });
+
+        let want = Settings { show_tree: false, ..Settings::default() };
+        let now = SESSION.with_borrow(|s| s.settings.clone());
+        assert_eq!((error, calls.get(), saved.into_inner(), now), ("", 1, Some(want.clone()), want));
+
+        // After a file that was not kept: the change still applies, and no save is ever made.
+        SESSION.with_borrow_mut(|s| adopt_settings(s, Some(path()), (Settings::default(), settings::Loaded::NotKept)));
+        let calls = Cell::new(0);
+        let errors: Vec<&str> = [(Part::Labels, false), (Part::Header, false)]
+            .into_iter()
+            .map(|(part, on)| {
+                SESSION.with_borrow_mut(|s| {
+                    toggle_part_with(s, part, on, |_, _| {
+                        calls.set(calls.get() + 1);
+                        Ok(())
+                    })
+                })
+            })
+            .collect();
+        let now = SESSION.with_borrow(|s| s.settings.clone());
+        assert_eq!(
+            (errors, calls.get(), now),
+            (vec![SAVE_ERROR, SAVE_ERROR], 0, Settings { show_labels: false, show_header: false, ..Settings::default() })
+        );
     }
 }

@@ -1,0 +1,253 @@
+import { Palette } from "std-widgets.slint";
+import { Glass, GlassPanel } from "theme.slint";
+
+/// The gear at the top-right of the window: opens and closes the settings flyout.
+export component SettingsButton inherits Rectangle {
+    /// The flyout is open.
+    in property <bool> open;
+    callback clicked();
+
+    /// Puts the keyboard focus on the gear.
+    public function take-focus() {
+        focus.focus();
+    }
+
+    width: 32px;
+    height: 32px;
+    border-radius: Glass.radius;
+    background: (touch.has-hover || focus.has-focus || root.open) ? Glass.fill-hover : Glass.fill;
+    border-width: focus.has-focus ? 2px : 1px;
+    border-color: focus.has-focus ? Palette.accent-background : Glass.border;
+    focus := FocusScope {
+        accessible-role: button;
+        accessible-label: "Settings";
+        accessible-action-default => { root.clicked(); }
+        key-pressed(event) => {
+            if (event.text == Key.Return || event.text == " " || (event.text == Key.Escape && root.open)) {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+        Text {
+            text: "⚙";
+            font-size: 18px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            accessible-role: none;
+        }
+        touch := TouchArea {
+            mouse-cursor: pointer;
+            clicked => {
+                focus.focus();
+                root.clicked();
+            }
+        }
+    }
+}
+
+/// One choice of a group: a round mark and its name. The chosen one has a filled mark.
+component Choice inherits Rectangle {
+    in property <string> text;
+    in property <bool> selected;
+    callback chosen();
+    // 24 px, not 28: with the "Show" group the flyout must fit a window of the 600 px minimum height.
+    height: 24px;
+    border-radius: 4px;
+    background: touch.has-hover ? Palette.alternate-background : transparent;
+    border-width: focus.has-focus ? 2px : 0px;
+    border-color: Palette.accent-background;
+    focus := FocusScope {
+        accessible-role: radio-button;
+        accessible-label: root.text;
+        accessible-checkable: true;
+        accessible-checked: root.selected;
+        accessible-action-default => { root.chosen(); }
+        key-pressed(event) => {
+            if (event.text == Key.Return || event.text == " ") {
+                root.chosen();
+                return accept;
+            }
+            return reject;
+        }
+        HorizontalLayout {
+            padding-left: 8px;
+            padding-right: 8px;
+            spacing: 8px;
+            VerticalLayout {
+                alignment: center;
+                Rectangle {
+                    width: 14px;
+                    height: 14px;
+                    border-radius: 7px;
+                    border-width: 1px;
+                    border-color: root.selected ? Palette.accent-background : Glass.dim;
+                    Rectangle {
+                        width: 8px;
+                        height: 8px;
+                        border-radius: 4px;
+                        background: Palette.accent-background;
+                        visible: root.selected;
+                    }
+                }
+            }
+            Text {
+                text: root.text;
+                vertical-alignment: center;
+                overflow: elide;
+                accessible-role: none;
+            }
+        }
+        touch := TouchArea {
+            clicked => {
+                focus.focus();
+                root.chosen();
+            }
+        }
+    }
+}
+
+/// One part of the window that shows or not: a switch and the part's name.
+component PartSwitch inherits Rectangle {
+    in property <string> text;
+    in property <bool> on;
+    /// The user changed the switch. The argument is the new value.
+    callback toggled(bool);
+    height: 24px;
+    border-radius: 4px;
+    background: touch.has-hover ? Palette.alternate-background : transparent;
+    border-width: focus.has-focus ? 2px : 0px;
+    border-color: Palette.accent-background;
+    focus := FocusScope {
+        accessible-role: switch;
+        accessible-label: root.text;
+        accessible-checkable: true;
+        accessible-checked: root.on;
+        accessible-action-default => { root.toggled(!root.on); }
+        key-pressed(event) => {
+            if (event.text == Key.Return || event.text == " ") {
+                root.toggled(!root.on);
+                return accept;
+            }
+            return reject;
+        }
+        HorizontalLayout {
+            padding-left: 8px;
+            padding-right: 8px;
+            spacing: 8px;
+            VerticalLayout {
+                alignment: center;
+                // The track, and the knob at its right end when the part shows.
+                Rectangle {
+                    width: 28px;
+                    height: 14px;
+                    border-radius: 7px;
+                    border-width: 1px;
+                    border-color: root.on ? Palette.accent-background : Glass.dim;
+                    background: root.on ? Palette.accent-background : transparent;
+                    Rectangle {
+                        x: root.on ? parent.width - self.width - 3px : 3px;
+                        width: 8px;
+                        height: 8px;
+                        border-radius: 4px;
+                        background: root.on ? Palette.accent-foreground : Glass.dim;
+                    }
+                }
+            }
+            Text {
+                text: root.text;
+                vertical-alignment: center;
+                overflow: elide;
+                accessible-role: none;
+            }
+        }
+        touch := TouchArea {
+            clicked => {
+                focus.focus();
+                root.toggled(!root.on);
+            }
+        }
+    }
+}
+
+/// The name of a group of choices.
+component GroupTitle inherits Text {
+    font-weight: 600;
+    accessible-role: text;
+}
+
+/// The settings flyout: the theme, the unit of sizes and the parts that show. It takes the keyboard focus when it
+/// opens; Esc closes it.
+export component SettingsFlyout inherits GlassPanel {
+    /// The chosen theme: 0 Follow Windows, 1 Light, 2 Dark (the host's `ThemeChoice` order).
+    in property <int> theme-choice;
+    /// The chosen unit: 0 Dynamic, 1 Byte, 2 KB, 3 MB, 4 GB, 5 TB (the host's `Unit` order).
+    in property <int> unit-choice;
+    /// Why the settings are not saved, or "".
+    in property <string> error;
+    /// Which parts show, in the host's `Part::ALL` order: header, folder tree, file type strip,
+    /// file type chips, tile labels.
+    in property <[bool]> shown;
+    callback theme-chosen(int);
+    callback unit-chosen(int);
+    /// Part `i` (an index in `shown`) was shown (true) or hidden (false).
+    callback part-toggled(int, bool);
+    callback close();
+
+    init => {
+        scope.focus();
+    }
+
+    width: 300px;
+    height: content.preferred-height;
+    // The map under the flyout must not show through the text.
+    background: Palette.background;
+    scope := FocusScope {
+        accessible-role: groupbox;
+        accessible-label: "Settings";
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.close();
+                return accept;
+            }
+            return reject;
+        }
+        content := VerticalLayout {
+            padding: 12px;
+            spacing: 2px;
+            Text {
+                text: "Settings";
+                font-size: 15px;
+                font-weight: 700;
+                accessible-role: text;
+            }
+            Rectangle { height: 6px; }
+            GroupTitle { text: "Theme"; }
+            for name[i] in ["Follow Windows", "Light", "Dark"] : Choice {
+                text: name;
+                selected: i == root.theme-choice;
+                chosen => { root.theme-chosen(i); }
+            }
+            Rectangle { height: 6px; }
+            GroupTitle { text: "Units"; }
+            for name[i] in ["Dynamic", "Byte", "KB", "MB", "GB", "TB"] : Choice {
+                text: name;
+                selected: i == root.unit-choice;
+                chosen => { root.unit-chosen(i); }
+            }
+            Rectangle { height: 6px; }
+            GroupTitle { text: "Show"; }
+            for name[i] in ["Header", "Folder tree", "File type strip", "File type chips", "Tile labels"] : PartSwitch {
+                text: name;
+                on: root.shown[i];
+                toggled(on) => { root.part-toggled(i, on); }
+            }
+            if root.error != "" : Text {
+                text: root.error;
+                wrap: word-wrap;
+                color: #d13438;
+                accessible-role: text;
+            }
+        }
+    }
+}

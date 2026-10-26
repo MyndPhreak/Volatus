@@ -1,6 +1,6 @@
 //! File-type footer: the chips for the biggest file types. Plain functions, no Slint types.
 
-use crate::model::{display_name, format_size};
+use crate::model::{Unit, display_name, format_size};
 use crate::tree_view::{format_percent, spoken_percent};
 use std::collections::HashMap;
 use treemap::filetype::{Category, TypeTotal, category_of_ext};
@@ -14,8 +14,8 @@ pub struct Chip {
     pub percent: String,
     /// Share of `total`, 0..=1: the width of the chip's part of the strip.
     pub share: f32,
-    /// Bytes of the type as `format_size` gives them: "12.3 GB".
-    pub size: String,
+    /// Bytes of the type. The window formats them with the unit of the settings.
+    pub bytes: u64,
     /// Gives the colour, the same as the tiles of this type.
     pub category: Category,
 }
@@ -36,7 +36,7 @@ pub fn chips(totals: &[TypeTotal], total: u64, max: usize) -> Vec<Chip> {
         label,
         percent: format_percent(bytes, total),
         share: (bytes as f64 / total as f64) as f32,
-        size: format_size(bytes),
+        bytes,
         category,
     };
     let mut top: Vec<&TypeTotal> = totals.iter().filter(|t| t.bytes > 0).collect();
@@ -74,8 +74,8 @@ pub fn subtract(totals: &[TypeTotal], gone: &[TypeTotal]) -> Vec<TypeTotal> {
 }
 
 /// What a screen reader says for chip `c`: ".dll, 10.5 percent, 12.3 GB".
-pub fn spoken(c: &Chip) -> String {
-    format!("{}, {}, {}", c.label, spoken_percent(&c.percent), c.size)
+pub fn spoken(c: &Chip, unit: Unit) -> String {
+    format!("{}, {}, {}", c.label, spoken_percent(&c.percent), format_size(c.bytes, unit))
 }
 
 #[cfg(test)]
@@ -201,7 +201,7 @@ mod tests {
 
         assert_eq!(
             chips,
-            vec![Chip { label: ".iso".into(), percent: "100.0%".into(), share: 1.0, size: "42 B".into(), category: Category::DiskImage }]
+            vec![Chip { label: ".iso".into(), percent: "100.0%".into(), share: 1.0, bytes: 42, category: Category::DiskImage }]
         );
     }
 
@@ -232,7 +232,7 @@ mod tests {
     fn chips_size_is_format_size_of_the_bytes_of_the_type() {
         let chips = chips(&[total("dll", 3 * 1024 * 1024), total("exe", 1024)], 3 * 1024 * 1024 + 1024, 8);
 
-        let sizes: Vec<&str> = chips.iter().map(|c| c.size.as_str()).collect();
+        let sizes: Vec<String> = chips.iter().map(|c| format_size(c.bytes, Unit::Dynamic)).collect();
 
         assert_eq!(sizes, vec!["3.0 MB", "1.0 KB"]);
     }
@@ -241,7 +241,7 @@ mod tests {
     fn chips_size_of_other_is_the_bytes_of_the_rest() {
         let chips = chips(&ten(), 550, 8);
 
-        assert_eq!(chips[8].size, "30 B");
+        assert_eq!(format_size(chips[8].bytes, Unit::Dynamic), "30 B");
     }
 
     fn counted(ext: &str, bytes: u64, files: u64) -> TypeTotal {
@@ -278,14 +278,22 @@ mod tests {
     fn spoken_chip_gives_label_percent_in_words_and_size() {
         let chips = chips(&[total("dll", 103), total("exe", 897)], 1000, 8);
 
-        assert_eq!(spoken(&chips[1]), ".dll, 10.3 percent, 103 B");
+        assert_eq!(spoken(&chips[1], Unit::Dynamic), ".dll, 10.3 percent, 103 B");
+    }
+
+    #[test]
+    fn chips_bytes_are_kept_and_formatted_by_the_window() {
+        let chips = chips(&[total("dll", 3 * 1024 * 1024), total("exe", 1024)], 3 * 1024 * 1024 + 1024, 8);
+
+        assert_eq!(chips.iter().map(|c| c.bytes).collect::<Vec<_>>(), vec![3 * 1024 * 1024, 1024]);
+        assert_eq!(spoken(&chips[0], Unit::Kb), ".dll, 100.0 percent, 3,072.0 KB");
     }
 
     #[test]
     fn spoken_other_and_no_extension_chips_use_their_labels() {
         let chips = chips(&[total("dll", 5), total("", 3), total("exe", 2)], 10, 2);
 
-        let said: Vec<String> = chips.iter().map(spoken).collect();
+        let said: Vec<String> = chips.iter().map(|c| spoken(c, Unit::Dynamic)).collect();
 
         assert_eq!(said, vec![".dll, 50.0 percent, 5 B", "No extension, 30.0 percent, 3 B", "Other, 20.0 percent, 2 B"]);
     }
