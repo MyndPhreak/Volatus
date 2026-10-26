@@ -23,6 +23,9 @@ use windows_sys::Win32::Storage::FileSystem::{
 /// Items removed between two progress calls: the bound on the progress rate.
 const PROGRESS_EVERY: usize = 256;
 
+/// The reparse-tag bit of a name surrogate (junction, symlink): the same test as the scan's.
+const NAME_SURROGATE: u32 = 0x2000_0000;
+
 /// The attributes `SetFileAttributesW` can set; the others in the find data are left out.
 const SETTABLE: u32 = FILE_ATTRIBUTE_ARCHIVE
     | FILE_ATTRIBUTE_HIDDEN
@@ -39,6 +42,7 @@ struct Entry {
     path: Vec<u16>,
     attrs: u32,
     size: u64,
+    link: bool,
 }
 
 /// A real folder (not a link) the walk found, `depth` below the target. `listed` is false when
@@ -61,9 +65,12 @@ impl Remover for Purge {
     /// The target must be a verbatim (`\\?\`) path, as `check_target` gives it; any other path is
     /// one skip and nothing is touched. A file or a link target is removed alone. A folder is
     /// walked once (links inside are entries, never walked into), its files and links are removed
-    /// in parallel, then its folders from the deepest up, the target last. `removed_items` counts
-    /// files, links and folders; `removed_bytes` is the find-data size of the files (a link frees
-    /// nothing). A folder that still holds a skipped item stays, with no extra skip.
+    /// in parallel, then its folders from the deepest up, the target last. A link is a
+    /// name-surrogate reparse point only; any other reparse folder (a cloud folder) is walked
+    /// and removed as a folder, any other reparse file as a file. `removed_items` counts files,
+    /// links and folders; `removed_bytes` is the find-data size of the files (a link frees
+    /// nothing). A folder that will not empty stays: it gets its own skip unless a skip already
+    /// recorded lies in it, so a target that stays always has a skip (or `stopped`).
     fn remove(&self, t: &DeleteTarget, progress: &dyn Fn(u64, u64), stop: &AtomicBool) -> Outcome {
         let mut out = Outcome::default();
         let root: Vec<u16> = t.path.as_os_str().encode_wide().collect();
@@ -80,8 +87,9 @@ impl Remover for Purge {
             }
         };
         let attrs = data.dwFileAttributes;
-        if attrs & FILE_ATTRIBUTE_DIRECTORY == 0 || attrs & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-            tally(&mut out, remove_entry(&Entry { path: root, attrs, size: file_size(&data) }));
+        let link = is_name_surrogate_link(attrs, data.dwReserved0);
+        if attrs & FILE_ATTRIBUTE_DIRECTORY == 0 || link {
+            tally(&mut out, remove_entry(&Entry { path: root, attrs, size: file_size(&data), link }));
             progress(out.removed_items, out.removed_bytes);
             return out;
         }
@@ -111,10 +119,16 @@ impl Remover for Purge {
                     out.stopped = true;
                     break;
                 }
-                match with_read_only_retry(&f.path, f.attrs, RemoveDirectoryW) {
+                match with_read_only_retry(&f.path, f.attrs, false, RemoveDirectoryW) {
                     Ok(()) => out.removed_items += 1,
-                    // It still holds a skipped item, which is listed already.
-                    Err(ERROR_DIR_NOT_EMPTY) => {}
+                    Err(ERROR_DIR_NOT_EMPTY) => {
+                        // A skipped item inside is listed already; anything else (a file added
+                        // during the run, a delete still pending) gets a skip for the folder.
+                        let s = skip(&f.path, ERROR_DIR_NOT_EMPTY);
+                        if needs_skip_for_folder(&s.path, &out.skipped) {
+                            out.skipped.push(s);
+                        }
+                    }
                     Err(code) => out.skipped.push(skip(&f.path, code)),
                 }
                 if (i + 1) % PROGRESS_EVERY == 0 {
@@ -129,13 +143,14 @@ impl Remover for Purge {
 
 /// True when a find-data entry is a link: a reparse point with a name-surrogate tag (junction,
 /// symlink), as the scan counts links. `tag` is the find data's `dwReserved0`.
-fn is_name_surrogate_link(attrs: u32, _tag: u32) -> bool {
-    attrs & FILE_ATTRIBUTE_REPARSE_POINT != 0
+fn is_name_surrogate_link(attrs: u32, tag: u32) -> bool {
+    attrs & FILE_ATTRIBUTE_REPARSE_POINT != 0 && tag & NAME_SURROGATE != 0
 }
 
-/// True when a folder that will not empty needs its own skip: no skip recorded so far lies in it.
-fn needs_skip_for_folder(_folder: &Path, _skips: &[Skipped]) -> bool {
-    false
+/// True when a folder that will not empty needs its own skip: no skip recorded so far lies in it
+/// (or is it). Compared by whole names, so `a` does not hold `ab\x`.
+fn needs_skip_for_folder(folder: &Path, skips: &[Skipped]) -> bool {
+    !skips.iter().any(|s| s.path.starts_with(folder))
 }
 
 /// Adds one item's result to the outcome.
@@ -153,10 +168,9 @@ fn tally(out: &mut Outcome, d: Done) {
 /// Removes a file (`DeleteFileW`) or a link itself: a folder link or junction with
 /// `RemoveDirectoryW`, a file link with `DeleteFileW`. Neither call follows the link.
 fn remove_entry(e: &Entry) -> Done {
-    let link = e.attrs & FILE_ATTRIBUTE_REPARSE_POINT != 0;
-    let op = if link && e.attrs & FILE_ATTRIBUTE_DIRECTORY != 0 { RemoveDirectoryW } else { DeleteFileW };
-    match with_read_only_retry(&e.path, e.attrs, op) {
-        Ok(()) => Done::Removed(if link { 0 } else { e.size }),
+    let op = if e.link && e.attrs & FILE_ATTRIBUTE_DIRECTORY != 0 { RemoveDirectoryW } else { DeleteFileW };
+    match with_read_only_retry(&e.path, e.attrs, e.link, op) {
+        Ok(()) => Done::Removed(if e.link { 0 } else { e.size }),
         Err(code) => Done::Skipped(skip(&e.path, code)),
     }
 }
@@ -165,14 +179,19 @@ fn remove_entry(e: &Entry) -> Done {
 /// `op` runs once more; if that fails too, the flag is put back. A link's attributes are never
 /// set, so nothing reaches its target. The error is the last delete's, never the restore's: the
 /// item is a skip either way.
-fn with_read_only_retry(path: &[u16], attrs: u32, op: unsafe extern "system" fn(*const u16) -> i32) -> Result<(), u32> {
+fn with_read_only_retry(
+    path: &[u16],
+    attrs: u32,
+    link: bool,
+    op: unsafe extern "system" fn(*const u16) -> i32,
+) -> Result<(), u32> {
     let z = nul(path);
     // SAFETY: `z` is NUL-terminated and lives across the call.
     if unsafe { op(z.as_ptr()) } != 0 {
         return Ok(());
     }
     let code = last_error();
-    if code != ERROR_ACCESS_DENIED || attrs & FILE_ATTRIBUTE_READONLY == 0 || attrs & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+    if code != ERROR_ACCESS_DENIED || attrs & FILE_ATTRIBUTE_READONLY == 0 || link {
         return Err(code);
     }
     let cleared = match attrs & SETTABLE {
@@ -208,10 +227,11 @@ fn walk(root: Vec<u16>, attrs: u32, stop: &AtomicBool, skipped: &mut Vec<Skipped
             path.push(u16::from(b'\\'));
             path.extend_from_slice(name_of(d));
             let a = d.dwFileAttributes;
-            if a & FILE_ATTRIBUTE_DIRECTORY != 0 && a & FILE_ATTRIBUTE_REPARSE_POINT == 0 {
+            let link = is_name_surrogate_link(a, d.dwReserved0);
+            if a & FILE_ATTRIBUTE_DIRECTORY != 0 && !link {
                 todo.push((path, a, depth + 1));
             } else {
-                files.push(Entry { path, attrs: a, size: file_size(d) });
+                files.push(Entry { path, attrs: a, size: file_size(d), link });
             }
         });
         if let Err(code) = listed {

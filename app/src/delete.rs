@@ -395,6 +395,10 @@ pub struct Outcome {
 
 /// A way to remove one checked target. `progress(items_removed, bytes_removed)` is called at a
 /// bounded rate; `stop` is checked between items, and what was removed before it stays removed.
+/// In the `Outcome`, `removed_items` counts the files, links and folders removed, the target
+/// included; `removed_bytes` is the logical size of the files removed (a link adds nothing; a
+/// hard link counts once for each name removed). Both come from the disk at delete time, so they
+/// can differ from the scan's totals that the dialog shows.
 pub trait Remover: Send + Sync {
     fn remove(&self, t: &DeleteTarget, progress: &dyn Fn(u64, u64), stop: &AtomicBool) -> Outcome;
 }
