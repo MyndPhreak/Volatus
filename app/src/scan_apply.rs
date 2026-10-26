@@ -207,6 +207,14 @@ pub(crate) fn handle_msg(s: &mut Session, msg: DeleteMsg) -> bool {
     }
 }
 
+/// The tree action of a finished dialog. Only called in `Done`.
+fn tree_action_of(s: &mut Session) -> &mut TreeAction {
+    match &mut s.delete.state {
+        DialogState::Done { tree_action, .. } => tree_action,
+        _ => unreachable!("handle_msg moved the dialog to Done"),
+    }
+}
+
 /// What one try of a pending removal did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PendingStep {
@@ -1102,5 +1110,100 @@ mod tests {
     #[test]
     fn is_link_of_a_plain_folder_is_false() {
         assert!(!delete_flow::is_link(&std::env::temp_dir()));
+    }
+
+    // ---- one pending removal at a time ----
+
+    /// Node `a` finished as gone while a worker holds the data: its removal waits. The dialog is
+    /// closed and `b.bin` selected. Returns the worker's clone.
+    fn a_pending() -> Arc<Data> {
+        let g = running();
+        let worker = SESSION.with_borrow(|s| s.loaded.as_ref().unwrap().data.clone());
+        assert!(finished(g, true, removed()));
+        assert_eq!(SESSION.with_borrow_mut(|s| step_pending(s, false)), PendingStep::Busy);
+        close_delete();
+        select_node("b.bin");
+        worker
+    }
+
+    fn select_node(name: &str) {
+        SESSION.with_borrow_mut(|s| {
+            let l = s.loaded.as_mut().unwrap();
+            l.selected = Some(find(&l.data.tree, name));
+        });
+    }
+
+    fn pending_node() -> Option<NodeId> {
+        SESSION.with_borrow(|s| s.delete.pending.map(|p| p.node))
+    }
+
+    fn node(name: &str) -> NodeId {
+        SESSION.with_borrow(|s| find(&s.loaded.as_ref().unwrap().data.tree, name))
+    }
+
+    #[test]
+    fn open_while_a_removal_waits_is_refused() {
+        let _worker = a_pending();
+        let a = node("a");
+        assert!(!open(false));
+        assert_eq!(state(), DialogState::Refused { text: delete_flow::BUSY_TEXT.into() });
+        assert_eq!(pending_node(), Some(a));
+        assert_eq!(root_size(), 160);
+    }
+
+    #[test]
+    fn confirm_while_a_removal_waits_is_refused() {
+        show(data(), "b.bin");
+        open(false);
+        let a = node("a");
+        let origin = now();
+        SESSION.with_borrow_mut(|s| {
+            s.delete.pending = Some(Pending { origin, node: a, tries_left: APPLY_TRIES, from_missing: false });
+        });
+        assert_eq!(confirm(), None);
+        assert!(!has_job());
+        assert_eq!(state(), DialogState::Refused { text: delete_flow::BUSY_TEXT.into() });
+        assert_eq!(pending_node(), Some(a));
+    }
+
+    #[test]
+    fn a_gone_descendant_of_a_waiting_removal_cannot_be_opened() {
+        let _worker = a_pending();
+        let a = node("a");
+        select_node("x.bin");
+        assert!(!open_missing(true));
+        assert_eq!(state(), DialogState::Refused { text: delete_flow::BUSY_TEXT.into() });
+        assert_eq!(SESSION.with_borrow(|s| s.delete.pending.map(|p| (p.node, p.from_missing))), Some((a, false)));
+    }
+
+    #[test]
+    fn after_the_waiting_removal_applies_a_delete_opens_again() {
+        let worker = a_pending();
+        assert!(!open(false));
+        close_delete();
+        drop(worker);
+        assert_eq!(SESSION.with_borrow_mut(|s| step_pending(s, false)), PendingStep::Applied);
+        assert_eq!(root_size(), 10);
+        assert!(!open(false));
+        assert!(matches!(state(), DialogState::Confirm { .. }), "{:?}", state());
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "a second removal while one waits")]
+    fn a_second_finished_removal_never_replaces_the_waiting_one() {
+        let _worker = a_pending();
+        // Only a broken guard could start a job now; make one by hand.
+        let (origin, b) = (now(), node("b.bin"));
+        SESSION.with_borrow_mut(|s| {
+            s.delete.job = Some(Job { origin, node: b, stop: Arc::new(AtomicBool::new(false)) });
+            s.delete.state = DialogState::Running {
+                mode: DeleteMode::Permanent,
+                target: delete_flow::target_info(&s.loaded.as_ref().unwrap().data.tree, &s.loaded.as_ref().unwrap().data.counts, b, PathBuf::from(r"\\?\C:\data\b.bin"), false),
+                progress: Default::default(),
+                stopping: false,
+            };
+        });
+        finished(origin.generation, true, removed());
     }
 }

@@ -288,6 +288,8 @@ pub const GONE_PENDING: &str = "This item is already gone. Volatus removes it fr
 pub const GONE_REMOVED: &str = "This item is already gone. Volatus removed it from the list.";
 /// The refusal text for an item gone from the disk that could not leave the list.
 pub const GONE_KEPT: &str = "This item is already gone. Scan again to update the list.";
+/// The refusal text while an earlier removal still waits to leave the list.
+pub const BUSY_TEXT: &str = "Volatus is still updating the list. Try again in a moment.";
 
 /// The check just before the delete: `Ok` only when it gives the same resolved path as the check
 /// at Open (`opened`). Else the text for the dialog: the refusal's, or `CHANGED_TEXT`.
