@@ -831,6 +831,52 @@ mod tests {
     }
 
     #[test]
+    fn after_pick_a_file_replaced_by_a_folder_since_the_menu_is_not_run() {
+        let follow = Follow::new(NodeId(1), 0, PathBuf::from("C:\\x"), true, Disk::File(5));
+        let ran = std::cell::Cell::new(false);
+
+        let _ = after_pick(follow, |_| Disk::Dir, || {
+            ran.set(true);
+            0
+        });
+
+        assert!(!ran.get(), "the verb ran on an item of another kind");
+    }
+
+    #[test]
+    fn after_pick_runs_the_item_only_when_its_kind_is_unchanged_and_always_follows_it() {
+        let befores = [Disk::Dir, Disk::File(5)];
+        let nows = [Disk::Gone, Disk::Dir, Disk::File(5), Disk::File(9), Disk::Unreadable];
+        let mut got = Vec::new();
+
+        for before in &befores {
+            for now in &nows {
+                let ran = std::cell::Cell::new(false);
+                let follow = Follow::new(NodeId(1), 0, PathBuf::from("C:\\x"), false, before.clone());
+                let followed = after_pick(follow, |_| now.clone(), || {
+                    ran.set(true);
+                    0
+                });
+                got.push((before.clone(), now.clone(), ran.get(), followed.is_some()));
+            }
+        }
+
+        let want = vec![
+            (Disk::Dir, Disk::Gone, false, true),
+            (Disk::Dir, Disk::Dir, true, true),
+            (Disk::Dir, Disk::File(5), false, true),
+            (Disk::Dir, Disk::File(9), false, true),
+            (Disk::Dir, Disk::Unreadable, false, true),
+            (Disk::File(5), Disk::Gone, false, true),
+            (Disk::File(5), Disk::Dir, false, true),
+            (Disk::File(5), Disk::File(5), true, true),
+            (Disk::File(5), Disk::File(9), true, true),
+            (Disk::File(5), Disk::Unreadable, false, true),
+        ];
+        assert_eq!(got, want);
+    }
+
+    #[test]
     fn after_pick_runs_the_item_and_follows_it() {
         let (got, ran) = pick(true, Disk::File(5), 0);
 
