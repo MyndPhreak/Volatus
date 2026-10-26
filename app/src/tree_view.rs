@@ -235,14 +235,14 @@ pub fn map_note(tree: &Tree, root: NodeId, rects: &[Rect], has_area: bool) -> &'
 
 /// The label of folder `node` on its frame: (name with a trailing `\`, size), as
 /// `("Local\\", "306.0 GB")`.
-pub fn frame_label(tree: &Tree, node: NodeId, _unit: Unit) -> (String, String) {
-    (format!("{}\\", display_name(tree.name(node))), crate::model::format_size(tree.node(node).size, Unit::Dynamic))
+pub fn frame_label(tree: &Tree, node: NodeId, unit: Unit) -> (String, String) {
+    (format!("{}\\", display_name(tree.name(node))), crate::model::format_size(tree.node(node).size, unit))
 }
 
 /// The label of file `node` on its tile: (name, size), as `("pagefile.sys", "64.0 GB")`. The
 /// name is kept unchanged; the window cuts it with "…" when it does not fit.
-pub fn file_label(tree: &Tree, node: NodeId, _unit: Unit) -> (String, String) {
-    (display_name(tree.name(node)).into_owned(), crate::model::format_size(tree.node(node).size, Unit::Dynamic))
+pub fn file_label(tree: &Tree, node: NodeId, unit: Unit) -> (String, String) {
+    (display_name(tree.name(node)).into_owned(), crate::model::format_size(tree.node(node).size, unit))
 }
 
 /// Text of the crumb that stands for the folders `crumbs` leaves out.
@@ -279,7 +279,7 @@ pub fn crumbs(tree: &Tree, view_root: NodeId) -> Vec<(Option<NodeId>, String)> {
 /// file) or the number of files under it (a folder), as `("C:\\Windows\\a.dll", "12.0 MB. DLL
 /// file.")` or `("C:\\Users", "306.0 GB. 1,234 files.")`. Every name of the path goes through
 /// `display_name`; the file type comes from the stored name, so a hidden character cannot change it.
-pub fn tooltip_lines(tree: &Tree, counts: &[u64], node: NodeId, _unit: Unit) -> (String, String) {
+pub fn tooltip_lines(tree: &Tree, counts: &[u64], node: NodeId, unit: Unit) -> (String, String) {
     let n = tree.node(node);
     let what = if n.is_dir {
         let files = counts[node.0 as usize];
@@ -291,7 +291,7 @@ pub fn tooltip_lines(tree: &Tree, counts: &[u64], node: NodeId, _unit: Unit) -> 
         }
     };
     let path = display_name(&tree.path(node).to_string_lossy()).into_owned();
-    (path, format!("{}. {what}", crate::model::format_size(n.size, Unit::Dynamic)))
+    (path, format!("{}. {what}", crate::model::format_size(n.size, unit)))
 }
 
 /// Where a tooltip `size` long starts on one axis of a map `extent` long, for the pointer at
@@ -325,8 +325,8 @@ pub fn row_spoken(name: &str, size: &str, percent: &str, files: u64) -> String {
 
 /// The value of the treemap for a screen reader: the name and size of `node`, the selected node,
 /// as `"kernel32.dll, 12.0 MB"`. The name goes through `display_name`.
-pub fn map_value(tree: &Tree, node: NodeId, _unit: Unit) -> String {
-    format!("{}, {}", display_name(tree.name(node)), crate::model::format_size(tree.node(node).size, Unit::Dynamic))
+pub fn map_value(tree: &Tree, node: NodeId, unit: Unit) -> String {
+    format!("{}, {}", display_name(tree.name(node)), crate::model::format_size(tree.node(node).size, unit))
 }
 
 /// Order of two siblings: the chosen column, flipped if descending, then name, then id.

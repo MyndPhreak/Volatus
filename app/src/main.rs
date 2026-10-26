@@ -109,7 +109,7 @@ impl Model for RowModel {
         let tree = &data.tree;
         let node = tree.node(row.node);
         let parent_size = node.parent.map_or(node.size, |p| tree.node(p).size);
-        let (name, size) = (model::display_name(tree.name(row.node)), format_size(node.size, model::Unit::Dynamic));
+        let (name, size) = (model::display_name(tree.name(row.node)), format_size(node.size, current_unit()));
         let (percent, files) = (tree_view::format_percent(node.size, parent_size), data.counts[row.node.0 as usize]);
         Some(TreeRow {
             spoken: tree_view::row_spoken(&name, &size, &percent, files).into(),

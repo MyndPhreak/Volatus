@@ -165,8 +165,6 @@ pub fn shows_start(state: &ScanState) -> bool {
 }
 
 /// How the window shows a size: `Dynamic` picks the unit per value, the others fix it.
-// Unused until the settings task routes the chosen unit through the window; Task 3 removes the allow.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Unit {
     #[default]
@@ -178,16 +176,19 @@ pub enum Unit {
     Tb,
 }
 
-#[allow(dead_code)]
 impl Unit {
     pub const ALL: [Unit; 6] = [Unit::Dynamic, Unit::Byte, Unit::Kb, Unit::Mb, Unit::Gb, Unit::Tb];
 
     /// The unit at position `i` in `ALL`; an unknown index is `Dynamic`.
+    // Used by the settings dialog in Task 4; no caller before that.
+    #[allow(dead_code)]
     pub fn from_index(i: i32) -> Unit {
         usize::try_from(i).ok().and_then(|i| Unit::ALL.get(i).copied()).unwrap_or_default()
     }
 
     /// The position of this unit in `ALL`.
+    // Used by the settings dialog in Task 4; no caller before that.
+    #[allow(dead_code)]
     pub fn index(self) -> i32 {
         Unit::ALL.iter().position(|&u| u == self).unwrap_or(0) as i32
     }
@@ -421,7 +422,7 @@ pub fn offer_for(state: &ScanState, root: Option<&Path>, is_admin: bool) -> bool
 
 /// Text for the status banner in each state. Never empty. `offer_elevation` is the result of
 /// [`offer_elevation`] for the finished scan: the restart hint shows only when the button does.
-pub fn banner_text(state: &ScanState, offer_elevation: bool, _unit: Unit) -> String {
+pub fn banner_text(state: &ScanState, offer_elevation: bool, unit: Unit) -> String {
     match state {
         ScanState::Idle => "Select a drive or a folder to scan.".into(),
         ScanState::Scanning { files, dirs } => {
@@ -435,7 +436,7 @@ pub fn banner_text(state: &ScanState, offer_elevation: bool, _unit: Unit) -> Str
             let hint = if offer_elevation && s.method == Method::Walk { " Restart as administrator to scan a whole drive faster." } else { "" };
             format!(
                 "{name}. {} in {} files and {} folders. {} skipped. {}.{hint}",
-                format_size(s.total, Unit::Dynamic),
+                format_size(s.total, unit),
                 group_digits(s.files),
                 group_digits(s.dirs),
                 group_digits(s.skipped),

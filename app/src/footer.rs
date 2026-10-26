@@ -74,8 +74,8 @@ pub fn subtract(totals: &[TypeTotal], gone: &[TypeTotal]) -> Vec<TypeTotal> {
 }
 
 /// What a screen reader says for chip `c`: ".dll, 10.5 percent, 12.3 GB".
-pub fn spoken(c: &Chip, _unit: Unit) -> String {
-    format!("{}, {}, {}", c.label, spoken_percent(&c.percent), format_size(c.bytes, Unit::Dynamic))
+pub fn spoken(c: &Chip, unit: Unit) -> String {
+    format!("{}, {}, {}", c.label, spoken_percent(&c.percent), format_size(c.bytes, unit))
 }
 
 #[cfg(test)]

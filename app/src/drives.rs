@@ -196,7 +196,7 @@ impl DriveApi for Win32Drives {
 }
 
 /// The buttons for `drives`, sorted by letter.
-pub fn drive_buttons(drives: &[DriveInfo], _unit: Unit) -> Vec<DriveButton> {
+pub fn drive_buttons(drives: &[DriveInfo], unit: Unit) -> Vec<DriveButton> {
     let mut sorted: Vec<&DriveInfo> = drives.iter().collect();
     sorted.sort_by_key(|d| d.letter);
     sorted
@@ -210,7 +210,7 @@ pub fn drive_buttons(drives: &[DriveInfo], _unit: Unit) -> Vec<DriveButton> {
             let (detail, used) = match d.space {
                 Some((total, free)) => {
                     let used = if total == 0 || free > total { 0.0 } else { ((total - free) as f64 / total as f64) as f32 };
-                    (format!("{} free of {}", format_size(free, Unit::Dynamic), format_size(total, Unit::Dynamic)), used)
+                    (format!("{} free of {}", format_size(free, unit), format_size(total, unit)), used)
                 }
                 None => ("Size unknown.".to_string(), 0.0),
             };
