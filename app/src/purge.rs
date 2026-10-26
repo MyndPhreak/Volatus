@@ -1087,4 +1087,145 @@ mod tests {
         assert!(!t.exists());
         drop(handle);
     }
+
+    // ---- Benchmark (ignored; docs/BENCHMARK.md) ----
+    // cargo test -p app -j 1 --release purge_bench -- --ignored --nocapture --test-threads 1
+
+    /// 10 x 10 x 10 folders with 100 files each: 100,000 files of 1 to 64 bytes in 1,110
+    /// folders. Returns the items with the target folder.
+    fn make_bench_tree(t: &Path) -> u64 {
+        let mut leaves = Vec::new();
+        for a in 0..10 {
+            for b in 0..10 {
+                for c in 0..10 {
+                    leaves.push(t.join(format!("a{a}")).join(format!("b{b}")).join(format!("c{c}")));
+                }
+            }
+        }
+        leaves.par_iter().enumerate().for_each(|(i, d)| {
+            fs::create_dir_all(d).unwrap();
+            for f in 0..100 {
+                fs::write(d.join(format!("f{f:03}.dat")), vec![b'x'; (i * 100 + f) % 64 + 1]).unwrap();
+            }
+        });
+        1 + 1110 + 100_000
+    }
+
+    fn best(times: &[std::time::Duration]) -> f64 {
+        times.iter().map(|d| d.as_secs_f64() * 1000.0).fold(f64::INFINITY, f64::min)
+    }
+
+    fn time_purge(t: &Path, items: u64, opts: &Options) -> std::time::Duration {
+        let start = std::time::Instant::now();
+        let o = remove_with(&target(t, true), &|_, _| {}, &AtomicBool::new(false), opts);
+        let took = start.elapsed();
+        assert!(o.skipped.is_empty() && !o.stopped, "{:?}", o.skipped);
+        assert_eq!(o.removed_items, items);
+        assert!(!t.exists());
+        took
+    }
+
+    /// `cmd /c rd /s /q`, wall time of the child process (its start-up is printed apart).
+    fn time_rd(t: &Path) -> std::time::Duration {
+        let start = std::time::Instant::now();
+        let s = std::process::Command::new("cmd").args(["/c", "rd", "/s", "/q"]).arg(plain(t)).status().unwrap();
+        let took = start.elapsed();
+        assert!(s.success() && !t.exists());
+        took
+    }
+
+    /// Windows PowerShell 5.1 `Remove-Item -Recurse -Force`, timed inside PowerShell with
+    /// `Measure-Command`, so PowerShell's start-up is not in the number.
+    fn time_remove_item(t: &Path) -> std::time::Duration {
+        let p = plain(t).to_string_lossy().replace('\'', "''");
+        let script = format!("(Measure-Command {{ Remove-Item -LiteralPath '{p}' -Recurse -Force }}).TotalMilliseconds");
+        let o = std::process::Command::new("powershell.exe").args(["-NoProfile", "-Command", &script]).output().unwrap();
+        assert!(o.status.success() && !t.exists(), "{}", String::from_utf8_lossy(&o.stderr));
+        let ms: f64 = String::from_utf8_lossy(&o.stdout).trim().replace(',', ".").parse().unwrap();
+        std::time::Duration::from_secs_f64(ms / 1000.0)
+    }
+
+    /// The shell's permanent delete: `SHFileOperationW` `FO_DELETE` with no UI and no
+    /// `FOF_ALLOWUNDO`, in this process.
+    fn time_shell(t: &Path) -> std::time::Duration {
+        use windows_sys::Win32::UI::Shell::{FO_DELETE, FOF_NO_UI, SHFILEOPSTRUCTW, SHFileOperationW};
+        let from: Vec<u16> = plain(t).as_os_str().encode_wide().chain([0, 0]).collect();
+        let mut op = SHFILEOPSTRUCTW {
+            hwnd: std::ptr::null_mut(),
+            wFunc: FO_DELETE,
+            pFrom: from.as_ptr(),
+            pTo: std::ptr::null(),
+            fFlags: FOF_NO_UI as u16,
+            fAnyOperationsAborted: 0,
+            hNameMappings: std::ptr::null_mut(),
+            lpszProgressTitle: std::ptr::null(),
+        };
+        let start = std::time::Instant::now();
+        // SAFETY: `op` is a filled SHFILEOPSTRUCTW; `from` is double-NUL terminated and outlives the call.
+        let r = unsafe { SHFileOperationW(&mut op) };
+        let took = start.elapsed();
+        assert!(r == 0 && op.fAnyOperationsAborted == 0 && !t.exists(), "SHFileOperationW {r}");
+        took
+    }
+
+    #[test]
+    #[ignore = "benchmark: 12 trees of 100,000 files; run by hand"]
+    fn purge_bench_against_other_deletes() {
+        let d = Dir::new("bench");
+        let t = d.base.join("t");
+        let names = ["Purge", "rd /s /q", "Remove-Item", "SHFileOperationW"];
+        let mut times = vec![Vec::new(); names.len()];
+        for round in 0..3 {
+            for (m, name) in names.iter().enumerate() {
+                let items = make_bench_tree(&t);
+                let took = match m {
+                    0 => time_purge(&t, items, &Options::default()),
+                    1 => time_rd(&t),
+                    2 => time_remove_item(&t),
+                    _ => time_shell(&t),
+                };
+                eprintln!("round {round} {name}: {:.0} ms", took.as_secs_f64() * 1000.0);
+                times[m].push(took);
+            }
+        }
+        let cmd: Vec<_> = (0..3)
+            .map(|_| {
+                let start = std::time::Instant::now();
+                std::process::Command::new("cmd").args(["/c", "rem"]).status().unwrap();
+                start.elapsed()
+            })
+            .collect();
+        for (m, name) in names.iter().enumerate() {
+            eprintln!("BEST {name}: {:.0} ms", best(&times[m]));
+        }
+        eprintln!("BEST cmd /c rem (start-up in the rd number): {:.0} ms", best(&cmd));
+    }
+
+    #[test]
+    #[ignore = "benchmark: tuning sweep of the fast delete; run by hand"]
+    fn purge_bench_tuning() {
+        let d = Dir::new("bench-tune");
+        let t = d.base.join("t");
+        let configs: [(&str, Options); 9] = [
+            ("default (global pool, batch 256, list 64 KiB, POSIX)", Options::default()),
+            ("threads 4", Options { threads: 4, ..Options::default() }),
+            ("threads 8", Options { threads: 8, ..Options::default() }),
+            ("threads 16", Options { threads: 16, ..Options::default() }),
+            ("threads 64", Options { threads: 64, ..Options::default() }),
+            ("batch 1024", Options { batch: 1024, ..Options::default() }),
+            ("batch 4096", Options { batch: 4096, ..Options::default() }),
+            ("list 4 KiB", Options { list_buf: 4096, ..Options::default() }),
+            ("classic delete (no POSIX)", Options { posix: false, ..Options::default() }),
+        ];
+        let mut times = vec![Vec::new(); configs.len()];
+        for _ in 0..3 {
+            for (i, (_, opts)) in configs.iter().enumerate() {
+                let items = make_bench_tree(&t);
+                times[i].push(time_purge(&t, items, opts));
+            }
+        }
+        for (i, (name, _)) in configs.iter().enumerate() {
+            eprintln!("BEST {name}: {:.0} ms", best(&times[i]));
+        }
+    }
 }

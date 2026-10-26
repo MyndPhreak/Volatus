@@ -227,6 +227,68 @@ The two tools do not count the same items on `C:\` without elevation (5.0M again
 That gap is open (see the P4 report, FOLLOW-UPS); compare the MFT runs: there both tools read the whole
 `$MFT`.
 
+## Fast permanent delete (`Purge`) against other deletes
+
+Measured by the builder, 2026-10-26, not elevated. Ryzen 9 7950X3D (32 logical CPUs), 95 GB RAM,
+Windows 11 build 26300. The tree is in `%TEMP%` on `C:` (NTFS, Corsair MP600 PRO NH, NVMe SSD).
+Microsoft Defender real-time protection was on, as it is for users; it was not changed.
+
+```text
+cargo test -p app -j 1 --release purge_bench -- --ignored --nocapture --test-threads 1
+```
+
+Two ignored tests in `app/src/purge.rs`: `purge_bench_against_other_deletes` and `purge_bench_tuning`.
+The tree is 100,000 files of 1 to 64 bytes in 10 x 10 x 10 nested folders (1,110 folders and the
+target), under a unique folder in the temp folder. Each run deletes a newly made, identical tree
+right after it is made (warm cache). The four methods take turns in each of 3 rounds. Every run
+checks that the whole tree is gone. Best of 3.
+
+| Date | Drive / disk | Files | `Purge` | `rd /s /q` | `Remove-Item -Recurse -Force` | `SHFileOperationW` FO_DELETE | Cache |
+|---|---|---|---|---|---|---|---|
+| 2026-10-26 | C: / MP600 PRO NH | 100,000 (1,111 folders) | 5,140 ms | 20,013 ms | 16,810 ms | 31,453 ms | warm |
+
+All rounds (ms): `Purge` 5140, 5190, 5374. `rd` 21163, 21128, 20013. `Remove-Item` 17280,
+16810, 17175. `SHFileOperationW` 31453, 33284, 32749.
+
+`Purge` is 3.9 times faster than `rd /s /q`, 3.3 times faster than `Remove-Item` and 6.1 times
+faster than the shell's permanent delete.
+
+Method notes:
+
+- `Purge`: in-process time of `remove_with` with the default options (rayon's global pool of 32
+  threads, batches of 256 items, 64 KiB listing buffer, POSIX delete).
+- `rd /s /q`: wall time of `cmd /c rd /s /q <folder>`. It includes the start of `cmd.exe`, which is
+  28 ms (best of 3 `cmd /c rem`), so it does not change the result.
+- `Remove-Item`: Windows PowerShell 5.1 (`powershell.exe -NoProfile`), timed inside PowerShell
+  with `Measure-Command`. PowerShell's start-up is not in the number.
+- `SHFileOperationW`: in-process, `FO_DELETE` with `FOF_NO_UI` and without `FOF_ALLOWUNDO`. This is
+  the shell operation that a permanent delete in Explorer uses. The Explorer window itself
+  (Shift+Delete with its progress dialog) was not timed.
+
+### Tuning (best of 3, same tree, ms)
+
+| Change from the default | Best | Kept |
+|---|---|---|
+| default: global pool (32), batch 256, list 64 KiB, POSIX delete | 4,882 | yes |
+| 4 threads | 5,508 | no |
+| 8 threads | 4,983 | no |
+| 16 threads | 4,762 | no |
+| 64 threads | 4,891 | no |
+| batch 1,024 | 4,626 | no |
+| batch 4,096 | 4,674 | no |
+| listing buffer 4 KiB | 4,796 | no |
+| classic delete (no POSIX) | 4,937 | no |
+
+No change was kept. The default's own best was 4,882 ms in this run and 5,140 ms (runs up to
+5,374 ms) in the run above, so the run-to-run spread is about 5-10%. Every change except 4
+threads is inside that spread. Even 4 threads is only 13% slower than 32. The limit is
+therefore not the number of threads. It is the cost of each open, delete and close in the
+file system and its filter drivers (Defender among them). This was not measured further.
+POSIX against classic delete has the same speed here. POSIX stays because it lets a file
+that is open elsewhere (with share delete) go at once, so its folder can be removed.
+
+Limits: one machine, one NVMe SSD, one tree shape, warm cache, not elevated, Defender on.
+
 ## Deviations
 
 - The overlapped `$MFT` read replaced the old read loop with no feature flag (user approved).
