@@ -837,7 +837,6 @@ fn select(ui: &MainWindow, node: NodeId) {
 }
 
 /// Where a menu was asked for.
-#[cfg_attr(not(test), expect(dead_code, reason = "rows, crumbs and keys open the menu in P4.T2"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Source {
     /// A right-click on the treemap; the tile under the pointer is passed separately (`hit_at`).
@@ -895,11 +894,11 @@ fn menu_request(src: Source, hit: Option<NodeId>, disk: impl Fn(&std::path::Path
     })
 }
 
-/// Opens the context menu asked for at `src` (`hit`: the tile under the pointer) at the window
-/// point `at` (logical pixels), when `menu_request` gives one. A tile or a row is selected first;
+/// Opens the context menu asked for at `src` (`hit`: the tile under the pointer) at `at` in the
+/// window, when `menu_request` gives one. A tile or a row is selected first;
 /// the hover and the tooltip hide. No session borrow is held while the menu shows (it runs its
 /// own message loop).
-fn open_menu(ui: &MainWindow, src: Source, hit: Option<NodeId>, at: (f32, f32)) {
+fn open_menu(ui: &MainWindow, src: Source, hit: Option<NodeId>, at: menu::At) {
     let Some(window) = shell::window_hwnd(ui.window()) else { return };
     let Some(request) = menu_request(src, hit, menu::read_disk) else { return };
     if request.select {
@@ -916,8 +915,7 @@ fn open_menu(ui: &MainWindow, src: Source, hit: Option<NodeId>, at: (f32, f32)) 
         Ok(popup) => popup,
         Err(e) => return eprintln!("The menu cannot open: {e}"),
     };
-    let (x, y) = menu::screen_point(at, ui.window().scale_factor(), shell::client_origin(window));
-    popup.track(owner, window, menu::Anchor::Point(x, y));
+    popup.track(owner, window, menu::anchor(at, ui.window().scale_factor(), shell::client_origin(window)));
 }
 
 /// The tile of the treemap (`rects`, physical pixels) under the view point (x, y) while `moving`
@@ -1533,7 +1531,40 @@ fn wire_tree_and_treemap(ui: &MainWindow) {
             let Some(ui) = weak.upgrade() else { return };
             // The tile a left-click there hits, also during a zoom.
             let hit = node_at(&ui, x, y);
-            open_menu(&ui, Source::Map, hit, (wx, wy));
+            open_menu(&ui, Source::Map, hit, menu::At::Pointer(wx, wy));
+        }
+    });
+    ui.on_tree_menu({
+        let weak = ui.as_weak();
+        move |i, x, y| {
+            if let Some(ui) = weak.upgrade() {
+                open_menu(&ui, Source::Row(i), None, menu::At::Pointer(x, y));
+            }
+        }
+    });
+    ui.on_crumb_menu({
+        let weak = ui.as_weak();
+        move |i, x, y| {
+            if let Some(ui) = weak.upgrade() {
+                open_menu(&ui, Source::Crumb(i), None, menu::At::Pointer(x, y));
+            }
+        }
+    });
+    ui.on_crumb_menu_key({
+        let weak = ui.as_weak();
+        move |i, x, y, w, h| {
+            if let Some(ui) = weak.upgrade() {
+                open_menu(&ui, Source::Crumb(i), None, menu::At::Box(x, y, w, h));
+            }
+        }
+    });
+    // The Menu key or Shift+F10 in the tree or the map: the selected item, under its box.
+    ui.on_menu_key({
+        let weak = ui.as_weak();
+        move |x, y, w, h| {
+            if let Some(ui) = weak.upgrade() {
+                open_menu(&ui, Source::Key, None, menu::At::Box(x, y, w, h));
+            }
         }
     });
     ui.on_treemap_open({

@@ -14,6 +14,11 @@ export global Keys {
         if (text == Key.Backspace) { return "backspace"; }
         return "";
     }
+
+    /// The key opens the context menu: the Menu key, or Shift+F10.
+    public pure function menu(event: KeyEvent) -> bool {
+        return event.text == Key.Menu || (event.text == Key.F10 && event.modifiers.shift);
+    }
 }
 
 /// The label of one frame, on its band, in logical pixels. Text is formatted by the host.
@@ -105,6 +110,10 @@ component CrumbLink inherits Rectangle {
     /// The folder the treemap shows: the last crumb.
     in property <bool> current;
     callback open(int);
+    /// A right-click on the crumb: (its node, window x, window y) in logical pixels.
+    callback menu(int, float, float);
+    /// The Menu key or Shift+F10 on the crumb: (its node, its box in the window) in logical pixels.
+    callback menu-key(int, float, float, float, float);
 
     // A long name is cut with "…" when the crumbs do not fit; a short name is never cut.
     min-width: min(label.preferred-width, 64px) + 12px;
@@ -134,10 +143,21 @@ component CrumbLink inherits Rectangle {
                 root.open(root.crumb.index);
                 return accept;
             }
+            if (Keys.menu(event)) {
+                root.menu-key(root.crumb.index, root.absolute-position.x / 1px, root.absolute-position.y / 1px, root.width / 1px, root.height / 1px);
+                return accept;
+            }
             return reject;
         }
         touch := TouchArea {
             mouse-cursor: pointer;
+            // `clicked` does not fire for the right button. The crumb does not open: the map stays.
+            pointer-event(event) => {
+                if (event.kind == PointerEventKind.up && event.button == PointerEventButton.right) {
+                    focus.focus();
+                    root.menu(root.crumb.index, (self.absolute-position.x + self.mouse-x) / 1px, (self.absolute-position.y + self.mouse-y) / 1px);
+                }
+            }
             clicked => {
                 focus.focus();
                 root.open(root.crumb.index);
@@ -151,6 +171,8 @@ component CrumbLink inherits Rectangle {
 export component CrumbBar inherits Rectangle {
     in property <[Crumb]> crumbs;
     callback open(int);
+    callback menu(int, float, float);
+    callback menu-key(int, float, float, float, float);
 
     min-width: 0px;
     clip: true;
@@ -181,6 +203,8 @@ export component CrumbBar inherits Rectangle {
                 crumb: c;
                 current: i == root.crumbs.length - 1;
                 open(n) => { root.open(n); }
+                menu(n, x, y) => { root.menu(n, x, y); }
+                menu-key(n, x, y, w, h) => { root.menu-key(n, x, y, w, h); }
             }
         }
     }
@@ -278,6 +302,9 @@ export component TreemapView inherits Rectangle {
     /// A right-click (on button up) at a map point and at the same point in the window, both in
     /// logical pixels: the context menu opens there.
     callback menu(float, float, float, float);
+    /// The Menu key or Shift+F10 on the map: the box of the selected node in the window (the whole
+    /// map when it is not drawn), in logical pixels.
+    callback menu-key(float, float, float, float);
     /// Key press: "up", "down", "left", "right", "enter" or "backspace".
     callback key(string);
     /// The view changed size, in logical pixels.
@@ -293,6 +320,8 @@ export component TreemapView inherits Rectangle {
     pure callback place(Placed, LabelKind, length, length, length, length) -> Placed;
     /// The hovered node on the stretched picture, and the label of a lifted tile.
     private property <Placed> hover-at: root.place({ x: root.hover.x, y: root.hover.y, width: root.hover.width, height: root.hover.height, shown: true, two-lines: false }, LabelKind.outline, root.layout-width, root.layout-height, root.width, root.height);
+    /// The selection outline on the stretched picture.
+    private property <Placed> selection-at: root.place({ x: root.selection-x, y: root.selection-y, width: root.selection-width, height: root.selection-height, shown: true, two-lines: false }, LabelKind.outline, root.layout-width, root.layout-height, root.width, root.height);
     private property <Placed> hover-label-at: root.place({ x: root.hover.x, y: root.hover.y, width: root.hover.width, height: root.hover.height, shown: true, two-lines: false }, LabelKind.file, root.layout-width, root.layout-height, root.width, root.height);
 
     /// The move starts now: `zoom-t` is 0.
@@ -484,6 +513,14 @@ export component TreemapView inherits Rectangle {
         accessible-value: root.value;
         accessible-description: "Press an arrow key to move the selection. Press Enter to open the folder. Press Backspace to go up one folder.";
         key-pressed(event) => {
+            if (Keys.menu(event)) {
+                if (root.has-selection) {
+                    root.menu-key((root.absolute-position.x + root.selection-at.x) / 1px, (root.absolute-position.y + root.selection-at.y) / 1px, root.selection-at.width / 1px, root.selection-at.height / 1px);
+                } else {
+                    root.menu-key(root.absolute-position.x / 1px, root.absolute-position.y / 1px, root.width / 1px, root.height / 1px);
+                }
+                return accept;
+            }
             if (Keys.name(event.text) == "" || event.text == " ") { return reject; }
             root.key(Keys.name(event.text));
             return accept;

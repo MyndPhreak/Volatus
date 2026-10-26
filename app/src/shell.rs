@@ -20,7 +20,7 @@
 use crate::menu::{Anchor, Item, SHELL_FIRST, SHELL_LAST};
 use std::cell::{Cell, RefCell};
 use std::path::Path;
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{ClientToScreen, ScreenToClient};
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoTaskMemFree};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, GetKeyState, SetFocus, VIRTUAL_KEY};
@@ -32,7 +32,7 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, GWLP_HINSTANCE, GetCursorPos, GetWindowLongPtrW,
     HMENU, IDC_WAIT, InsertMenuW, LoadCursorW, MF_BYPOSITION, MF_GRAYED, MF_SEPARATOR, MF_STRING, RegisterClassW,
-    SendMessageW, SetCursor, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx, WINDOW_EX_STYLE, WM_DRAWITEM, WM_INITMENUPOPUP,
+    SendMessageW, SetCursor, TPM_RETURNCMD, TPM_RIGHTBUTTON, TPM_VERTICAL, TPMPARAMS, TrackPopupMenuEx, WINDOW_EX_STYLE, WM_DRAWITEM, WM_INITMENUPOPUP,
     WM_MEASUREITEM, WM_MENUCHAR, WM_MOUSEMOVE, WM_NCDESTROY, WNDCLASSW, WS_POPUP,
 };
 use windows::core::{HSTRING, Interface, PCWSTR, PSTR, w};
@@ -162,9 +162,17 @@ impl Popup {
     pub fn track(&self, owner: HWND, window: HWND, at: Anchor) -> u32 {
         let handlers = self.shell.as_ref().map(|cm| Handlers { cm2: cm.cast().ok(), cm3: cm.cast().ok() });
         ACTIVE.with_borrow_mut(|a| *a = handlers);
-        let Anchor::Point(x, y) = at else { unimplemented!("a menu under a box") };
-        // SAFETY: the menu and the owner live for the call.
-        let id = unsafe { TrackPopupMenuEx(self.menu, (TPM_RETURNCMD | TPM_RIGHTBUTTON).0, x, y, owner, None) }.0 as u32;
+        // A key: the menu opens under the item's box and does not cover it (spike S5).
+        let (x, y, flags, params) = match at {
+            Anchor::Point(x, y) => (x, y, TPM_RETURNCMD | TPM_RIGHTBUTTON, None),
+            Anchor::Below { left, top, right, bottom } => {
+                let exclude = RECT { left, top, right, bottom };
+                let params = TPMPARAMS { cbSize: size_of::<TPMPARAMS>() as u32, rcExclude: exclude };
+                (left, bottom, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_VERTICAL, Some(params))
+            }
+        };
+        // SAFETY: the menu, the owner and the parameters live for the call.
+        let id = unsafe { TrackPopupMenuEx(self.menu, flags.0, x, y, owner, params.as_ref().map(|p| p as *const _)) }.0 as u32;
         ACTIVE.with_borrow_mut(|a| *a = None);
         after_menu(window);
         id

@@ -183,6 +183,15 @@ export component MainWindow inherits Window {
     callback treemap-open(float, float);
     /// A right-click on the treemap: (map x, map y, window x, window y) in logical pixels.
     callback treemap-menu(float, float, float, float);
+    /// A right-click on tree row i: (i, window x, window y) in logical pixels.
+    callback tree-menu(int, float, float);
+    /// A right-click on a crumb: (its node, window x, window y) in logical pixels.
+    callback crumb-menu(int, float, float);
+    /// The Menu key or Shift+F10 on a crumb: (its node, its box in the window) in logical pixels.
+    callback crumb-menu-key(int, float, float, float, float);
+    /// The Menu key or Shift+F10 in the tree or the treemap: the box of the selected item in the
+    /// window, in logical pixels.
+    callback menu-key(float, float, float, float);
     /// A crumb was used. The argument is the crumb index: the node to open.
     callback crumb-open(int);
     /// Key press in the file tree: "up", "down", "left", "right", "enter" or "space".
@@ -370,6 +379,11 @@ export component MainWindow inherits Window {
                         accessible-label: "File tree";
                         accessible-value: root.selected-row >= 0 ? root.rows[root.selected-row].name : "";
                         key-pressed(event) => {
+                            if (Keys.menu(event)) {
+                                // The selected row, kept inside the list when it is scrolled away.
+                                root.menu-key(list.absolute-position.x / 1px, (list.absolute-position.y + clamp(list.content-y + root.selected-row * 24px, 0px, max(0px, list.height - 24px))) / 1px, list.width / 1px, 24);
+                                return accept;
+                            }
                             if (Keys.name(event.text) == "") { return reject; }
                             root.tree-key(Keys.name(event.text));
                             return accept;
@@ -389,7 +403,16 @@ export component MainWindow inherits Window {
                                 accessible-item-selected: i == root.selected-row;
                                 accessible-item-index: i;
                                 background: i == root.selected-row ? Palette.selection-background : (row-touch.has-hover ? Palette.alternate-background : transparent);
-                                row-touch := TouchArea { clicked => { root.tree-select(i); tree-focus.focus(); } }
+                                row-touch := TouchArea {
+                                    clicked => { root.tree-select(i); tree-focus.focus(); }
+                                    // `clicked` does not fire for the right button.
+                                    pointer-event(event) => {
+                                        if (event.kind == PointerEventKind.up && event.button == PointerEventButton.right) {
+                                            tree-focus.focus();
+                                            root.tree-menu(i, (self.absolute-position.x + self.mouse-x) / 1px, (self.absolute-position.y + self.mouse-y) / 1px);
+                                        }
+                                    }
+                                }
                                 HorizontalLayout {
                                     padding-right: root.scrollbar-room;
                                     Rectangle {
@@ -447,6 +470,8 @@ export component MainWindow inherits Window {
                             root.crumb-open(i);
                             map.focus-map();
                         }
+                        menu(i, x, y) => { root.crumb-menu(i, x, y); }
+                        menu-key(i, x, y, w, h) => { root.crumb-menu-key(i, x, y, w, h); }
                     }
                     map := TreemapView {
                         vertical-stretch: 1;
@@ -482,6 +507,7 @@ export component MainWindow inherits Window {
                         clicked(x, y) => { root.treemap-click(x, y); }
                         double-clicked(x, y) => { root.treemap-open(x, y); }
                         menu(x, y, wx, wy) => { root.treemap-menu(x, y, wx, wy); }
+                        menu-key(x, y, w, h) => { root.menu-key(x, y, w, h); }
                         key(k) => { root.map-key(k); }
                         resized(w, h) => { root.treemap-resized(w, h); }
                     }

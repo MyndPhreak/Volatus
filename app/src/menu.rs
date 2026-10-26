@@ -270,8 +270,17 @@ pub enum At {
 /// The screen anchor of the menu asked for `at`, for a window of `scale` whose client origin is at
 /// `origin` on the screen (`screen_point`).
 pub fn anchor(at: At, scale: f32, origin: (i32, i32)) -> Anchor {
-    let _ = (at, scale, origin);
-    unimplemented!("anchor")
+    match at {
+        At::Pointer(x, y) => {
+            let (x, y) = screen_point((x, y), scale, origin);
+            Anchor::Point(x, y)
+        }
+        At::Box(x, y, w, h) => {
+            let (left, top) = screen_point((x, y), scale, origin);
+            let (right, bottom) = screen_point((x + w, y + h), scale, origin);
+            Anchor::Below { left, top, right, bottom }
+        }
+    }
 }
 
 /// The screen point, in physical pixels, of the window point `window` in logical pixels, for a
