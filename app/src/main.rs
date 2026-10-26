@@ -227,6 +227,9 @@ enum Site {
     Map,
     /// The drive cards of the start screen.
     Drives,
+    /// The width of the Size column of the tree.
+    #[allow(dead_code)] // Red stub; used from "Fix the final review findings".
+    Column,
 }
 
 /// Every part that is synced again after a unit change (`resync_after_unit_change`).
@@ -262,6 +265,18 @@ fn persist_with(s: &mut Session, save: impl FnOnce(&Path, &Settings) -> std::io:
 /// The window is dark for `choice` when Windows is dark or not (`system_dark`).
 fn effective_dark(choice: ThemeChoice, system_dark: bool) -> bool {
     choice.forced_dark().unwrap_or(system_dark)
+}
+
+/// The theme the winit window is set to for `choice`: `None` follows Windows.
+#[allow(dead_code)] // Red stub; used from "Fix the final review findings".
+fn winit_theme_for(_choice: ThemeChoice) -> Option<slint::winit_030::winit::window::Theme> {
+    None
+}
+
+/// The width of the Size column of the tree for `unit`, in logical pixels.
+#[allow(dead_code)] // Red stub; used from "Fix the final review findings".
+fn size_column_width(_unit: Unit) -> f32 {
+    76.0
 }
 
 /// Where the keyboard focus is, as far as hiding a part cares.
@@ -359,6 +374,7 @@ fn resync_after_unit_change(ui: &MainWindow) {
             // The start screen lists the drives again each time it shows.
             Site::Drives if ui.get_start_screen() => refresh_drives(ui),
             Site::Drives => {}
+            Site::Column => {}
         }
     }
 }
@@ -3883,7 +3899,50 @@ mod tests {
     #[test]
     fn unit_change_resyncs_every_size_site() {
         use Site::*;
-        assert_eq!(sites_after_unit_change(), &[Rows, Types, Selection, Banner, Map, Drives]);
+        assert_eq!(sites_after_unit_change(), &[Rows, Types, Selection, Banner, Map, Drives, Column]);
+    }
+
+    // ---- Size column ----
+    use super::{size_column_width, winit_theme_for};
+    use crate::model::format_size;
+
+    /// 4 TiB: the biggest folder the Size column is made for.
+    const FOUR_TB: u64 = 4 * 1024 * 1024 * 1024 * 1024;
+
+    #[test]
+    fn size_column_width_keeps_76_px_where_the_text_fits() {
+        for unit in [Unit::Dynamic, Unit::Gb, Unit::Tb] {
+            assert_eq!(size_column_width(unit), 76.0, "{unit:?}");
+        }
+    }
+
+    #[test]
+    fn size_column_width_fits_a_4_tb_folder_in_byte_kb_and_mb() {
+        let texts = [Unit::Byte, Unit::Kb, Unit::Mb].map(|u| format_size(FOUR_TB, u));
+        assert_eq!(texts, ["4,398,046,511,104 B", "4,294,967,296.0 KB", "4,194,304.0 MB"]);
+
+        let widths = [Unit::Byte, Unit::Kb, Unit::Mb].map(size_column_width);
+
+        // From the estimate: 7 px a digit, 3.5 px for ",", "." and the space, 7.5 to 9 px a
+        // letter, and 8 px for the cell padding (`NumberCell` keeps 6 px) and a little room.
+        assert_eq!(widths, [124.0, 118.0, 95.0]);
+    }
+
+    #[test]
+    fn size_column_width_leaves_room_for_the_name_in_the_narrowest_sidebar() {
+        // main.slint: the sidebar is at least 340 px; its padding (2 x 4 px), the list inset
+        // (4 px), the scroll bar room (16 px), the % column (60 px) and the Files column (72 px).
+        let fixed = 8.0 + 4.0 + 16.0 + 60.0 + 72.0;
+        for unit in Unit::ALL {
+            let name = 340.0 - fixed - size_column_width(unit);
+            assert!(name >= 40.0, "{unit:?}: {name} px for the name");
+        }
+    }
+
+    #[test]
+    fn winit_theme_for_forces_light_and_dark_and_follows_windows_with_none() {
+        use slint::winit_030::winit::window::Theme;
+        assert_eq!(ThemeChoice::ALL.map(winit_theme_for), [None, Some(Theme::Light), Some(Theme::Dark)]);
     }
 
     #[test]
