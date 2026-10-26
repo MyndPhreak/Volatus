@@ -216,33 +216,48 @@ fn worse(a: Seen, b: Seen) -> Seen {
 
 /// `Seen` as one `u64` for the sink's atomic state: the kind in the high 32 bits (0 Nothing,
 /// 1 Recycled, 2 NotRecycled, 3 Refused), the `NotRecycled` code in the low 32 bits.
-fn encode(_s: Seen) -> u64 {
-    0
+fn encode(s: Seen) -> u64 {
+    let (kind, code) = match s {
+        Seen::Nothing => (0u64, 0),
+        Seen::Post(PostDelete::Recycled) => (1, 0),
+        Seen::Post(PostDelete::NotRecycled(code)) => (2, code),
+        Seen::Refused => (3, 0),
+    };
+    kind << 32 | u64::from(code as u32)
 }
 
 /// The `Seen` that `encode` gave `v`. An unknown kind decodes as `Refused`: fail closed.
-fn decode(_v: u64) -> Seen {
-    Seen::Nothing
+fn decode(v: u64) -> Seen {
+    match v >> 32 {
+        0 => Seen::Nothing,
+        1 => Seen::Post(PostDelete::Recycled),
+        2 => Seen::Post(PostDelete::NotRecycled(v as u32 as i32)),
+        _ => Seen::Refused,
+    }
 }
 
-/// What one operation means for the target: `None` only when the result is a success, nothing
-/// aborted, and the sink saw the item recycled. In this order: `Refused` is
-/// `Other(NOT_RECYCLABLE)`; a failure code maps by `skip_for_shell_result`; a `NotRecycled` with
-/// a failure code maps by that code, with a success code it is `Other(NOT_IN_BIN)`; the aborted
-/// flag is `Other(ABORTED)`; no sink report is `Other(NOT_IN_BIN)`.
+/// What one operation means for the target: `None` only when the sink saw the item recycled,
+/// `hr` is 0 and nothing aborted. The sink's evidence comes first, as it says what happened to
+/// the item itself:
+///
+/// | Sink saw                         | Result                                             |
+/// |----------------------------------|----------------------------------------------------|
+/// | `Refused`                        | `Other(NOT_RECYCLABLE)`                            |
+/// | `NotRecycled`, failure code      | that code, by `skip_for_shell_result`              |
+/// | `NotRecycled`, success code      | `Other(NOT_IN_BIN)` (the item may be gone)         |
+/// | `Recycled`                       | success if `hr` is 0 and not aborted, else `Other(IN_BIN_THEN_ERROR)` |
+/// | nothing                          | `hr` by `skip_for_shell_result`; 0 with aborted is `Other(ABORTED)`; 0 is `Other(NOT_IN_BIN)` |
 pub(crate) fn skip_for_result(hr: i32, aborted: bool, seen: Seen) -> Option<SkipReason> {
-    if seen == Seen::Refused {
-        return Some(SkipReason::Other(NOT_RECYCLABLE));
-    }
-    if hr != 0 {
-        return skip_for_shell_result(hr, aborted);
-    }
+    let other = |code| Some(SkipReason::Other(code));
     match seen {
+        Seen::Refused => other(NOT_RECYCLABLE),
         Seen::Post(PostDelete::NotRecycled(code)) if code < 0 => skip_for_shell_result(code, aborted),
-        Seen::Post(PostDelete::NotRecycled(_)) => Some(SkipReason::Other(NOT_IN_BIN)),
-        _ if aborted => Some(SkipReason::Other(ABORTED)),
-        Seen::Post(PostDelete::Recycled) => None,
-        _ => Some(SkipReason::Other(NOT_IN_BIN)),
+        Seen::Post(PostDelete::NotRecycled(_)) => other(NOT_IN_BIN),
+        Seen::Post(PostDelete::Recycled) if hr == 0 && !aborted => None,
+        Seen::Post(PostDelete::Recycled) => other(IN_BIN_THEN_ERROR),
+        Seen::Nothing if hr != 0 => skip_for_shell_result(hr, aborted),
+        Seen::Nothing if aborted => other(ABORTED),
+        Seen::Nothing => other(NOT_IN_BIN),
     }
 }
 
@@ -299,6 +314,9 @@ pub fn skip_text(r: SkipReason) -> Option<&'static str> {
         ) => Some("The Recycle Bin cannot take this item. You can delete the item permanently."),
         SkipReason::Other(ABORTED) => {
             Some("Windows did not move the item to the Recycle Bin. You can delete the item permanently.")
+        }
+        SkipReason::Other(IN_BIN_THEN_ERROR) => {
+            Some("The item is in the Recycle Bin. Then Windows reported an error. Look in the Recycle Bin.")
         }
         SkipReason::Other(NOT_IN_BIN) => {
             Some("Windows did not show the item in the Recycle Bin. Scan the folder again to see the item's state.")
