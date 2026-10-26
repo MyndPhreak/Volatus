@@ -189,13 +189,13 @@ pub(crate) enum Seen {
 
 /// Allow only an item the shell will send to the bin (`TSF_DELETE_RECYCLE_IF_POSSIBLE` set).
 /// Without it the shell would delete the item permanently.
-pub(crate) fn pre_delete_decision(_tsf_flags: u32) -> PreDelete {
-    PreDelete::Allow
+pub(crate) fn pre_delete_decision(tsf_flags: u32) -> PreDelete {
+    if tsf_flags & TSF_DELETE_RECYCLE_IF_POSSIBLE.0 as u32 != 0 { PreDelete::Allow } else { PreDelete::Abort }
 }
 
 /// Recycled only for a success `hrDelete` with a new item in the bin (`psiNewlyCreated`).
-pub(crate) fn post_delete_decision(_hr: i32, _newly_created_is_null: bool) -> PostDelete {
-    PostDelete::Recycled
+pub(crate) fn post_delete_decision(hr: i32, newly_created_is_null: bool) -> PostDelete {
+    if hr >= 0 && !newly_created_is_null { PostDelete::Recycled } else { PostDelete::NotRecycled(hr) }
 }
 
 /// The worse of two sink observations: `Refused` over `NotRecycled` over `Recycled` over
@@ -215,8 +215,20 @@ fn worse(a: Seen, b: Seen) -> Seen {
 /// `Other(NOT_RECYCLABLE)`; a failure code maps by `skip_for_shell_result`; a `NotRecycled` with
 /// a failure code maps by that code, with a success code it is `Other(NOT_IN_BIN)`; the aborted
 /// flag is `Other(ABORTED)`; no sink report is `Other(NOT_IN_BIN)`.
-pub(crate) fn skip_for_result(_hr: i32, _aborted: bool, _seen: Seen) -> Option<SkipReason> {
-    None
+pub(crate) fn skip_for_result(hr: i32, aborted: bool, seen: Seen) -> Option<SkipReason> {
+    if seen == Seen::Refused {
+        return Some(SkipReason::Other(NOT_RECYCLABLE));
+    }
+    if hr != 0 {
+        return skip_for_shell_result(hr, aborted);
+    }
+    match seen {
+        Seen::Post(PostDelete::NotRecycled(code)) if code < 0 => skip_for_shell_result(code, aborted),
+        Seen::Post(PostDelete::NotRecycled(_)) => Some(SkipReason::Other(NOT_IN_BIN)),
+        _ if aborted => Some(SkipReason::Other(ABORTED)),
+        Seen::Post(PostDelete::Recycled) => None,
+        _ => Some(SkipReason::Other(NOT_IN_BIN)),
+    }
 }
 
 /// What a code and the aborted flag mean: `None` for a success (0, not aborted), else the one
@@ -237,13 +249,22 @@ pub(crate) fn skip_for_result(_hr: i32, _aborted: bool, _seen: Seen) -> Option<S
 /// `COPYENGINE_E_RECYCLE_*` codes, ...). `skip_text` has the words for the codes that offer the
 /// permanent delete.
 pub(crate) fn skip_for_shell_result(code: i32, aborted: bool) -> Option<SkipReason> {
+    // An HRESULT that carries a Win32 code (`HRESULT_FROM_WIN32`): the Win32 code decides.
+    if code as u32 & 0xFFFF_0000 == 0x8007_0000 {
+        return Some(win32_reason(code & 0xFFFF));
+    }
     match code {
         0 if !aborted => None,
-        0 => Some(SkipReason::Other(ABORTED)),
+        0 | DE_OPCANCELLED | HR_E_ABORT | HR_USER_CANCELLED | HR_CANCELLED => Some(SkipReason::Other(ABORTED)),
         DE_ACCESSDENIEDSRC => Some(SkipReason::AccessDenied),
         DE_PATHTOODEEP | DE_FILENAMETOOLONG => Some(SkipReason::TooLong),
-        code => Some(reason_from_win32(code)),
+        code => Some(win32_reason(code)),
     }
+}
+
+/// `reason_from_win32`, with `ERROR_CANCELLED` as the aborted reason.
+fn win32_reason(code: i32) -> SkipReason {
+    if code == ERROR_CANCELLED { SkipReason::Other(ABORTED) } else { reason_from_win32(code) }
 }
 
 /// The words for a Recycle Bin skip (ASD-STE100), or `None` for a reason that has the general
@@ -254,11 +275,18 @@ pub fn skip_text(r: SkipReason) -> Option<&'static str> {
         SkipReason::Other(PATH_REFUSED | DE_INVALIDFILES) => {
             Some("The Recycle Bin cannot take this path. You can delete the item permanently.")
         }
-        SkipReason::Other(DE_FILE_TOO_LARGE) => {
+        SkipReason::Other(DE_FILE_TOO_LARGE | HR_RECYCLE_SIZE_TOO_BIG) => {
             Some("The item is too large for the Recycle Bin. You can delete the item permanently.")
         }
-        SkipReason::Other(ABORTED | DE_OPCANCELLED) => {
+        SkipReason::Other(
+            NOT_RECYCLABLE | HR_RECYCLE_FORCE_NUKE | HR_RECYCLE_UNKNOWN | HR_RECYCLE_PATH_TOO_LONG
+            | HR_RECYCLE_BIN_NOT_FOUND,
+        ) => Some("The Recycle Bin cannot take this item. You can delete the item permanently."),
+        SkipReason::Other(ABORTED) => {
             Some("Windows did not move the item to the Recycle Bin. You can delete the item permanently.")
+        }
+        SkipReason::Other(NOT_IN_BIN) => {
+            Some("Windows did not show the item in the Recycle Bin. Scan the folder again to see the item's state.")
         }
         _ => None,
     }
@@ -273,7 +301,15 @@ struct Com {
 
 impl Com {
     fn init() -> Result<Com, i32> {
-        Ok(Com { uninit: false })
+        // SAFETY: no reserved pointer. A success (S_OK or S_FALSE) is balanced in `drop`.
+        let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+        if hr.is_ok() {
+            Ok(Com { uninit: true })
+        } else if hr == RPC_E_CHANGED_MODE {
+            Ok(Com { uninit: false })
+        } else {
+            Err(hr.0)
+        }
     }
 }
 
@@ -362,16 +398,24 @@ impl IFileOperationProgressSink_Impl for Sink_Impl {
     ) -> windows_core::Result<()> {
         Ok(())
     }
-    fn PreDeleteItem(&self, _flags: u32, _i: Ref<'_, IShellItem>) -> windows_core::Result<()> {
-        Ok(())
+    /// `E_ABORT` for an item the shell would delete permanently: the shell then leaves it.
+    fn PreDeleteItem(&self, flags: u32, _i: Ref<'_, IShellItem>) -> windows_core::Result<()> {
+        match pre_delete_decision(flags) {
+            PreDelete::Allow => Ok(()),
+            PreDelete::Abort => {
+                self.note(Seen::Refused);
+                Err(E_ABORT.into())
+            }
+        }
     }
     fn PostDeleteItem(
         &self,
         _flags: u32,
         _i: Ref<'_, IShellItem>,
-        _hr: HRESULT,
-        _new: Ref<'_, IShellItem>,
+        hr: HRESULT,
+        new: Ref<'_, IShellItem>,
     ) -> windows_core::Result<()> {
+        self.note(Seen::Post(post_delete_decision(hr.0, new.is_null())));
         Ok(())
     }
     fn PreNewItem(&self, _f: u32, _d: Ref<'_, IShellItem>, _n: &PCWSTR) -> windows_core::Result<()> {
@@ -413,8 +457,41 @@ pub(crate) struct Report {
 }
 
 /// One `IFileOperation` delete of `from` (one plain path, double-NUL terminated), on this thread.
-fn shell_recycle(_from: &[u16], _owner: Option<isize>) -> Report {
-    Report { hr: -1, aborted: true, seen: Seen::Nothing }
+fn shell_recycle(from: &[u16], owner: Option<isize>) -> Report {
+    assert!(from.ends_with(&[0, 0]) && !from[..from.len() - 2].contains(&0), "one path, double-NUL terminated");
+    let nothing = |hr| Report { hr, aborted: false, seen: Seen::Nothing };
+    // Declared first, dropped last: every COM object below is released before COM ends.
+    let _com = match Com::init() {
+        Ok(c) => c,
+        Err(hr) => return nothing(hr),
+    };
+    let sink = Sink::new();
+    let setup = || -> windows_core::Result<IFileOperation> {
+        // SAFETY: COM is initialised on this thread for the life of `_com`. `from` is
+        // NUL-terminated and outlives the call. The sink is a live COM object; `DeleteItem` keeps
+        // its own reference.
+        unsafe {
+            let op: IFileOperation = CoCreateInstance(&FileOperation, None, CLSCTX_ALL)?;
+            op.SetOperationFlags(FLAGS)?;
+            if let Some(h) = owner {
+                op.SetOwnerWindow(HWND(h as *mut core::ffi::c_void))?;
+            }
+            let item: IShellItem = SHCreateItemFromParsingName(PCWSTR(from.as_ptr()), None)?;
+            op.DeleteItem(&item, &sink.to_interface::<IFileOperationProgressSink>())?;
+            Ok(op)
+        }
+    };
+    let op = match setup() {
+        Ok(op) => op,
+        Err(e) => return nothing(e.code().0),
+    };
+    // SAFETY: `op` is a live IFileOperation made on this thread, with COM still initialised.
+    let performed = unsafe { op.PerformOperations() };
+    // An unknown abort state counts as aborted: never a success on a guess.
+    // SAFETY: as above.
+    let aborted = unsafe { op.GetAnyOperationsAborted() }.map_or(true, |b| b.as_bool());
+    drop(op);
+    Report { hr: performed.err().map_or(0, |e| e.code().0), aborted, seen: sink.seen.get() }
 }
 
 #[cfg(test)]
@@ -642,7 +719,7 @@ mod tests {
             }
             sub = (sub - 1) & others;
         }
-        assert_eq!(pre_delete_decision(u32::MAX & !recycle), PreDelete::Abort);
+        assert_eq!(pre_delete_decision(!recycle), PreDelete::Abort);
     }
 
     #[test]
