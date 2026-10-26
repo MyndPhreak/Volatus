@@ -5,6 +5,7 @@ Volatus shows what uses the space on a Windows drive. It scans a drive or a fold
 - **Fast.** On an NTFS drive, an administrator scan reads the file index (the MFT) directly. A scan of a 1.6 TB drive with 5 million files takes about 5 s warm on the test PC. Without administrator rights, Volatus walks the folders.
 - **Clear.** Nested folder frames carry their names. File tiles are colored by file type.
 - **Context menu.** Right-click a file or folder for the Windows menu, with Explore Folder, Command Prompt Here and Copy Path. Delete updates the map with no rescan.
+- **Delete.** Volatus deletes what it shows. **Delete** moves the item to the Recycle Bin. **Shift+Delete** deletes it permanently and fast. Volatus asks you to confirm each delete. See the [Delete section](docs/USAGE.md#delete) of the usage guide.
 - **Windows 11 look.** Mica backdrop, and light and dark themes that follow Windows by default.
 - **Your settings.** A gear opens a flyout to choose the theme, the size unit and which parts of the window show. See [docs/USAGE.md](docs/USAGE.md#settings).
 

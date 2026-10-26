@@ -19,6 +19,70 @@ Volatus shows which folders and files use the space on a drive.
 - The crumbs above the treemap show the folders from the scan root to the open folder. Click a crumb to open that folder.
 - The footer shows the file types that use the most space, with their percent of the scan. The tree and the treemap always show the same selection.
 
+## Delete
+
+Volatus can delete the file or folder that you select. Delete works on one item at a time.
+
+- To delete, right-click a file or folder in the tree or in the treemap and choose **Delete**.
+  You can also select the item and press **Delete**. Volatus then asks you to confirm. After you
+  confirm, it moves the item to the Recycle Bin.
+- To delete permanently, hold **Shift** while you choose **Delete**, or press **Shift+Delete**.
+  After you confirm, Volatus removes the item from the disk. You cannot undo a permanent delete.
+- The dialog shows the name, the path and the size of the item. It also shows the number of files
+  and folders, from the scan. A link in the dialog switches between the Recycle Bin and the
+  permanent delete.
+- In the permanent delete dialog, **Cancel** is the default button. In the Recycle Bin dialog,
+  **Move to Recycle Bin** is the default button.
+- Delete is not available while a scan runs.
+
+## Recycle Bin and permanent delete
+
+- The Recycle Bin does not free disk space. The space is free only after you empty the Recycle
+  Bin.
+- The permanent delete frees the space at once. It is fast on folders with many files. See
+  [BENCHMARK.md](BENCHMARK.md) for the measured times.
+- During a permanent delete, the dialog shows the number of items and the size removed so far.
+  **Stop** ends the delete after the item in progress. The items that Volatus already removed stay
+  removed.
+
+## What Volatus does not delete
+
+- Volatus does not delete a drive root.
+- Volatus does not delete the Windows folder or any item in it.
+- Volatus does not delete the Program Files, Program Files (x86), ProgramData and user profile
+  folders themselves. It can delete the items inside them, but not inside Windows.
+- Volatus deletes items on local drives only. It does not delete network (UNC) paths.
+- Volatus does not delete an item that the Recycle Bin cannot take. For example, the item can be
+  too big, the Recycle Bin can be turned off, or the shell cannot handle the path. The dialog says
+  so. To remove the item, use the permanent delete.
+- Volatus removes a junction or a symbolic link as a link. The item that the link points to stays.
+- Volatus checks the item again just before it deletes. If the item changed after the scan, the
+  dialog asks you to open it again.
+
+## Items that Volatus cannot delete
+
+- Volatus skips an item that another program uses or that you have no permission to delete. It
+  deletes the other items. A folder that still holds a skipped item stays.
+- At the end, the dialog lists each skipped item with the reason.
+- If Volatus skipped items, the sizes in the list can be out of date. The dialog shows **Scan
+  again**.
+- If an item needs administrator rights, the dialog shows **Restart as administrator**. Then
+  delete the item again.
+
+## After a delete
+
+- Volatus updates the scan in place. The item and its size leave the tree, the treemap and the
+  parent folders. You do not need to scan again, unless Volatus skipped items.
+- While Volatus updates the list after a delete, the dialog can say to try again in a moment.
+
+## Safety of the permanent delete
+
+- The permanent delete uses open folder handles. It does not follow a link. If a folder becomes a
+  link during the delete, the delete cannot reach items outside the folder that you chose.
+- Limits: the permanent delete tries a newer delete mode first. If the drive does not support it,
+  Volatus uses the older mode. This fallback is not tested on FAT32 and exFAT drives or on network
+  shares. The safety described above is not verified on network shares.
+
 ## Keyboard
 Press Tab to move to the next control, and Shift+Tab to move back.
 
@@ -38,6 +102,10 @@ Press Tab to move to the next control, and Shift+Tab to move back.
 | Settings gear | Enter or Space | Open or close the settings flyout |
 | Settings flyout | Esc | Close the flyout |
 | Settings flyout | Enter or Space | Choose the item, or turn the switch on or off |
+| File tree, treemap | Delete | Delete the selected item to the Recycle Bin, after you confirm |
+| File tree, treemap | Shift+Delete | Delete the selected item permanently, after you confirm |
+| Delete dialog | Enter | Use the default button |
+| Delete dialog | Esc | Cancel or close the dialog. It does not stop a delete that runs |
 
 ## Context menu
 - Right-click a tile, a frame, a tree row or a crumb. Or select the item and press the Menu key or Shift+F10. Shift+right-click adds the extended
