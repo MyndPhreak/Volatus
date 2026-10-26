@@ -181,6 +181,8 @@ export component MainWindow inherits Window {
     callback tree-sort(int);
     callback treemap-click(float, float);
     callback treemap-open(float, float);
+    /// A right-click on the treemap: (map x, map y, window x, window y) in logical pixels.
+    callback treemap-menu(float, float, float, float);
     /// A crumb was used. The argument is the crumb index: the node to open.
     callback crumb-open(int);
     /// Key press in the file tree: "up", "down", "left", "right", "enter" or "space".
@@ -479,6 +481,7 @@ export component MainWindow inherits Window {
                         place(p, kind, from-w, from-h, to-w, to-h) => { return root.place-label(p, kind, from-w, from-h, to-w, to-h); }
                         clicked(x, y) => { root.treemap-click(x, y); }
                         double-clicked(x, y) => { root.treemap-open(x, y); }
+                        menu(x, y, wx, wy) => { root.treemap-menu(x, y, wx, wy); }
                         key(k) => { root.map-key(k); }
                         resized(w, h) => { root.treemap-resized(w, h); }
                     }

@@ -275,6 +275,9 @@ export component TreemapView inherits Rectangle {
     callback clicked(float, float);
     /// A double-click at a point in logical pixels.
     callback double-clicked(float, float);
+    /// A right-click (on button up) at a map point and at the same point in the window, both in
+    /// logical pixels: the context menu opens there.
+    callback menu(float, float, float, float);
     /// Key press: "up", "down", "left", "right", "enter" or "backspace".
     callback key(string);
     /// The view changed size, in logical pixels.
@@ -493,6 +496,11 @@ export component TreemapView inherits Rectangle {
                     root.hovered(self.mouse-x / 1px, self.mouse-y / 1px);
                 } else if (event.kind == PointerEventKind.down) {
                     root.hide-tip(false);
+                } else if (event.kind == PointerEventKind.up && event.button == PointerEventButton.right) {
+                    // `clicked` does not fire for the right button. On up, so the menu gets no
+                    // button up of its own.
+                    map-focus.focus();
+                    root.menu(self.mouse-x / 1px, self.mouse-y / 1px, (self.absolute-position.x + self.mouse-x) / 1px, (self.absolute-position.y + self.mouse-y) / 1px);
                 }
             }
             scroll-event(event) => {

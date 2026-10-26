@@ -837,7 +837,7 @@ fn select(ui: &MainWindow, node: NodeId) {
 }
 
 /// Where a menu was asked for.
-#[cfg_attr(not(test), expect(dead_code, reason = "the context menu entry (P4) builds it"))]
+#[cfg_attr(not(test), expect(dead_code, reason = "rows, crumbs and keys open the menu in P4.T2"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Source {
     /// A right-click on the treemap; the tile under the pointer is passed separately (`hit_at`).
@@ -854,7 +854,6 @@ enum Source {
 /// pointer (`Source::Map`). `None` for no item or an item that left the tree. A right-click on a
 /// tile or a row selects it, as a left-click does; on a crumb it does not (selecting an ancestor
 /// would move the map), and a key acts on the selection that already exists.
-#[cfg_attr(not(test), expect(dead_code, reason = "the context menu entry (P4) calls it"))]
 fn target_of(l: &Loaded, src: Source, hit: Option<NodeId>) -> Option<(NodeId, bool)> {
     let (node, select) = match src {
         Source::Map => (hit?, true),
@@ -886,8 +885,39 @@ struct Request {
 /// with `disk`) runs here only, for every way a menu opens. A menu drops the checks still to come
 /// of the menu before it.
 fn menu_request(src: Source, hit: Option<NodeId>, disk: impl Fn(&std::path::Path) -> menu::Disk) -> Option<Request> {
-    let _ = (src, hit, disk);
-    unimplemented!("menu_request")
+    SESSION.with_borrow_mut(|s| {
+        let l = s.loaded.as_ref().filter(|_| menu::allowed(s.scan.state(), true))?;
+        let (node, select) = target_of(l, src, hit)?;
+        let tree = &l.data.tree;
+        let request = Request { node, select, is_dir: tree.node(node).is_dir, edits: l.edits, prepared: menu::prepare(tree, node, disk) };
+        s.follow = None;
+        Some(request)
+    })
+}
+
+/// Opens the context menu asked for at `src` (`hit`: the tile under the pointer) at the window
+/// point `at` (logical pixels), when `menu_request` gives one. A tile or a row is selected first;
+/// the hover and the tooltip hide. No session borrow is held while the menu shows (it runs its
+/// own message loop).
+fn open_menu(ui: &MainWindow, src: Source, hit: Option<NodeId>, at: (f32, f32)) {
+    let Some(window) = shell::window_hwnd(ui.window()) else { return };
+    let Some(request) = menu_request(src, hit, menu::read_disk) else { return };
+    if request.select {
+        select(ui, request.node);
+    }
+    drop_hover(ui);
+    let owner = shell::menu_owner(window);
+    let path = match &request.prepared {
+        menu::Prepared::Ready { path, .. } => Some(path.as_path()),
+        menu::Prepared::Changed => None,
+    };
+    let flags = menu::query_flags(shell::key_down(windows::Win32::UI::Input::KeyboardAndMouse::VK_SHIFT));
+    let popup = match shell::Popup::new(owner, path, flags, |shell_ok| menu::items(&request.prepared, request.is_dir, shell_ok)) {
+        Ok(popup) => popup,
+        Err(e) => return eprintln!("The menu cannot open: {e}"),
+    };
+    let (x, y) = menu::screen_point(at, ui.window().scale_factor(), shell::client_origin(window));
+    popup.track(owner, window, menu::Anchor::Point(x, y));
 }
 
 /// The tile of the treemap (`rects`, physical pixels) under the view point (x, y) while `moving`
@@ -1495,6 +1525,15 @@ fn wire_tree_and_treemap(ui: &MainWindow) {
             if let Some(n) = node_at(&ui, x, y) {
                 select(&ui, n);
             }
+        }
+    });
+    ui.on_treemap_menu({
+        let weak = ui.as_weak();
+        move |x, y, wx, wy| {
+            let Some(ui) = weak.upgrade() else { return };
+            // The tile a left-click there hits, also during a zoom.
+            let hit = node_at(&ui, x, y);
+            open_menu(&ui, Source::Map, hit, (wx, wy));
         }
     });
     ui.on_treemap_open({

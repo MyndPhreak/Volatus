@@ -248,6 +248,13 @@ pub fn terminal_folder(path: &Path, is_dir: bool) -> PathBuf {
     if is_dir { path.to_path_buf() } else { path.parent().unwrap_or(path).to_path_buf() }
 }
 
+/// Where a menu opens on the screen, in physical pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Anchor {
+    /// Its top-left corner is at the pointer.
+    Point(i32, i32),
+}
+
 /// The screen point, in physical pixels, of the window point `window` in logical pixels, for a
 /// window whose client origin is at `origin` on the screen. Rounds half away from zero.
 pub fn screen_point(window: (f32, f32), scale: f32, origin: (i32, i32)) -> (i32, i32) {
@@ -559,6 +566,17 @@ mod tests {
         let got = [(false, false), (true, false), (false, true), (true, true)].map(|(shift, ctrl)| invoke_mask(shift, ctrl));
 
         assert_eq!(got, [BASE, BASE | 0x1000_0000, BASE | 0x4000_0000, BASE | 0x1000_0000 | 0x4000_0000]);
+    }
+
+    #[test]
+    fn local_constants_match_those_of_the_windows_crate() {
+        use windows::Win32::UI::Shell as sh;
+
+        let local = [CMF_NORMAL, CMF_EXTENDEDVERBS, CMIC_MASK_UNICODE, CMIC_MASK_PTINVOKE, CMIC_MASK_SHIFT_DOWN, CMIC_MASK_CONTROL_DOWN];
+
+        // CMIC_MASK_UNICODE is missing in windows 0.62.2: it is SEE_MASK_UNICODE (spike S7).
+        let crate_values = [sh::CMF_NORMAL, sh::CMF_EXTENDEDVERBS, sh::SEE_MASK_UNICODE, sh::CMIC_MASK_PTINVOKE, sh::CMIC_MASK_SHIFT_DOWN, sh::CMIC_MASK_CONTROL_DOWN];
+        assert_eq!((local, COPYENGINE_E_USER_CANCELLED), (crate_values, sh::COPYENGINE_E_USER_CANCELLED.0));
     }
 
     // ---- verbs ----
