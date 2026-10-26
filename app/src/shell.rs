@@ -20,7 +20,7 @@
 use crate::menu::{Anchor, Cmd, Item, SHELL_FIRST, SHELL_LAST};
 use std::cell::{Cell, RefCell};
 use std::path::Path;
-use windows::Win32::Foundation::{E_FAIL, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{E_ABORT, E_FAIL, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{ClientToScreen, ScreenToClient};
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoTaskMemFree};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, GetKeyState, SetFocus, VIRTUAL_KEY};
@@ -271,7 +271,7 @@ pub fn act(cmd: Cmd, path: &Path, is_dir: bool) -> Result<(), String> {
                 execute(SHELLEXECUTEINFOW { fMask: SEE_MASK_IDLIST | SEE_MASK_FLAG_NO_UI, lpVerb: w!("explore"), lpIDList: pidl.0.cast(), ..Default::default() })
             } else {
                 // SAFETY: a full id list that lives for the call.
-                unsafe { SHOpenFolderAndSelectItems(pidl.0, None, 0) }
+                opened(unsafe { SHOpenFolderAndSelectItems(pidl.0, None, 0) })
             };
             opened.map_err(|e| failed("Explorer cannot open", &e))
         }
@@ -302,9 +302,14 @@ fn execute(mut info: SHELLEXECUTEINFOW) -> windows::core::Result<()> {
     unsafe { ShellExecuteExW(&mut info) }
 }
 
-/// The result of `SHOpenFolderAndSelectItems` as Explore Folder reads it.
+/// The result of `SHOpenFolderAndSelectItems` as Explore Folder reads it. `E_ABORT` is opened: with
+/// another file manager as the handler of folders (OneCommander on the owner's machine, CM-P4 live
+/// check), the folder opens in it and the call gives `E_ABORT`, as it cannot select the file there.
 fn opened(result: windows::core::Result<()>) -> windows::core::Result<()> {
-    result
+    match result {
+        Err(e) if e.code() == E_ABORT => Ok(()),
+        other => other,
+    }
 }
 
 /// The HWND of the Slint window, once it exists.
