@@ -3,7 +3,6 @@
 //! shows, what an id the shell menu returns means, which flags the shell calls get, and what a
 //! change on disk after an action means for the map. The shell calls themselves are in `shell`
 //! (P4); they use the traits and functions here.
-#![cfg_attr(not(test), expect(dead_code, reason = "the shell menu (P4) uses these decisions"))]
 
 use crate::model::ScanState;
 use scan::{NodeId, Tree};

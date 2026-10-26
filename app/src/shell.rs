@@ -27,7 +27,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, GetKeyState, SetFocu
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::Shell::{
     CMINVOKECOMMANDINFO, CMINVOKECOMMANDINFOEX, DefSubclassProc, GCS_VERBW, IContextMenu, IContextMenu2, IContextMenu3, IShellFolder, RemoveWindowSubclass, SHBindToParent,
-    SHParseDisplayName, SetWindowSubclass,
+    SEE_MASK_FLAG_NO_UI, SEE_MASK_IDLIST, SHELLEXECUTEINFOW, SHOpenFolderAndSelectItems, SHParseDisplayName, SetWindowSubclass, ShellExecuteExW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, GWLP_HINSTANCE, GetCursorPos, GetWindowLongPtrW,
@@ -260,8 +260,46 @@ fn after_menu(window: HWND) {
 /// path on a command line (D4); Copy Path puts the raw path on the clipboard. `Err` with what
 /// failed; Windows shows no error box of its own.
 pub fn act(cmd: Cmd, path: &Path, is_dir: bool) -> Result<(), String> {
-    let _ = (cmd, path, is_dir);
-    unimplemented!("act")
+    let failed = |what: &str, e: &dyn std::fmt::Display| format!("{what} {}: {e}", path.display());
+    if matches!(cmd, Cmd::ExploreFolder | Cmd::CommandPrompt) && !com_ready() {
+        return Err(failed("No COM for", &"CoInitializeEx failed"));
+    }
+    match cmd {
+        Cmd::ExploreFolder => {
+            let pidl = parse(path).map_err(|e| failed("Windows cannot find", &e))?;
+            let opened = if is_dir {
+                execute(SHELLEXECUTEINFOW { fMask: SEE_MASK_IDLIST | SEE_MASK_FLAG_NO_UI, lpVerb: w!("explore"), lpIDList: pidl.0.cast(), ..Default::default() })
+            } else {
+                // SAFETY: a full id list that lives for the call.
+                unsafe { SHOpenFolderAndSelectItems(pidl.0, None, 0) }
+            };
+            opened.map_err(|e| failed("Explorer cannot open", &e))
+        }
+        Cmd::CommandPrompt => {
+            let folder = HSTRING::from(std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()).as_os_str());
+            let info = SHELLEXECUTEINFOW {
+                fMask: SEE_MASK_FLAG_NO_UI,
+                lpVerb: w!("open"),
+                lpFile: w!("cmd.exe"),
+                lpDirectory: PCWSTR(folder.as_ptr()),
+                ..Default::default()
+            };
+            execute(info).map_err(|e| failed("A command prompt cannot start in", &e))
+        }
+        Cmd::CopyPath => {
+            let copied = arboard::Clipboard::new().and_then(|mut c| c.set_text(path.to_string_lossy()));
+            copied.map_err(|e| failed("The clipboard cannot take", &e))
+        }
+        Cmd::ShowFolder | Cmd::Rescan => Ok(()),
+    }
+}
+
+/// `ShellExecuteExW` of `info`, shown as a normal window.
+fn execute(mut info: SHELLEXECUTEINFOW) -> windows::core::Result<()> {
+    info.cbSize = size_of::<SHELLEXECUTEINFOW>() as u32;
+    info.nShow = SW_SHOWNORMAL.0;
+    // SAFETY: every string and the id list in `info` outlive the call.
+    unsafe { ShellExecuteExW(&mut info) }
 }
 
 /// The HWND of the Slint window, once it exists.

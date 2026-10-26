@@ -922,6 +922,13 @@ fn open_menu(ui: &MainWindow, src: Source, hit: Option<NodeId>, at: menu::At) {
     let id = popup.track(owner, window, anchor);
     match (menu::picked(id), request.prepared) {
         (menu::Picked::Volatus(menu::Cmd::Rescan), _) => rescan(ui),
+        (menu::Picked::Volatus(menu::Cmd::ShowFolder), _) => open_node(ui, request.node),
+        (menu::Picked::Volatus(cmd), menu::Prepared::Ready { path, .. }) => {
+            let act = |cmd, p: &std::path::Path| shell::act(cmd, p, request.is_dir).inspect_err(|e| eprintln!("{e}"));
+            if let Some(note) = run_action(cmd, &path, request.is_dir, act) {
+                ui.set_elevate_note(note.into());
+            }
+        }
         (menu::Picked::Shell(offset), menu::Prepared::Ready { path, before }) => {
             let verb = popup.verb(offset);
             let follow = menu::Follow::new(request.node, request.edits, path, menu::is_delete(verb.as_deref()), before);
@@ -950,7 +957,6 @@ fn hit_at(rects: &[Rect], moving: Option<Move>, t: f64, view: (f64, f64), x: f64
 /// Runs a Volatus menu item through `act` and gives the note to show when it fails. `act` gets the
 /// command and the path to use (a command prompt gets `menu::terminal_folder`). Show this folder
 /// and Rescan are not actions of the shell: no call, no note.
-#[cfg_attr(not(test), expect(dead_code, reason = "the Volatus menu items (P4) call it"))]
 fn run_action(
     cmd: menu::Cmd,
     path: &std::path::Path,
