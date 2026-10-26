@@ -391,6 +391,7 @@ export component MainWindow inherits Window {
                         vertical-stretch: 1;
                         accessible-role: tree;
                         accessible-label: "File tree";
+                        accessible-description: "Press the Menu key for the context menu.";
                         accessible-value: root.selected-row >= 0 ? root.rows[root.selected-row].name : "";
                         key-pressed(event) => {
                             if (Keys.menu(event)) {

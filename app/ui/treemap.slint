@@ -137,6 +137,7 @@ component CrumbLink inherits Rectangle {
     focus := FocusScope {
         accessible-role: button;
         accessible-label: "Open \{root.crumb.text}";
+        accessible-description: "Press the Menu key for the context menu.";
         accessible-action-default => { root.open(root.crumb.index); }
         key-pressed(event) => {
             if (event.text == Key.Return || event.text == " ") {
@@ -511,7 +512,7 @@ export component TreemapView inherits Rectangle {
         accessible-role: image;
         accessible-label: "Treemap";
         accessible-value: root.value;
-        accessible-description: "Press an arrow key to move the selection. Press Enter to open the folder. Press Backspace to go up one folder.";
+        accessible-description: "Press an arrow key to move the selection. Press Enter to open the folder. Press Backspace to go up one folder. Press the Menu key for the context menu.";
         key-pressed(event) => {
             if (Keys.menu(event)) {
                 if (root.has-selection) {

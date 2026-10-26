@@ -32,6 +32,18 @@ A Rust, WizTree-style disk usage analyzer for Windows. Speed comes from reading 
 | A folder given on the command line is scanned after the window's first frame (2 s fallback timer); the window then opens on the results screen, not on the start screen | The window draws before the walker takes the CPUs. |
 | No runtime flag for the redesign (owner decision) | The owner approved a replacement; rollback is a per-phase `git revert`. |
 
+### Context menu (2026-10-26, plan `docs/superpowers/plans/2026-10-26-volatus-context-menu.md`)
+| Decision | Reason |
+|---|---|
+| The menu is the real shell menu of the item (`IContextMenu`), with the Volatus items on top (Explore Folder, Command Prompt Here, Copy Path, Show this folder); no Rename | The user gets the verbs and the extensions that Explorer has, and Volatus builds no file operations of its own. |
+| A delete removes the node in place: `Tree::remove` behind `Arc::make_mut`, not an overlay of removed ids | Every reader (rows, rects, footer, counts) sees one tree. The risk is a second strong `Arc` holder, which would copy the tree on each delete; a node-address test pins it. |
+| D1: `windows` is a direct dependency of `app` (with `arboard` and `raw-window-handle`) | The shell menu, COM and the window subclass need the API. All three already sit in `Cargo.lock`, so no new package. Recorded deviation, owner-approved 2026-10-26. |
+| D2: no runtime flag for the menu | Both D1 and D2 were approved by the owner on 2026-10-26; rollback is a `git revert` of the phase. Recorded deviation. |
+| Fail-closed disk check before the shell sees a path: the path is the scan root plus the raw names, read again on disk. Gone, unreadable, a file/folder mismatch or a twin name (a name that shares its spelling with a sibling after Windows' name rules) gives only "This item changed on disk. Rescan." | A wrong or stale path must never reach a verb such as Delete. A check that cannot decide counts as changed. |
+| Explore Folder runs on a worker thread with its own COM apartment | The Explorer call can block; the window stays alive. |
+| After the menu closes, one `WM_MOUSEMOVE` with the current cursor position goes to the window | The click that closed the menu landed at the old right-click point (found in the spike). |
+| A delete is the shell's own `delete` verb (the canonical name only); Windows asks for the confirmation, and a cancel changes nothing | Only one verb can remove a node. A hard-linked file counts once, so deleting one name removes the whole counted size (stated limit). |
+
 ## Failure behaviour (explicit)
 - Volume not NTFS, no admin, or MFT parse error on a record: log, skip that record, count it in `ScanStats.skipped`. If the volume header or `$MFT` run list fails, fall back to the walker and show a banner. Never show partial totals as complete.
 - Fixup (update sequence) mismatch: record is dropped and counted. Never trusted.
