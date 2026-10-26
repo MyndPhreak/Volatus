@@ -27,8 +27,11 @@ slint-build = "1.18.1"
 embed-resource = "3"
 
 # Elevation: IsUserAnAdmin and ShellExecuteW "runas". Same crate and version as `scan`, so no new code in the build.
+# The fast delete (purge.rs) opens each item relative to its folder's handle with NtCreateFile:
+# Wdk_Foundation (OBJECT_ATTRIBUTES), Wdk_Storage_FileSystem (NtCreateFile), Win32_System_IO
+# (IO_STATUS_BLOCK) and Win32_Security (OBJECT_ATTRIBUTES's fields; also gates CreateFileW).
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Diagnostics_Debug", "Win32_System_WindowsProgramming", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = ["Wdk_Foundation", "Wdk_Storage_FileSystem", "Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Diagnostics_Debug", "Win32_System_IO", "Win32_System_WindowsProgramming", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 # The shell context menu (`shell`): IContextMenu and IShellFolder exist only in `windows`, not in
 # `windows-sys`. 0.62.2 is the copy Slint already builds: `cargo tree -p app -i windows -e normal`
 # fails if a second version comes in. Win32_System_Registry: SHELLEXECUTEINFOW (ShellExecuteExW).

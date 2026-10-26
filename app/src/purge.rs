@@ -1,5 +1,9 @@
-//! Fast permanent delete: one walk of the target, the files removed in parallel, then the folders
-//! from the deepest up. Direct Win32 calls on verbatim (`\\?\`) paths. A link is never followed.
+//! Fast permanent delete, relative to open handles. The target is opened once by its verbatim
+//! (`\\?\`) path. Everything below it is opened by name relative to its parent folder's open
+//! handle (`NtCreateFile` with `RootDirectory`), checked through its own handle, and removed
+//! through that handle (`SetFileInformationByHandle`). No path below the target is ever resolved
+//! again, so a folder swapped for a link during the run cannot lead the delete out of the target.
+//! Work runs in parallel batches; progress and `stop` are seen between batches.
 
 #![cfg_attr(not(test), expect(dead_code, reason = "wired in the UI task"))]
 #![cfg_attr(test, allow(dead_code, reason = "tests do not use every item; wired in the UI task"))]
@@ -9,24 +13,41 @@ use rayon::prelude::*;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
+use windows_sys::Wdk::Storage::FileSystem::{
+    FILE_OPEN, FILE_OPEN_FOR_BACKUP_INTENT, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT, NtCreateFile,
+};
 use windows_sys::Win32::Foundation::{
-    ERROR_ACCESS_DENIED, ERROR_DIR_NOT_EMPTY, ERROR_FILE_NOT_FOUND, ERROR_INVALID_NAME, ERROR_NO_MORE_FILES,
-    GetLastError, HANDLE, INVALID_HANDLE_VALUE,
+    CloseHandle, ERROR_ACCESS_DENIED, ERROR_DIR_NOT_EMPTY, ERROR_FILE_NOT_FOUND, ERROR_FILENAME_EXCED_RANGE,
+    ERROR_INVALID_DATA, ERROR_INVALID_FUNCTION, ERROR_INVALID_HANDLE, ERROR_INVALID_NAME, ERROR_INVALID_PARAMETER,
+    ERROR_NO_MORE_FILES, ERROR_NOT_SUPPORTED, GetLastError, HANDLE, INVALID_HANDLE_VALUE, OBJ_CASE_INSENSITIVE,
+    RtlNtStatusToDosError, UNICODE_STRING,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    DeleteFileW, FILE_ATTRIBUTE_ARCHIVE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_NORMAL,
-    FILE_ATTRIBUTE_NOT_CONTENT_INDEXED, FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_REPARSE_POINT,
-    FILE_ATTRIBUTE_SYSTEM, FILE_ATTRIBUTE_TEMPORARY, FIND_FIRST_EX_LARGE_FETCH, FindClose, FindExInfoBasic,
-    FindExSearchNameMatch, FindFirstFileExW, FindNextFileW, RemoveDirectoryW, SetFileAttributesW, WIN32_FIND_DATAW,
+    CreateFileW, DELETE, FILE_ATTRIBUTE_ARCHIVE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_HIDDEN,
+    FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_NOT_CONTENT_INDEXED, FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_READONLY,
+    FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_SYSTEM, FILE_ATTRIBUTE_TAG_INFO, FILE_ATTRIBUTE_TEMPORARY,
+    FILE_BASIC_INFO, FILE_DISPOSITION_FLAG_DELETE, FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE,
+    FILE_DISPOSITION_FLAG_POSIX_SEMANTICS, FILE_DISPOSITION_INFO, FILE_DISPOSITION_INFO_EX,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_FULL_DIR_INFO, FILE_INFO_BY_HANDLE_CLASS,
+    FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_STANDARD_INFO,
+    FILE_WRITE_ATTRIBUTES, FileAttributeTagInfo, FileBasicInfo, FileDispositionInfo, FileDispositionInfoEx,
+    FileFullDirectoryInfo, FileStandardInfo, GetFileInformationByHandleEx, OPEN_EXISTING, SYNCHRONIZE,
+    SetFileInformationByHandle,
 };
+use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 
-/// Items removed between two progress calls: the bound on the progress rate.
-const PROGRESS_EVERY: usize = 256;
+/// Items run in one parallel batch: the bound on the progress rate and on the work done after
+/// `stop` is set.
+const BATCH: usize = 256;
+
+/// Bytes asked for in one folder-listing call.
+const LIST_BUF: usize = 64 * 1024;
 
 /// The reparse-tag bit of a name surrogate (junction, symlink): the same test as the scan's.
 const NAME_SURROGATE: u32 = 0x2000_0000;
 
-/// The attributes `SetFileAttributesW` can set; the others in the find data are left out.
+/// The attributes `FileBasicInfo` sets here; the others are left out.
 const SETTABLE: u32 = FILE_ATTRIBUTE_ARCHIVE
     | FILE_ATTRIBUTE_HIDDEN
     | FILE_ATTRIBUTE_NOT_CONTENT_INDEXED
@@ -34,32 +55,20 @@ const SETTABLE: u32 = FILE_ATTRIBUTE_ARCHIVE
     | FILE_ATTRIBUTE_SYSTEM
     | FILE_ATTRIBUTE_TEMPORARY;
 
+/// Access for an item that is removed: delete, read its kind, and clear read-only for the
+/// classic delete. No data access, so opening a file does not start an antivirus scan of it.
+const ITEM_ACCESS: u32 = DELETE | FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES | SYNCHRONIZE;
+
+/// Access for a folder that is listed and then removed.
+const FOLDER_ACCESS: u32 = ITEM_ACCESS | FILE_LIST_DIRECTORY;
+
+/// No `FILE_SHARE_DELETE`: while the run holds a folder open, no one can rename or move it out
+/// of the target (that needs delete access), so the folder the handle names stays where the run
+/// found it.
+const SHARE: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE;
+
 /// The fast permanent delete.
 pub struct Purge;
-
-/// A file or a link the walk found: removed in the parallel pass. `path` has no NUL.
-struct Entry {
-    path: Vec<u16>,
-    attrs: u32,
-    size: u64,
-    link: bool,
-}
-
-/// A real folder (not a link) the walk found, `depth` below the target. `listed` is false when
-/// its listing failed: that failure is already a skip, so the folder is not tried again.
-struct Folder {
-    path: Vec<u16>,
-    attrs: u32,
-    depth: usize,
-    listed: bool,
-}
-
-/// What happened to one item. `Removed` holds the bytes it freed.
-enum Done {
-    Removed(u64),
-    Skipped(Skipped),
-    NotRun,
-}
 
 /// How a run works. `Purge` uses `Options::default()`; tests and the benchmark change it.
 pub struct Options<'a> {
@@ -68,11 +77,17 @@ pub struct Options<'a> {
     /// Test seam: called on the caller's thread with a folder's path after the folder is listed
     /// and before anything in it is opened.
     pub hook: Option<&'a dyn Fn(&Path)>,
+    /// Items per parallel batch (at least 1).
+    pub batch: usize,
+    /// Bytes per listing call.
+    pub list_buf: usize,
+    /// Worker threads; 0 is rayon's global pool (one per logical CPU).
+    pub threads: usize,
 }
 
 impl Default for Options<'_> {
     fn default() -> Self {
-        Options { posix: true, hook: None }
+        Options { posix: true, hook: None, batch: BATCH, list_buf: LIST_BUF, threads: 0 }
     }
 }
 
@@ -82,83 +97,332 @@ impl Remover for Purge {
     }
 }
 
+/// What an opened item is, from its own handle.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Kind {
+    File,
+    /// A name-surrogate reparse point (junction, symlink, mount point): removed as itself.
+    Link,
+    /// A folder to list: plain, or a reparse folder that is not a link (a cloud folder).
+    Folder,
+}
+
+fn kind_of(attrs: u32, tag: u32) -> Kind {
+    if is_name_surrogate_link(attrs, tag) {
+        Kind::Link
+    } else if attrs & FILE_ATTRIBUTE_DIRECTORY != 0 {
+        Kind::Folder
+    } else {
+        Kind::File
+    }
+}
+
+/// An open handle, closed once: by `close` where the result is reported (the close is what
+/// completes a delete), otherwise on drop.
+struct Handle(HANDLE);
+
+// SAFETY: a kernel handle is a process-wide value that any thread may use. The calls made on
+// one here (relative opens, information queries and sets) are synchronous, and a folder handle
+// is listed only by the one worker that opened it.
+unsafe impl Send for Handle {}
+// SAFETY: as above; shared use is only relative opens against a parent folder's handle.
+unsafe impl Sync for Handle {}
+
+impl Handle {
+    fn close(self) -> Result<(), u32> {
+        let h = std::mem::ManuallyDrop::new(self).0;
+        // SAFETY: `h` is open and owned by this value; `ManuallyDrop` keeps drop from closing it again.
+        if unsafe { CloseHandle(h) } == 0 { Err(last_error()) } else { Ok(()) }
+    }
+}
+
+impl Drop for Handle {
+    /// Drop closes a handle only where nothing is removed through it: the item is a skip
+    /// already, the run stopped, or the handle is opened again. A failed close there means a
+    /// bad handle value, a bug that a debug build stops on.
+    fn drop(&mut self) {
+        // SAFETY: `self.0` is open and owned by this value, and is closed only here.
+        let closed = unsafe { CloseHandle(self.0) };
+        debug_assert!(closed != 0, "CloseHandle failed: {}", last_error());
+    }
+}
+
+/// One entry of a folder listing. The listing only gives the name, the size for the byte count,
+/// and a hint of the access to ask for; what is done to the item comes from its own handle.
+struct Listed {
+    name: Vec<u16>,
+    size: u64,
+    folder_hint: bool,
+}
+
+/// An open folder the run works in. `h` is taken out when the folder's turn to be removed comes.
+struct DirNode {
+    h: Option<Handle>,
+    attrs: u32,
+    path: Vec<u16>,
+    parent: Option<usize>,
+    /// Entries not finished yet.
+    pending: usize,
+}
+
+/// One item of a batch.
+enum Work {
+    /// An entry of the open folder `parent`.
+    Child { parent: usize, entry: Listed },
+    /// The folder `dir`, with every entry finished: removed through `h`.
+    Rmdir { dir: usize, h: Handle, attrs: u32 },
+}
+
+/// What a worker did with one item of a batch.
+enum Finished {
+    /// `stop` was set before the item started: nothing was done to it.
+    NotRun,
+    Child { parent: usize, name: Vec<u16>, done: Done },
+    Rmdir { dir: usize, result: Result<(), u32> },
+}
+
+/// What happened to one entry.
+enum Done {
+    /// Removed, with the bytes it freed.
+    Removed(u64),
+    Failed(u32),
+    /// A folder, open and listed (or not, with the listing's error).
+    Folder { h: Handle, attrs: u32, listed: Result<Vec<Listed>, u32> },
+}
+
+/// The caller-thread state of a folder run.
+struct Run<'a> {
+    dirs: Vec<DirNode>,
+    work: Vec<Work>,
+    out: Outcome,
+    hook: Option<&'a dyn Fn(&Path)>,
+}
+
 /// The target must be a verbatim (`\\?\`) path, as `check_target` gives it; any other path is
-/// one skip and nothing is touched. A file or a link target is removed alone. A folder is
-/// walked once (links inside are entries, never walked into), its files and links are removed
-/// in parallel, then its folders from the deepest up, the target last. A link is a
-/// name-surrogate reparse point only; any other reparse folder (a cloud folder) is walked
-/// and removed as a folder, any other reparse file as a file. `removed_items` counts files,
-/// links and folders; `removed_bytes` is the find-data size of the files (a link frees
-/// nothing). A folder that will not empty stays: it gets its own skip unless a skip already
-/// recorded lies in it, so a target that stays always has a skip (or `stopped`).
+/// one skip and nothing is touched. The target is opened without following a link. A file or a
+/// link target is removed through its handle. A folder is listed; each entry is opened relative
+/// to the folder's handle and checked through its own: a link (a name-surrogate reparse point)
+/// is removed as itself and never listed, a file is removed, a folder (plain, or a reparse
+/// folder that is not a link, like a cloud folder) is listed in turn. A folder is removed when
+/// all its entries are finished. A folder that will not empty stays: it gets its own skip unless
+/// a skip already recorded lies in it, so a target that stays always has a skip (or `stopped`).
+/// Counts are as `Remover` says; `removed_bytes` takes each file's size from its folder listing.
 pub(crate) fn remove_with(t: &DeleteTarget, progress: &dyn Fn(u64, u64), stop: &AtomicBool, opts: &Options) -> Outcome {
-    {
-        let mut out = Outcome::default();
-        let root: Vec<u16> = t.path.as_os_str().encode_wide().collect();
-        let prefix: Vec<u16> = r"\\?\".encode_utf16().collect();
-        if !root.starts_with(&prefix) {
-            out.skipped.push(skip(&root, ERROR_INVALID_NAME));
+    let mut out = Outcome::default();
+    let root: Vec<u16> = t.path.as_os_str().encode_wide().collect();
+    let prefix: Vec<u16> = r"\\?\".encode_utf16().collect();
+    if !root.starts_with(&prefix) {
+        out.skipped.push(skip(&root, ERROR_INVALID_NAME));
+        return out;
+    }
+    let posix = AtomicBool::new(opts.posix);
+    let opened = open_path(&root).and_then(|h| tag_info(&h).map(|(attrs, tag)| (h, attrs, tag)));
+    let (h, attrs, tag) = match opened {
+        Ok(v) => v,
+        Err(code) => {
+            out.skipped.push(skip(&root, code));
             return out;
         }
-        let data = match find_one(&root) {
-            Ok(d) => d,
-            Err(code) => {
-                out.skipped.push(skip(&root, code));
-                return out;
+    };
+    let kind = kind_of(attrs, tag);
+    if kind != Kind::Folder {
+        let size = if kind == Kind::File { standard_size(&h) } else { Ok(0) };
+        match size.and_then(|size| dispose(h, attrs, &posix).map(|()| size)) {
+            Ok(size) => {
+                out.removed_items = 1;
+                out.removed_bytes = size;
             }
+            Err(code) => out.skipped.push(skip(&root, code)),
+        }
+        progress(out.removed_items, out.removed_bytes);
+        return out;
+    }
+    let listed = match list(&h, opts.list_buf) {
+        Ok(l) => l,
+        Err(code) => {
+            out.skipped.push(skip(&root, code));
+            progress(0, 0);
+            return out;
+        }
+    };
+    if let Some(f) = opts.hook {
+        f(&to_path(&root));
+    }
+    let mut run = Run { dirs: Vec::new(), work: Vec::new(), out, hook: opts.hook };
+    run.add_folder(h, attrs, root, None, listed);
+    // Only the benchmark asks for a thread count. If that pool cannot be made, the global pool
+    // does the same work.
+    let pool = match opts.threads {
+        0 => None,
+        n => rayon::ThreadPoolBuilder::new().num_threads(n).build().ok(),
+    };
+    let (batch, list_buf) = (opts.batch.max(1), opts.list_buf);
+    while !run.work.is_empty() {
+        if stop.load(Ordering::Relaxed) {
+            run.out.stopped = true;
+            break;
+        }
+        let items = run.work.split_off(run.work.len().saturating_sub(batch));
+        let dirs = &run.dirs;
+        let go = || -> Vec<Finished> {
+            items
+                .into_par_iter()
+                .map(|w| if stop.load(Ordering::Relaxed) { Finished::NotRun } else { w.run(dirs, &posix, list_buf) })
+                .collect()
         };
-        let attrs = data.dwFileAttributes;
-        let link = is_name_surrogate_link(attrs, data.dwReserved0);
-        if attrs & FILE_ATTRIBUTE_DIRECTORY == 0 || link {
-            tally(&mut out, remove_entry(&Entry { path: root, attrs, size: file_size(&data), link }));
-            progress(out.removed_items, out.removed_bytes);
-            return out;
-        }
-        let Some((files, mut folders)) = walk(root, attrs, stop, &mut out.skipped, opts.hook) else {
-            out.stopped = true;
-            return out;
+        let finished = match &pool {
+            Some(p) => p.install(go),
+            None => go(),
         };
-        for chunk in files.chunks(PROGRESS_EVERY) {
-            if stop.load(Ordering::Relaxed) {
-                out.stopped = true;
-                break;
-            }
-            let done: Vec<Done> = chunk
-                .par_iter()
-                .map(|e| if stop.load(Ordering::Relaxed) { Done::NotRun } else { remove_entry(e) })
-                .collect();
-            for d in done {
-                tally(&mut out, d);
-            }
-            progress(out.removed_items, out.removed_bytes);
+        for f in finished {
+            run.apply(f);
         }
-        if !out.stopped {
-            // Deepest first, so each folder is empty when its turn comes; the target is depth 0.
-            folders.sort_by_key(|f| std::cmp::Reverse(f.depth));
-            for (i, f) in folders.iter().filter(|f| f.listed).enumerate() {
-                if stop.load(Ordering::Relaxed) {
-                    out.stopped = true;
-                    break;
+        progress(run.out.removed_items, run.out.removed_bytes);
+    }
+    progress(run.out.removed_items, run.out.removed_bytes);
+    // Folders still open (the run stopped) close here, with nothing removed through them.
+    drop(run.dirs);
+    run.out
+}
+
+impl Work {
+    /// Runs on a worker thread.
+    fn run(self, dirs: &[DirNode], posix: &AtomicBool, list_buf: usize) -> Finished {
+        match self {
+            Work::Rmdir { dir, h, attrs } => Finished::Rmdir { dir, result: dispose(h, attrs, posix) },
+            Work::Child { parent, entry } => {
+                let done = match dirs.get(parent).and_then(|d| d.h.as_ref()) {
+                    Some(ph) => child(ph, &entry, posix, list_buf),
+                    None => Done::Failed(ERROR_INVALID_HANDLE),
+                };
+                Finished::Child { parent, name: entry.name, done }
+            }
+        }
+    }
+}
+
+impl Run<'_> {
+    /// Adds an open, listed folder and queues its entries (or its own removal when it is empty).
+    fn add_folder(&mut self, h: Handle, attrs: u32, path: Vec<u16>, parent: Option<usize>, listed: Vec<Listed>) {
+        let dir = self.dirs.len();
+        let pending = listed.len();
+        self.dirs.push(DirNode { h: Some(h), attrs, path, parent, pending });
+        if pending == 0 {
+            self.queue_rmdir(dir);
+        } else {
+            self.work.extend(listed.into_iter().map(|entry| Work::Child { parent: dir, entry }));
+        }
+    }
+
+    fn queue_rmdir(&mut self, dir: usize) {
+        let node = &mut self.dirs[dir];
+        match node.h.take() {
+            Some(h) => self.work.push(Work::Rmdir { dir, h, attrs: node.attrs }),
+            // Not reached: a folder's removal is queued once. Reported, never silent.
+            None => self.out.skipped.push(skip(&node.path, ERROR_INVALID_HANDLE)),
+        }
+    }
+
+    /// One entry of `parent` is finished; the folder's removal is queued after its last one.
+    fn finish(&mut self, parent: usize) {
+        let node = &mut self.dirs[parent];
+        node.pending -= 1;
+        if node.pending == 0 {
+            self.queue_rmdir(parent);
+        }
+    }
+
+    fn child_path(&self, parent: usize, name: &[u16]) -> Vec<u16> {
+        let mut p = self.dirs[parent].path.clone();
+        p.push(u16::from(b'\\'));
+        p.extend_from_slice(name);
+        p
+    }
+
+    /// Takes one worker result into the outcome, on the caller's thread.
+    fn apply(&mut self, f: Finished) {
+        match f {
+            // Nothing was done to it; its folder stays.
+            Finished::NotRun => self.out.stopped = true,
+            Finished::Child { parent, name, done } => match done {
+                Done::Removed(bytes) => {
+                    self.out.removed_items += 1;
+                    self.out.removed_bytes += bytes;
+                    self.finish(parent);
                 }
-                match with_read_only_retry(&f.path, f.attrs, false, RemoveDirectoryW) {
-                    Ok(()) => out.removed_items += 1,
+                Done::Failed(code) => {
+                    let path = self.child_path(parent, &name);
+                    self.out.skipped.push(skip(&path, code));
+                    self.finish(parent);
+                }
+                Done::Folder { h, attrs, listed } => {
+                    let path = self.child_path(parent, &name);
+                    match listed {
+                        Ok(listed) => {
+                            if let Some(f) = self.hook {
+                                f(&to_path(&path));
+                            }
+                            self.add_folder(h, attrs, path, Some(parent), listed);
+                        }
+                        Err(code) => {
+                            // Not listed, so not removed: the skip says why the folder stays.
+                            self.out.skipped.push(skip(&path, code));
+                            drop(h);
+                            self.finish(parent);
+                        }
+                    }
+                }
+            },
+            Finished::Rmdir { dir, result } => {
+                let path = std::mem::take(&mut self.dirs[dir].path);
+                match result {
+                    Ok(()) => self.out.removed_items += 1,
                     Err(ERROR_DIR_NOT_EMPTY) => {
                         // A skipped item inside is listed already; anything else (a file added
                         // during the run, a delete still pending) gets a skip for the folder.
-                        let s = skip(&f.path, ERROR_DIR_NOT_EMPTY);
-                        if needs_skip_for_folder(&s.path, &out.skipped) {
-                            out.skipped.push(s);
+                        let s = skip(&path, ERROR_DIR_NOT_EMPTY);
+                        if needs_skip_for_folder(&s.path, &self.out.skipped) {
+                            self.out.skipped.push(s);
                         }
                     }
-                    Err(code) => out.skipped.push(skip(&f.path, code)),
+                    Err(code) => self.out.skipped.push(skip(&path, code)),
                 }
-                if (i + 1) % PROGRESS_EVERY == 0 {
-                    progress(out.removed_items, out.removed_bytes);
+                if let Some(p) = self.dirs[dir].parent {
+                    self.finish(p);
                 }
             }
         }
-        progress(out.removed_items, out.removed_bytes);
-        out
+    }
+}
+
+/// Opens one listed entry relative to its folder's handle and acts on what its own handle says
+/// it is: a link or a file is removed through the handle, a folder is listed and handed back
+/// open. The listing's kind only picks the access asked for; a folder where the listing saw
+/// something else is opened again, still relative to the same folder handle.
+fn child(parent: &Handle, e: &Listed, posix: &AtomicBool, list_buf: usize) -> Done {
+    let access = if e.folder_hint { FOLDER_ACCESS } else { ITEM_ACCESS };
+    let opened = open_child_info(parent, &e.name, access).and_then(|(h, attrs, tag)| {
+        if kind_of(attrs, tag) == Kind::Folder && !e.folder_hint {
+            drop(h);
+            open_child_info(parent, &e.name, FOLDER_ACCESS)
+        } else {
+            Ok((h, attrs, tag))
+        }
+    });
+    let (h, attrs, tag) = match opened {
+        Ok(v) => v,
+        Err(code) => return Done::Failed(code),
+    };
+    match kind_of(attrs, tag) {
+        Kind::Folder => Done::Folder { listed: list(&h, list_buf), h, attrs },
+        Kind::Link => match dispose(h, attrs, posix) {
+            Ok(()) => Done::Removed(0),
+            Err(code) => Done::Failed(code),
+        },
+        Kind::File => match dispose(h, attrs, posix) {
+            Ok(()) => Done::Removed(e.size),
+            Err(code) => Done::Failed(code),
+        },
     }
 }
 
@@ -174,179 +438,214 @@ fn needs_skip_for_folder(folder: &Path, skips: &[Skipped]) -> bool {
     !skips.iter().any(|s| s.path.starts_with(folder))
 }
 
-/// Adds one item's result to the outcome.
-fn tally(out: &mut Outcome, d: Done) {
-    match d {
-        Done::Removed(bytes) => {
-            out.removed_items += 1;
-            out.removed_bytes += bytes;
-        }
-        Done::Skipped(s) => out.skipped.push(s),
-        Done::NotRun => out.stopped = true,
-    }
-}
-
-/// Removes a file (`DeleteFileW`) or a link itself: a folder link or junction with
-/// `RemoveDirectoryW`, a file link with `DeleteFileW`. Neither call follows the link.
-fn remove_entry(e: &Entry) -> Done {
-    let op = if e.link && e.attrs & FILE_ATTRIBUTE_DIRECTORY != 0 { RemoveDirectoryW } else { DeleteFileW };
-    match with_read_only_retry(&e.path, e.attrs, e.link, op) {
-        Ok(()) => Done::Removed(if e.link { 0 } else { e.size }),
-        Err(code) => Done::Skipped(skip(&e.path, code)),
-    }
-}
-
-/// Runs `op` on `path`. On access denied, a read-only item that is not a link loses the flag and
-/// `op` runs once more; if that fails too, the flag is put back. A link's attributes are never
-/// set, so nothing reaches its target. The error is the last delete's, never the restore's: the
-/// item is a skip either way.
-fn with_read_only_retry(
-    path: &[u16],
-    attrs: u32,
-    link: bool,
-    op: unsafe extern "system" fn(*const u16) -> i32,
-) -> Result<(), u32> {
+/// Opens the target itself by its verbatim path, without following a final link.
+fn open_path(path: &[u16]) -> Result<Handle, u32> {
     let z = nul(path);
-    // SAFETY: `z` is NUL-terminated and lives across the call.
-    if unsafe { op(z.as_ptr()) } != 0 {
-        return Ok(());
-    }
-    let code = last_error();
-    if code != ERROR_ACCESS_DENIED || attrs & FILE_ATTRIBUTE_READONLY == 0 || link {
-        return Err(code);
-    }
-    let cleared = match attrs & SETTABLE {
-        0 => FILE_ATTRIBUTE_NORMAL,
-        a => a,
-    };
-    // SAFETY: `z` is NUL-terminated and lives across the call.
-    if unsafe { SetFileAttributesW(z.as_ptr(), cleared) } == 0 {
-        return Err(last_error());
-    }
-    // SAFETY: as above.
-    if unsafe { op(z.as_ptr()) } != 0 {
-        return Ok(());
-    }
-    let code = last_error();
-    // SAFETY: as above. A failed restore leaves the item without the flag; it is a skip already.
-    unsafe { SetFileAttributesW(z.as_ptr(), (attrs & SETTABLE) | FILE_ATTRIBUTE_READONLY) };
-    Err(code)
-}
-
-/// Lists every folder under `root` once, depth first. Links are entries, never walked into.
-/// A listing that fails is a skip for that folder and the walk goes on. `None` when `stop` is
-/// set: nothing has been removed yet.
-fn walk(
-    root: Vec<u16>,
-    attrs: u32,
-    stop: &AtomicBool,
-    skipped: &mut Vec<Skipped>,
-    hook: Option<&dyn Fn(&Path)>,
-) -> Option<(Vec<Entry>, Vec<Folder>)> {
-    let (mut files, mut folders) = (Vec::new(), Vec::new());
-    let mut todo = vec![(root, attrs, 0)];
-    while let Some((dir, attrs, depth)) = todo.pop() {
-        if stop.load(Ordering::Relaxed) {
-            return None;
-        }
-        let listed = list(&dir, |d| {
-            let mut path = dir.clone();
-            path.push(u16::from(b'\\'));
-            path.extend_from_slice(name_of(d));
-            let a = d.dwFileAttributes;
-            let link = is_name_surrogate_link(a, d.dwReserved0);
-            if a & FILE_ATTRIBUTE_DIRECTORY != 0 && !link {
-                todo.push((path, a, depth + 1));
-            } else {
-                files.push(Entry { path, attrs: a, size: file_size(d), link });
-            }
-        });
-        if let Err(code) = listed {
-            skipped.push(skip(&dir, code));
-        }
-        if let Some(h) = hook {
-            h(&PathBuf::from(std::ffi::OsString::from_wide(&dir)));
-        }
-        folders.push(Folder { path: dir, attrs, depth, listed: listed.is_ok() });
-    }
-    Some((files, folders))
-}
-
-/// Calls `f` for each entry in the folder `dir` (no NUL), `.` and `..` left out.
-fn list(dir: &[u16], mut f: impl FnMut(&WIN32_FIND_DATAW)) -> Result<(), u32> {
-    let mut pattern = dir.to_vec();
-    pattern.extend(r"\*".encode_utf16());
-    let pattern = nul(&pattern);
-    let mut data = WIN32_FIND_DATAW::default();
-    // SAFETY: `pattern` is NUL-terminated; `data` is a WIN32_FIND_DATAW, the type FindExInfoBasic
-    // fills; no search filter is passed.
-    let h: HANDLE = unsafe {
-        FindFirstFileExW(
-            pattern.as_ptr(),
-            FindExInfoBasic,
-            (&raw mut data).cast(),
-            FindExSearchNameMatch,
+    // SAFETY: `z` is NUL-terminated and lives across the call; no security attributes and no
+    // template handle are passed.
+    let h = unsafe {
+        CreateFileW(
+            z.as_ptr(),
+            FOLDER_ACCESS,
+            SHARE,
             std::ptr::null(),
-            FIND_FIRST_EX_LARGE_FETCH,
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            std::ptr::null_mut(),
         )
     };
-    if h == INVALID_HANDLE_VALUE {
-        return match last_error() {
-            // No entry at all, not even `.`: an empty listing.
-            ERROR_FILE_NOT_FOUND => Ok(()),
-            code => Err(code),
-        };
-    }
-    let mut result = Ok(());
-    loop {
-        let name = name_of(&data);
-        if name != [u16::from(b'.')] && name != [u16::from(b'.'), u16::from(b'.')] {
-            f(&data);
-        }
-        // SAFETY: `h` is the open find handle; `data` is a valid WIN32_FIND_DATAW.
-        if unsafe { FindNextFileW(h, &mut data) } == 0 {
-            match last_error() {
-                ERROR_NO_MORE_FILES => {}
-                code => result = Err(code),
-            }
-            break;
-        }
-    }
-    // SAFETY: `h` is the open find handle and is closed once.
-    if unsafe { FindClose(h) } == 0 && result.is_ok() {
-        result = Err(last_error());
-    }
-    result
+    if h == INVALID_HANDLE_VALUE { Err(last_error()) } else { Ok(Handle(h)) }
 }
 
-/// The find data of the item at `path` itself (no wildcard), so a link is seen as a link.
-fn find_one(path: &[u16]) -> Result<WIN32_FIND_DATAW, u32> {
-    let z = nul(path);
-    let mut data = WIN32_FIND_DATAW::default();
-    // SAFETY: `z` is NUL-terminated; `data` is a WIN32_FIND_DATAW, the type FindExInfoBasic fills;
-    // no search filter is passed.
-    let h = unsafe {
-        FindFirstFileExW(z.as_ptr(), FindExInfoBasic, (&raw mut data).cast(), FindExSearchNameMatch, std::ptr::null(), 0)
+/// A plain entry name: not empty, not `.` or `..`, and no separator, stream colon or NUL.
+fn is_plain_name(name: &[u16]) -> bool {
+    let dot = u16::from(b'.');
+    !name.is_empty()
+        && name != [dot]
+        && name != [dot, dot]
+        && !name.iter().any(|&c| c == u16::from(b'\\') || c == u16::from(b'/') || c == u16::from(b':') || c == 0)
+}
+
+/// Opens `name` relative to the open folder `parent`, without following a link, and reads the
+/// opened item's attributes and reparse tag from its own handle.
+fn open_child_info(parent: &Handle, name: &[u16], access: u32) -> Result<(Handle, u32, u32), u32> {
+    if !is_plain_name(name) {
+        return Err(ERROR_INVALID_NAME);
+    }
+    let bytes = u16::try_from(name.len() * 2).map_err(|_| ERROR_FILENAME_EXCED_RANGE)?;
+    let us = UNICODE_STRING { Length: bytes, MaximumLength: bytes, Buffer: name.as_ptr().cast_mut() };
+    let oa = OBJECT_ATTRIBUTES {
+        Length: size_of::<OBJECT_ATTRIBUTES>() as u32,
+        RootDirectory: parent.0,
+        ObjectName: &us,
+        Attributes: OBJ_CASE_INSENSITIVE,
+        SecurityDescriptor: std::ptr::null(),
+        SecurityQualityOfService: std::ptr::null(),
     };
-    if h == INVALID_HANDLE_VALUE {
-        return Err(last_error());
+    let mut h: HANDLE = std::ptr::null_mut();
+    let mut iosb = IO_STATUS_BLOCK::default();
+    // SAFETY: `oa` points at `us`, whose counted buffer is `name` (NT names need no NUL); both
+    // outlive the call, which only reads them. `parent` is an open folder handle. `h` and
+    // `iosb` are valid out locations. No allocation size and no extended attributes.
+    let status = unsafe {
+        NtCreateFile(
+            &mut h,
+            access,
+            &oa,
+            &mut iosb,
+            std::ptr::null(),
+            0,
+            SHARE,
+            FILE_OPEN,
+            FILE_OPEN_REPARSE_POINT | FILE_OPEN_FOR_BACKUP_INTENT | FILE_SYNCHRONOUS_IO_NONALERT,
+            std::ptr::null(),
+            0,
+        )
+    };
+    if status < 0 {
+        // SAFETY: a pure conversion of a status value.
+        return Err(unsafe { RtlNtStatusToDosError(status) });
     }
-    // SAFETY: `h` is the open find handle and is closed once.
-    if unsafe { FindClose(h) } == 0 {
-        return Err(last_error());
-    }
-    Ok(data)
+    let h = Handle(h);
+    let (attrs, tag) = tag_info(&h)?;
+    Ok((h, attrs, tag))
 }
 
-/// The entry's name, up to its NUL.
-fn name_of(d: &WIN32_FIND_DATAW) -> &[u16] {
-    let n = d.cFileName.iter().position(|c| *c == 0).unwrap_or(d.cFileName.len());
-    &d.cFileName[..n]
+/// The opened item's attributes and reparse tag (the tag means something only with
+/// `FILE_ATTRIBUTE_REPARSE_POINT`).
+fn tag_info(h: &Handle) -> Result<(u32, u32), u32> {
+    let mut i = FILE_ATTRIBUTE_TAG_INFO::default();
+    // SAFETY: `i` is the FILE_ATTRIBUTE_TAG_INFO this class fills, passed with its exact size.
+    let ok = unsafe {
+        GetFileInformationByHandleEx(h.0, FileAttributeTagInfo, (&raw mut i).cast(), size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32)
+    };
+    if ok == 0 { Err(last_error()) } else { Ok((i.FileAttributes, i.ReparseTag)) }
 }
 
-/// The logical size from the find data.
-fn file_size(d: &WIN32_FIND_DATAW) -> u64 {
-    (u64::from(d.nFileSizeHigh) << 32) | u64::from(d.nFileSizeLow)
+/// The logical size of the open file.
+fn standard_size(h: &Handle) -> Result<u64, u32> {
+    let mut i = FILE_STANDARD_INFO::default();
+    // SAFETY: `i` is the FILE_STANDARD_INFO this class fills, passed with its exact size.
+    let ok = unsafe {
+        GetFileInformationByHandleEx(h.0, FileStandardInfo, (&raw mut i).cast(), size_of::<FILE_STANDARD_INFO>() as u32)
+    };
+    if ok == 0 { Err(last_error()) } else { Ok(u64::try_from(i.EndOfFile).unwrap_or(0)) }
+}
+
+/// Lists the open folder `h`, `.` and `..` left out.
+fn list(h: &Handle, buf_bytes: usize) -> Result<Vec<Listed>, u32> {
+    const NAME_AT: usize = std::mem::offset_of!(FILE_FULL_DIR_INFO, FileName);
+    let mut buf = vec![0u64; buf_bytes.max(4096).div_ceil(8)];
+    let len = buf.len() * 8;
+    let len_u32 = u32::try_from(len).map_err(|_| ERROR_INVALID_PARAMETER)?;
+    let mut out = Vec::new();
+    loop {
+        // SAFETY: `buf` is writable for `len` bytes and 8-byte aligned; the class fills it with
+        // FILE_FULL_DIR_INFO records.
+        let ok = unsafe { GetFileInformationByHandleEx(h.0, FileFullDirectoryInfo, buf.as_mut_ptr().cast(), len_u32) };
+        if ok == 0 {
+            return match last_error() {
+                ERROR_NO_MORE_FILES => Ok(out),
+                // No entry at all, not even `.`: an empty listing.
+                ERROR_FILE_NOT_FOUND if out.is_empty() => Ok(out),
+                code => Err(code),
+            };
+        }
+        let base = buf.as_ptr().cast::<u8>();
+        let mut off = 0;
+        loop {
+            if off + NAME_AT > len {
+                return Err(ERROR_INVALID_DATA);
+            }
+            // SAFETY: the record's fixed part, `off..off + NAME_AT`, lies inside `buf` (checked
+            // above). Each field is read unaligned through a raw place, with no reference made.
+            let (next, attrs, name_len, tag, size) = unsafe {
+                let p = base.add(off).cast::<FILE_FULL_DIR_INFO>();
+                (
+                    (&raw const (*p).NextEntryOffset).read_unaligned() as usize,
+                    (&raw const (*p).FileAttributes).read_unaligned(),
+                    (&raw const (*p).FileNameLength).read_unaligned() as usize,
+                    // With FILE_ATTRIBUTE_REPARSE_POINT, EaSize holds the reparse tag (MS-FSCC, FileFullDirectoryInformation).
+                    (&raw const (*p).EaSize).read_unaligned(),
+                    (&raw const (*p).EndOfFile).read_unaligned(),
+                )
+            };
+            if name_len % 2 != 0 || off + NAME_AT + name_len > len {
+                return Err(ERROR_INVALID_DATA);
+            }
+            let mut name = vec![0u16; name_len / 2];
+            // SAFETY: the name's `name_len` bytes lie inside `buf` (checked above) and `name` has
+            // room for exactly that many bytes; the two do not overlap.
+            unsafe { std::ptr::copy_nonoverlapping(base.add(off + NAME_AT), name.as_mut_ptr().cast::<u8>(), name_len) };
+            let dot = u16::from(b'.');
+            if name != [dot] && name != [dot, dot] {
+                out.push(Listed {
+                    name,
+                    size: u64::try_from(size).unwrap_or(0),
+                    folder_hint: kind_of(attrs, tag) == Kind::Folder,
+                });
+            }
+            if next == 0 {
+                break;
+            }
+            off += next;
+        }
+    }
+}
+
+/// Removes the item `h` is open on, through `h`, and closes it. The POSIX delete runs first: the
+/// name goes at once, even while the item is open elsewhere, and read-only is ignored. When the
+/// volume refuses it (FAT32, exFAT, some network shares), `posix` is cleared for the rest of the
+/// run and the classic delete runs; a read-only item then loses the flag through the handle
+/// first, and gets it back if the delete still fails.
+fn dispose(h: Handle, attrs: u32, posix: &AtomicBool) -> Result<(), u32> {
+    if posix.load(Ordering::Relaxed) {
+        let flags = FILE_DISPOSITION_FLAG_DELETE
+            | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS
+            | FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE;
+        match set_info(&h, FileDispositionInfoEx, &FILE_DISPOSITION_INFO_EX { Flags: flags }) {
+            Ok(()) => return h.close(),
+            Err(ERROR_INVALID_PARAMETER | ERROR_NOT_SUPPORTED | ERROR_INVALID_FUNCTION) => {
+                posix.store(false, Ordering::Relaxed);
+            }
+            Err(code) => return Err(code),
+        }
+    }
+    let delete = FILE_DISPOSITION_INFO { DeleteFile: true };
+    match set_info(&h, FileDispositionInfo, &delete) {
+        Ok(()) => return h.close(),
+        Err(ERROR_ACCESS_DENIED) if attrs & FILE_ATTRIBUTE_READONLY != 0 => {}
+        Err(code) => return Err(code),
+    }
+    set_attrs(&h, match attrs & SETTABLE {
+        0 => FILE_ATTRIBUTE_NORMAL,
+        a => a,
+    })?;
+    match set_info(&h, FileDispositionInfo, &delete) {
+        Ok(()) => h.close(),
+        Err(code) => {
+            // The item stays: give the flag back. If that fails, the skip names the restore's
+            // error, because the item has lost its read-only flag.
+            set_attrs(&h, (attrs & SETTABLE) | FILE_ATTRIBUTE_READONLY)?;
+            Err(code)
+        }
+    }
+}
+
+/// Sets the open item's attributes; times are left as they are (0).
+fn set_attrs(h: &Handle, attrs: u32) -> Result<(), u32> {
+    set_info(h, FileBasicInfo, &FILE_BASIC_INFO { FileAttributes: attrs, ..FILE_BASIC_INFO::default() })
+}
+
+/// `SetFileInformationByHandle` with `info`, which must be the structure `class` takes.
+fn set_info<T>(h: &Handle, class: FILE_INFO_BY_HANDLE_CLASS, info: &T) -> Result<(), u32> {
+    // SAFETY: `info` is valid for `size_of::<T>()` bytes across the call, which only reads it.
+    let ok = unsafe { SetFileInformationByHandle(h.0, class, (&raw const *info).cast(), size_of::<T>() as u32) };
+    if ok == 0 { Err(last_error()) } else { Ok(()) }
+}
+
+fn to_path(p: &[u16]) -> PathBuf {
+    PathBuf::from(std::ffi::OsString::from_wide(p))
 }
 
 fn nul(p: &[u16]) -> Vec<u16> {
@@ -359,7 +658,7 @@ fn last_error() -> u32 {
 }
 
 fn skip(path: &[u16], code: u32) -> Skipped {
-    Skipped { path: PathBuf::from(std::ffi::OsString::from_wide(path)), reason: reason_from_win32(code as i32) }
+    Skipped { path: to_path(path), reason: reason_from_win32(code as i32) }
 }
 
 /// Real file system tests. Every path is under one unique directory in the temp folder that the
