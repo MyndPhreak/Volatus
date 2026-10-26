@@ -26,6 +26,8 @@ pub enum Refusal {
     ScanRunning,
     /// The root or the item could not be resolved to a real path, or the environment is unknown.
     Unresolved,
+    /// The path is not a local drive path (a network share, for example).
+    NotLocal,
 }
 
 /// The item the user chose, with the scan's numbers for it.
@@ -46,6 +48,8 @@ pub trait Probe {
     fn is_dir(&self, p: &Path) -> bool;
     /// The real path of `p` (links, `..` and trailing dots resolved), or `None` if unknown.
     fn resolve(&self, p: &Path) -> Option<PathBuf>;
+    /// The real path of the item to delete. A link item stays the link.
+    fn resolve_target(&self, p: &Path) -> Option<PathBuf>;
 }
 
 /// The real file system. A link is not followed: it counts as a file, as in the scan.
@@ -59,6 +63,9 @@ impl Probe for RealFs {
         std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_dir())
     }
     fn resolve(&self, p: &Path) -> Option<PathBuf> {
+        std::fs::canonicalize(p).ok()
+    }
+    fn resolve_target(&self, p: &Path) -> Option<PathBuf> {
         std::fs::canonicalize(p).ok()
     }
 }
@@ -87,11 +94,6 @@ impl Env {
             program_data: var("ProgramData").unwrap_or_default(),
             user_profile: var("USERPROFILE")?,
         })
-    }
-
-    /// Reads the process environment.
-    pub fn from_process() -> Option<Env> {
-        Env::from_lookup(|k| std::env::var(k).ok())
     }
 }
 
@@ -143,6 +145,7 @@ pub fn refusal_text(r: Refusal) -> &'static str {
         Refusal::KindChanged => "The item changed after the scan. Scan again.",
         Refusal::ScanRunning => "A scan is running. Wait until it ends.",
         Refusal::Unresolved => "Volatus cannot find the real path of the item. It does not delete the item.",
+        Refusal::NotLocal => "",
     }
 }
 
@@ -166,8 +169,19 @@ fn within(child: &str, parent: &str) -> bool {
 /// `Unresolved`. Then, in this order: `NotUnderRoot`, `DriveRoot`, `NotUnderRoot` (the root
 /// itself), `ProtectedFolder`, `Missing`, `KindChanged`. Reads the real environment for the
 /// protected list; if that is unknown, everything is `Unresolved`.
-pub fn check_target(root: &Path, target: &Path, is_dir: bool, fs: &dyn Probe) -> Result<(), Refusal> {
-    match Env::from_process() {
+pub fn check_target(root: &Path, target: &Path, is_dir: bool, fs: &dyn Probe) -> Result<PathBuf, Refusal> {
+    check_target_with(|k| std::env::var(k).ok(), root, target, is_dir, fs)
+}
+
+/// `check_target` with the environment lookup given, so tests never read the real one.
+pub fn check_target_with(
+    get: impl Fn(&str) -> Option<String>,
+    root: &Path,
+    target: &Path,
+    is_dir: bool,
+    fs: &dyn Probe,
+) -> Result<PathBuf, Refusal> {
+    match Env::from_lookup(get) {
         Some(env) => check_target_in(root, target, is_dir, fs, &env),
         None => Err(Refusal::Unresolved),
     }
@@ -189,7 +203,7 @@ pub fn check_target_in(
     is_dir: bool,
     fs: &dyn Probe,
     env: &Env,
-) -> Result<(), Refusal> {
+) -> Result<PathBuf, Refusal> {
     // A miss here never falls back to the raw path: the text of a path proves nothing.
     let root = fs.resolve(root).ok_or(Refusal::Unresolved)?;
     let target = resolve_item(fs, target).ok_or(Refusal::Unresolved)?;
@@ -220,7 +234,7 @@ pub fn check_target_in(
     if fs.is_dir(&target) != is_dir {
         return Err(Refusal::KindChanged);
     }
-    Ok(())
+    Ok(target)
 }
 
 /// Plain Delete is the Recycle Bin. Only Shift gives the permanent delete.
@@ -305,11 +319,13 @@ mod tests {
     use std::collections::HashMap;
 
     /// A map-backed file system. `items`: `norm` path -> `is_dir`. `links`: a path (and what is
-    /// under it) that resolves to another path. `broken`: paths `resolve` cannot answer for.
-    /// `resolve` also does `..` and trailing dots, as `canonicalize` does.
+    /// under it) that resolves to another path. `shorts`: 8.3 names that resolve to long names.
+    /// `broken`: paths `resolve` cannot answer for. `resolve` also does `..` and trailing dots, as
+    /// `canonicalize` does; `resolve_target` does not follow a link item, as `RealFs` does.
     struct Fake {
         items: HashMap<String, bool>,
         links: Vec<(String, String)>,
+        shorts: Vec<(String, String)>,
         broken: Vec<String>,
     }
 
@@ -318,11 +334,16 @@ mod tests {
             Fake {
                 items: items.iter().map(|(p, d)| (norm(Path::new(p)), *d)).collect(),
                 links: Vec::new(),
+                shorts: Vec::new(),
                 broken: Vec::new(),
             }
         }
         fn link(mut self, from: &str, to: &str) -> Fake {
             self.links.push((norm(Path::new(from)), norm(Path::new(to))));
+            self
+        }
+        fn short(mut self, from: &str, to: &str) -> Fake {
+            self.shorts.push((norm(Path::new(from)), norm(Path::new(to))));
             self
         }
         fn broken(mut self, p: &str) -> Fake {
@@ -354,19 +375,28 @@ mod tests {
                 }
             }
             let mut out = parts.join("\\");
-            if !out.contains('\\') {
+            // A bare `C:` is drive-relative: it must not turn into `c:\`.
+            if n.contains('\\') && !out.contains('\\') {
                 out.push('\\');
             }
             let key = out.trim_end_matches('\\').to_string();
             if self.broken.iter().any(|b| within(&key, b)) {
                 return None;
             }
-            for (from, to) in &self.links {
+            for (from, to) in self.shorts.iter().chain(self.links.iter()) {
                 if let Some(rest) = key.strip_prefix(from.as_str()).filter(|r| r.is_empty() || r.starts_with('\\')) {
                     return Some(PathBuf::from(format!("{to}{rest}")));
                 }
             }
             Some(PathBuf::from(out))
+        }
+        fn resolve_target(&self, p: &Path) -> Option<PathBuf> {
+            let key = norm(p);
+            if self.links.iter().any(|(from, _)| *from == key) {
+                let name = p.file_name()?;
+                return self.resolve(p.parent()?).map(|d| d.join(name));
+            }
+            self.resolve(p)
         }
     }
 
@@ -386,7 +416,7 @@ mod tests {
     }
 
     fn check(root: &str, target: &str, fs: &Fake) -> Result<(), Refusal> {
-        check_target_in(Path::new(root), Path::new(target), true, fs, &env())
+        check_target_in(Path::new(root), Path::new(target), true, fs, &env()).map(|_| ())
     }
 
     #[test]
@@ -502,14 +532,14 @@ mod tests {
     #[test]
     fn a_folder_where_a_file_was_is_kind_changed() {
         let fs = Fake::with(&[(r"C:\data\x", true)]);
-        let got = check_target_in(Path::new(r"C:\data"), Path::new(r"C:\data\x"), false, &fs, &env());
+        let got = check_target_in(Path::new(r"C:\data"), Path::new(r"C:\data\x"), false, &fs, &env()).map(|_| ());
         assert_eq!(got, Err(Refusal::KindChanged));
     }
 
     #[test]
     fn a_file_of_the_expected_kind_is_ok() {
         let fs = Fake::with(&[(r"C:\data\x.txt", false)]);
-        let got = check_target_in(Path::new(r"C:\data"), Path::new(r"C:\data\x.txt"), false, &fs, &env());
+        let got = check_target_in(Path::new(r"C:\data"), Path::new(r"C:\data\x.txt"), false, &fs, &env()).map(|_| ());
         assert_eq!(got, Ok(()));
     }
 
@@ -566,7 +596,7 @@ mod tests {
     fn a_link_item_is_not_followed() {
         // The link points into Windows, but the item is the link itself: only its parent resolves.
         let fs = Fake::with(&[(r"C:\data\lnk", false)]).link(r"C:\data\lnk", r"C:\Windows");
-        let got = check_target_in(Path::new(r"C:\data"), Path::new(r"C:\data\lnk"), false, &fs, &env());
+        let got = check_target_in(Path::new(r"C:\data"), Path::new(r"C:\data\lnk"), false, &fs, &env()).map(|_| ());
         assert_eq!(got, Ok(()));
     }
 
@@ -649,6 +679,7 @@ mod tests {
             Refusal::KindChanged,
             Refusal::ScanRunning,
             Refusal::Unresolved,
+            Refusal::NotLocal,
         ];
         let mut texts: Vec<&str> = all.iter().map(|r| refusal_text(*r)).collect();
         for t in &texts {
@@ -658,6 +689,100 @@ mod tests {
         texts.dedup();
         assert_eq!(texts.len(), all.len(), "texts must differ");
         assert!(refusal_text(Refusal::Unresolved).contains("real path"));
+    }
+
+    #[test]
+    fn unc_paths_are_not_local() {
+        let fs = all_dirs(&[]);
+        for (root, t) in [
+            (r"\\localhost\C$\", r"\\localhost\C$\Windows"),
+            (r"\\?\UNC\localhost\C$\", r"\\?\UNC\localhost\C$\Windows"),
+            (r"\\server\share", r"\\server\share\x"),
+            (r"C:\", r"\\server\share\x"),
+            (r"\\server\share", r"C:\x"),
+        ] {
+            assert_eq!(check(root, t, &fs), Err(Refusal::NotLocal), "{root} {t}");
+        }
+    }
+
+    #[test]
+    fn short_names_resolve_to_the_protected_long_names() {
+        let fs = all_dirs(&[r"C:\Program Files\App"])
+            .short(r"C:\PROGRA~1", r"C:\Program Files")
+            .short(r"C:\PROGRA~3", r"C:\ProgramData")
+            .short(r"C:\Users\DEV~1", r"C:\Users\dev");
+        for p in [r"C:\PROGRA~1", r"C:\PROGRA~3", r"C:\Users\DEV~1", r"c:\progra~1\"] {
+            assert_eq!(check(r"C:\", p, &fs), Err(Refusal::ProtectedFolder), "{p}");
+        }
+        // A child through the short name is a child of the long name: allowed.
+        assert_eq!(check(r"C:\", r"C:\PROGRA~1\App", &fs), Ok(()));
+    }
+
+    #[test]
+    fn a_link_item_named_like_a_short_name_is_allowed() {
+        let fs = Fake::with(&[(r"C:\PROGRA~1", false)]).link(r"C:\PROGRA~1", r"C:\Elsewhere");
+        let got = check_target_in(Path::new(r"C:\"), Path::new(r"C:\PROGRA~1"), false, &fs, &env());
+        assert_eq!(got.map(|_| ()), Ok(()));
+    }
+
+    #[test]
+    fn a_target_that_is_not_absolute_or_has_no_name_is_unresolved() {
+        let fs = all_dirs(&[r"C:\data"]);
+        for t in [r"C:", r"C:x", r"\", r"data\x", r"C:\data\.."] {
+            assert_eq!(check(r"C:\", t, &fs), Err(Refusal::Unresolved), "{t}");
+        }
+        assert_eq!(check(r"C:", r"C:\data", &fs), Err(Refusal::Unresolved));
+    }
+
+    #[test]
+    fn ok_returns_the_resolved_path() {
+        let fs = all_dirs(&[r"C:\data\x"]);
+        let got = check_target_in(Path::new(r"C:\data"), Path::new(r"C:\data\SUB\..\x"), true, &fs, &env());
+        assert_eq!(got, Ok(PathBuf::from(r"c:\data\x")));
+    }
+
+    #[test]
+    fn a_user_profile_in_short_form_still_protects_the_profile() {
+        let fs = all_dirs(&[]).short(r"C:\Users\DEV~1", r"C:\Users\dev");
+        let mut e = env();
+        e.user_profile = r"C:\Users\DEV~1".into();
+        let got = check_target_in(Path::new(r"C:\"), Path::new(r"C:\Users\dev"), true, &fs, &e);
+        assert_eq!(got, Err(Refusal::ProtectedFolder));
+    }
+
+    #[test]
+    fn a_user_profile_that_does_not_resolve_is_unresolved() {
+        let fs = all_dirs(&[r"C:\data\x"]).broken(r"C:\Users\ghost");
+        let mut e = env();
+        e.user_profile = r"C:\Users\ghost".into();
+        let got = check_target_in(Path::new(r"C:\data"), Path::new(r"C:\data\x"), true, &fs, &e);
+        assert_eq!(got, Err(Refusal::Unresolved));
+    }
+
+    #[test]
+    fn a_windows_dir_that_does_not_resolve_is_unresolved() {
+        let fs = all_dirs(&[r"C:\data\x"]).broken(r"C:\Windows");
+        let got = check_target_in(Path::new(r"C:\data"), Path::new(r"C:\data\x"), true, &fs, &env());
+        assert_eq!(got, Err(Refusal::Unresolved));
+    }
+
+    #[test]
+    fn a_program_folder_that_does_not_resolve_falls_back_to_its_raw_path() {
+        // An absent `Program Files (x86)` is legal on a 32-bit machine.
+        let fs = all_dirs(&[r"C:\data\x"]).broken(r"C:\Program Files (x86)");
+        let got = check_target_in(Path::new(r"C:\data"), Path::new(r"C:\data\x"), true, &fs, &env());
+        assert_eq!(got.map(|_| ()), Ok(()));
+    }
+
+    #[test]
+    fn check_target_with_no_env_is_unresolved_and_with_an_env_checks() {
+        let fs = all_dirs(&[r"C:\data\x"]);
+        let (root, t) = (Path::new(r"C:\data"), Path::new(r"C:\data\x"));
+        assert_eq!(check_target_with(lookup(&[]), root, t, true, &fs), Err(Refusal::Unresolved));
+        assert_eq!(check_target_with(lookup(&FULL), root, t, true, &fs), Ok(PathBuf::from(r"c:\data\x")));
+        let win = all_dirs(&[]);
+        let got = check_target_with(lookup(&FULL), Path::new(r"C:\"), Path::new(r"C:\Windows"), true, &win);
+        assert_eq!(got, Err(Refusal::ProtectedFolder));
     }
 
     #[test]
