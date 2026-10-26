@@ -343,39 +343,42 @@ struct LayoutJob {
 
 /// The session part of a new layout: a new `layout_seq` (any layout on its way is late now) and
 /// no layout kept for a zoom in. `None` with no scan shown.
-fn begin_layout(_s: &mut Session) -> Option<LayoutJob> {
-    unimplemented!("begin_layout")
+fn begin_layout(s: &mut Session) -> Option<LayoutJob> {
+    let l = s.loaded.as_ref()?;
+    let (data, root) = (l.data.clone(), l.view_root);
+    s.layout_seq += 1;
+    // A layout kept for a zoom in is older than this one now.
+    s.held = None;
+    // With `--timing`, each layout (and new picture) shows, so a hover that starts one is seen.
+    if s.flags.timing {
+        eprintln!("Layout {}.", s.layout_seq);
+    }
+    Some(LayoutJob { data, root, generation: s.scan.generation(), seq: s.layout_seq, size: s.map_size })
 }
 
 /// `apply_removal` of `n`, and the layout to run when the map shows the change (`begin_layout`).
-fn take_removal(_n: NodeId) -> (Removal, Option<LayoutJob>) {
-    unimplemented!("take_removal")
+fn take_removal(n: NodeId) -> (Removal, Option<LayoutJob>) {
+    let removal = apply_removal(n);
+    let job = if matches!(removal, Removal::Shown(_)) { SESSION.with_borrow_mut(begin_layout) } else { None };
+    (removal, job)
 }
 
 /// Lays out and draws the treemap for the current folder and window size on a worker thread.
 /// The window keeps the old image until the new one arrives. A result is dropped if a newer
 /// layout or a new scan started meanwhile.
+fn relayout(ui: &MainWindow) {
+    if let Some(job) = SESSION.with_borrow_mut(begin_layout) {
+        spawn_layout(ui, job);
+    }
+}
+
+/// Runs `job` (`begin_layout`) on a worker thread and lands it when it is still the latest.
 /// ponytail: one thread per request and no early stop; fine while a layout takes well under
 /// a second and resizes are debounced. Upgrade path: a cancel flag per request.
-fn relayout(ui: &MainWindow) {
+fn spawn_layout(ui: &MainWindow, LayoutJob { data, root, generation, seq, size: (lw, lh) }: LayoutJob) {
     let scale = ui.window().scale_factor();
     let theme = if ui.get_dark() { Theme::Dark } else { Theme::Light };
-    let Some((data, root, generation, seq, w, h)) = SESSION.with_borrow_mut(|s| {
-        let l = s.loaded.as_ref()?;
-        let (lw, lh) = s.map_size;
-        let (w, h) = ((lw * scale).round() as u32, (lh * scale).round() as u32);
-        let (data, root) = (l.data.clone(), l.view_root);
-        s.layout_seq += 1;
-        // A layout kept for a zoom in is older than this one now.
-        s.held = None;
-        // With `--timing`, each layout (and new picture) shows, so a hover that starts one is seen.
-        if s.flags.timing {
-            eprintln!("Layout {}.", s.layout_seq);
-        }
-        Some((data, root, s.scan.generation(), s.layout_seq, w, h))
-    }) else {
-        return;
-    };
+    let (w, h) = ((lw * scale).round() as u32, (lh * scale).round() as u32);
     let weak = ui.as_weak();
     std::thread::spawn(move || {
         let chrome = Chrome::scaled(f64::from(scale));
@@ -1184,7 +1187,8 @@ const ROOT_GONE: &str = "The scanned folder was deleted.";
 /// the scan root. Nothing is scanned again. With `--timing` it prints the time it took.
 fn removed(ui: &MainWindow, n: NodeId) {
     let started = Instant::now();
-    match apply_removal(n) {
+    let (removal, job) = take_removal(n);
+    match removal {
         Removal::Start(note) => {
             clear(ui);
             show_state(ui);
@@ -1193,7 +1197,9 @@ fn removed(ui: &MainWindow, n: NodeId) {
         Removal::Shown(after) => {
             stop_move(ui);
             drop_hover(ui);
-            relayout(ui);
+            if let Some(job) = job {
+                spawn_layout(ui, job);
+            }
             select(ui, after.select);
             sync_types(ui);
         }
