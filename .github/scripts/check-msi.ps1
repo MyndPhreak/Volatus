@@ -113,11 +113,11 @@ $apps = Rows 'SELECT `Target`, `Attributes`, `Timeout` FROM `WixCloseApplication
 # TerminateProcess (32) or PromptToContinue (64).
 Check ($apps.Count -eq 1 -and $apps[0][0] -eq 'volatus.exe' -and $apps[0][1] -eq '1') "WixCloseApplication: volatus.exe, Attributes 1 (found $($apps[0][1]))"
 
-# Nothing runs volatus.exe: the custom actions are WiX's own, and Launch Volatus is WixShellExec
-# from the last page only.
+# Nothing runs volatus.exe: the custom actions are WiX's own, SetADDLOCAL (sets a property) and
+# Launch Volatus, which is WixShellExec from the last page only.
 $actionRows = Rows 'SELECT `Action` FROM `CustomAction`'
 $actions = ($actionRows | ForEach-Object { $_[0] } | Sort-Object) -join ', '
-$known = 'LaunchVolatus, WixCheckRebootRequired, WixCloseApplications, WixCloseApplicationsDeferred, WixUIPrintEula'
+$known = 'LaunchVolatus, SetADDLOCAL, WixCheckRebootRequired, WixCloseApplications, WixCloseApplicationsDeferred, WixUIPrintEula'
 Check ($actions -eq $known) "CustomAction: $actions"
 $launch = Rows "SELECT ``Type``, ``Source``, ``Target`` FROM ``CustomAction`` WHERE ``Action`` = 'LaunchVolatus'"
 Check ($launch[0][1] -eq 'WixCA' -and $launch[0][2] -eq 'WixShellExec') 'LaunchVolatus = WixCA WixShellExec'
@@ -151,8 +151,21 @@ foreach ($component in $menuComponents) {
 }
 $features = Rows "SELECT ``Feature_Parent``, ``Level`` FROM ``Feature`` WHERE ``Feature`` = 'ExplorerMenu'"
 Check ($features.Count -eq 1 -and $features[0][0] -eq 'Main' -and $features[0][1] -eq '1') 'Feature ExplorerMenu: child of Main, Level 1'
-$menuOff = Rows "SELECT ``Level``, ``Condition`` FROM ``Condition`` WHERE ``Feature_`` = 'ExplorerMenu'"
-Check ($menuOff.Count -eq 1 -and $menuOff[0][0] -eq '0' -and $menuOff[0][1] -eq 'NOT Installed AND EXPLORERMENU = "0"') 'Condition: ExplorerMenu Level 0 when NOT Installed AND EXPLORERMENU = "0"'
+# No feature condition: a feature disabled by one is not registered, and the next upgrade adds it.
+# light leaves the Condition table out when it has no rows.
+$conditionTable = (Rows "SELECT ``Name`` FROM ``_Tables`` WHERE ``Name`` = 'Condition'").Count -eq 1
+Check (-not $conditionTable -or (Rows 'SELECT `Feature_` FROM `Condition`').Count -eq 0) 'no feature Condition rows'
+# EXPLORERMENU=0 on a first install sets ADDLOCAL=Main (type 51: set a property), in both sequences
+# after FindRelatedProducts (which sets WIX_UPGRADE_DETECTED) and before CostInitialize. The menu
+# feature is then registered as absent, and upgrades migrate that. Id captured from the built MSI.
+$setAddLocal = Rows "SELECT ``Type``, ``Source``, ``Target`` FROM ``CustomAction`` WHERE ``Action`` = 'SetADDLOCAL'"
+Check ($setAddLocal.Count -eq 1 -and $setAddLocal[0][0] -eq '51' -and $setAddLocal[0][1] -eq 'ADDLOCAL' -and $setAddLocal[0][2] -eq 'Main') 'SetADDLOCAL: type 51, ADDLOCAL = Main'
+$menuOff = 'NOT Installed AND NOT WIX_UPGRADE_DETECTED AND EXPLORERMENU = "0" AND NOT ADDLOCAL AND NOT REMOVE'
+foreach ($table in 'InstallUISequence', 'InstallExecuteSequence') {
+  $at = { param($Action) Rows "SELECT ``Sequence``, ``Condition`` FROM ``$table`` WHERE ``Action`` = '$Action'" }
+  $set = & $at 'SetADDLOCAL'; $find = & $at 'FindRelatedProducts'; $cost = & $at 'CostInitialize'
+  Check ($set.Count -eq 1 -and $find.Count -eq 1 -and $cost.Count -eq 1 -and [int]$find[0][0] -lt [int]$set[0][0] -and [int]$set[0][0] -lt [int]$cost[0][0] -and $set[0][1] -eq $menuOff) "${table}: SetADDLOCAL between FindRelatedProducts and CostInitialize, when $menuOff"
+}
 Check ((Property 'EXPLORERMENU') -eq '1') 'EXPLORERMENU = 1 (menu checkbox ticked by default)'
 Check ((Property 'SecureCustomProperties') -split ';' -contains 'EXPLORERMENU') 'EXPLORERMENU is a secure property'
 
