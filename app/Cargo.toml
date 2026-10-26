@@ -24,7 +24,8 @@ serde_json = "1.0.154"
 rayon = "1"
 
 [build-dependencies]
-slint-build = "1.18.1"
+# Pinned like i-slint-backend-testing: `with_debug_info` (build.rs) is not a stable API.
+slint-build = "=1.18.1"
 embed-resource = "3"
 
 # Elevation: IsUserAnAdmin and ShellExecuteW "runas". Same crate and version as `scan`, so no new code in the build.

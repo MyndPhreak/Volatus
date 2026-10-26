@@ -357,6 +357,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
     fn delete_key_opens_the_recycle_bin_confirm() {
         let (ui, _dir) = window();
         ui.invoke_tree_key("delete".into());
@@ -372,6 +373,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
     fn shift_delete_opens_the_permanent_confirm_where_enter_cancels() {
         let (ui, _dir) = window();
         ui.invoke_map_key("shift-delete".into());
@@ -388,6 +390,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
     fn enter_in_the_recycle_bin_confirm_starts_the_recycle_bin() {
         let (ui, _dir) = window();
         ui.invoke_tree_key("delete".into());
@@ -402,6 +405,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
     fn a_permanent_delete_has_stop_and_esc_does_nothing_while_it_runs() {
         let (ui, _dir) = window();
         ui.invoke_tree_key("shift-delete".into());
@@ -423,6 +427,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
     fn closing_the_window_while_a_permanent_delete_runs_keeps_it_shown_until_the_run_ends() {
         let (ui, _dir) = window();
         ui.invoke_tree_key("shift-delete".into());
@@ -442,6 +447,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
     fn the_switch_link_changes_the_mode_in_confirm() {
         let (ui, _dir) = window();
         ui.invoke_tree_key("delete".into());
@@ -456,6 +462,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
     fn switching_back_to_the_recycle_bin_makes_its_button_the_default_again() {
         let (ui, _dir) = window();
         ui.invoke_tree_key("shift-delete".into());
@@ -466,6 +473,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
     fn a_result_with_skips_lists_them_and_offers_a_rescan() {
         let (ui, _dir) = window();
         let skipped = vec![Skipped { path: PathBuf::from(r"C:\x\locked.bin"), reason: SkipReason::AccessDenied }];
@@ -487,6 +495,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
     fn scan_again_closes_the_dialog_and_scans_the_root_again() {
         let (ui, _dir) = window();
         OUTCOME.with_borrow_mut(|o| *o = Outcome { removed_items: 1, removed_bytes: 5, ..Outcome::default() });
@@ -500,6 +509,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
     fn a_recycle_bin_result_says_the_space_frees_when_the_bin_is_emptied() {
         let (ui, _dir) = window();
         OUTCOME.with_borrow_mut(|o| *o = Outcome { removed_items: 1, removed_bytes: 10, ..Outcome::default() });
@@ -515,6 +525,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
     fn the_scan_root_is_refused_with_a_reason_and_close() {
         let (ui, _dir) = window();
         let root = SESSION.with_borrow(|s| s.loaded.as_ref().unwrap().data.tree.root());
@@ -530,6 +541,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
     fn a_delete_while_a_scan_runs_does_nothing() {
         let (ui, _dir) = window();
         SESSION.with_borrow_mut(|s| {
@@ -545,6 +557,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
     fn the_menu_delete_is_for_the_menu_item_and_reads_shift() {
         let (ui, _dir) = window();
         // The selection is `a`; the menu was opened on `b.bin` (a crumb, say, is not selected).
@@ -562,6 +575,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
     fn the_menu_delete_of_the_scan_root_is_refused() {
         let (ui, _dir) = window();
         let root = SESSION.with_borrow(|s| s.loaded.as_ref().unwrap().data.tree.root());
@@ -595,6 +609,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
     fn a_right_click_on_empty_tree_space_asks_for_no_menu() {
         use i_slint_backend_testing::AccessibleRole;
         let (ui, _dir) = window();
@@ -610,6 +625,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
     fn a_right_click_on_a_row_asks_for_the_menu_of_that_row() {
         use i_slint_backend_testing::AccessibleRole;
         let (ui, _dir) = window();
@@ -625,6 +641,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
     fn a_held_delete_key_opens_one_dialog() {
         let (ui, _dir) = window();
         ui.invoke_tree_key("delete".into());
@@ -639,6 +656,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
     fn shift_delete_through_the_tree_key_is_permanent_and_ctrl_delete_is_nothing() {
         let (ui, _dir) = window();
         ui.invoke_tree_key("delete".into());
@@ -654,6 +672,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
     fn keys_while_the_dialog_shows_never_reach_the_tree() {
         let (ui, _dir) = window();
         let a = node("a");
@@ -671,6 +690,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
     fn a_held_enter_does_not_confirm() {
         let (ui, _dir) = window();
         ui.invoke_tree_key("delete".into());
