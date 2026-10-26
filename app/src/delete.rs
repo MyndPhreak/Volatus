@@ -32,7 +32,7 @@ pub enum Refusal {
 }
 
 /// The item the user chose, with the scan's numbers for it.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeleteTarget {
     pub node: NodeId,
     pub path: PathBuf,
@@ -378,14 +378,14 @@ pub enum SkipReason {
 }
 
 /// An item the run left in place.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Skipped {
     pub path: PathBuf,
     pub reason: SkipReason,
 }
 
 /// What a run did.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Outcome {
     pub removed_items: u64,
     pub removed_bytes: u64,
@@ -449,7 +449,7 @@ fn items(n: u64) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::collections::HashMap;
 
@@ -457,7 +457,7 @@ mod tests {
     /// under it) that resolves to another path. `shorts`: 8.3 names that resolve to long names.
     /// `broken`: paths `resolve` cannot answer for. `resolve` also does `..` and trailing dots, as
     /// `canonicalize` does; `resolve_target` does not follow a link item, as `RealFs` does.
-    struct Fake {
+    pub(crate) struct Fake {
         items: HashMap<String, bool>,
         links: Vec<(String, String)>,
         shorts: Vec<(String, String)>,
@@ -465,7 +465,7 @@ mod tests {
     }
 
     impl Fake {
-        fn with(items: &[(&str, bool)]) -> Fake {
+        pub(crate) fn with(items: &[(&str, bool)]) -> Fake {
             Fake {
                 items: items.iter().map(|(p, d)| (norm(Path::new(p)), *d)).collect(),
                 links: Vec::new(),
@@ -535,7 +535,7 @@ mod tests {
         }
     }
 
-    fn env() -> Env {
+    pub(crate) fn env() -> Env {
         Env {
             windir: r"C:\Windows".into(),
             program_files: r"C:\Program Files".into(),

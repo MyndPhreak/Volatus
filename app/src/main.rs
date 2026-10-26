@@ -12,6 +12,7 @@
 mod browse;
 mod cli;
 mod delete;
+mod delete_flow;
 mod drives;
 mod elevate;
 mod footer;
@@ -21,6 +22,7 @@ mod motion;
 mod nav;
 mod purge;
 mod recycle;
+mod scan_apply;
 mod shell;
 mod settings;
 mod tip;
@@ -85,6 +87,7 @@ struct Data {
 
 /// The file tree as a Slint model. Rows are cheap ids; text is built only for rows the list
 /// asks for, so a tree with millions of nodes costs nothing for the rows nobody sees.
+/// `data` is empty only while a delete changes the tree (`scan_apply::remove_from`).
 struct RowModel {
     /// The shown data. Weak, so that a removal changes the data in place (`remove_node`, which
     /// points it at the data again); a strong one would make `Arc::make_mut` copy every time.
@@ -97,6 +100,24 @@ struct RowModel {
 }
 
 impl RowModel {
+    fn new(data: Arc<Data>) -> Self {
+        RowModel {
+            data: RefCell::new(Arc::downgrade(&data)),
+            rows: RefCell::new(Vec::new()),
+            notify: ModelNotify::default(),
+            unit: Cell::new(Unit::Dynamic),
+        }
+    }
+
+    /// Lets go of the model's weak link to the data, so `Arc::get_mut` can change the data in
+    /// place (a weak link makes it fail too). The rows stay; `row_data` gives nothing until `attach`.
+    fn release(&self) {}
+
+    /// Gives the model its data again and makes the list read every row again.
+    fn attach(&self, data: &Arc<Data>) {
+        let _ = data;
+    }
+
     fn set_rows(&self, rows: Vec<Row>) {
         *self.rows.borrow_mut() = rows;
         self.notify.reset();
