@@ -17,6 +17,7 @@ mod delete_ui;
 mod drives;
 mod elevate;
 mod footer;
+mod graph_ui;
 mod graph_view;
 mod menu;
 mod model;
@@ -43,7 +44,7 @@ use slint::{
 };
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
-use settings::{Part, Settings, ThemeChoice};
+use settings::{Part, Settings, ThemeChoice, View};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, mpsc};
@@ -178,6 +179,8 @@ struct Loaded {
     totals: Option<Vec<TypeTotal>>,
     /// Removals from the tree since it was installed. A count started before a removal is late.
     edits: u64,
+    /// The folder graph's state: expanded folders, colour mode, the shown graph, the type cache.
+    graph: graph_view::GraphState,
 }
 
 /// UI-thread state. Events from worker threads are applied here via `invoke_from_event_loop`.
@@ -655,14 +658,15 @@ fn sync_selection(ui: &MainWindow) {
     }
 }
 
-/// A treemap layout to run (`begin_layout`): the data, the folder, the scan and layout ids it is
-/// for, and the map size in logical pixels.
+/// A layout to run (`begin_layout`): the data, the folder, the scan and layout ids it is for, the
+/// map size in logical pixels, and the view (treemap or graph) it is for.
 struct LayoutJob {
     data: Arc<Data>,
     root: NodeId,
     generation: u64,
     seq: u64,
     size: (f32, f32),
+    view: View,
 }
 
 /// The session part of a new layout: a new `layout_seq` (any layout on its way is late now) and
@@ -677,7 +681,13 @@ fn begin_layout(s: &mut Session) -> Option<LayoutJob> {
     if s.flags.timing {
         eprintln!("Layout {}.", s.layout_seq);
     }
-    Some(LayoutJob { data, root, generation: s.scan.generation(), seq: s.layout_seq, size: s.map_size })
+    Some(LayoutJob { data, root, generation: s.scan.generation(), seq: s.layout_seq, size: s.map_size, view: View::Treemap })
+}
+
+/// True when a layout of scan `generation` and layout `seq` may still land: no newer layout, no
+/// applied removal (`scan_apply::step_pending` takes a new `layout_seq`) and no other scan since.
+fn is_current(_s: &Session, _generation: u64, _seq: u64) -> bool {
+    true
 }
 
 /// Lays out and draws the treemap for the current folder and window size on a worker thread.
@@ -692,7 +702,7 @@ fn relayout(ui: &MainWindow) {
 /// Runs `job` (`begin_layout`) on a worker thread and lands it when it is still the latest.
 /// ponytail: one thread per request and no early stop; fine while a layout takes well under
 /// a second and resizes are debounced. Upgrade path: a cancel flag per request.
-fn spawn_layout(ui: &MainWindow, LayoutJob { data, root, generation, seq, size: (lw, lh) }: LayoutJob) {
+fn spawn_layout(ui: &MainWindow, LayoutJob { data, root, generation, seq, size: (lw, lh), .. }: LayoutJob) {
     let scale = ui.window().scale_factor();
     let theme = if ui.get_dark() { Theme::Dark } else { Theme::Light };
     let (w, h) = ((lw * scale).round() as u32, (lh * scale).round() as u32);
@@ -1444,6 +1454,7 @@ fn install(ui: &MainWindow, data: Arc<Data>) {
             shown_root: None,
             totals: None,
             edits: 0,
+            graph: graph_view::GraphState::default(),
         });
         s.fade_next = true;
     });
@@ -2861,6 +2872,7 @@ mod tests {
             shown_root: None,
             totals: None,
             edits: 0,
+            graph: Default::default(),
         }
     }
 

@@ -600,7 +600,7 @@ mod tests {
     fn loaded(data: Arc<Data>) -> Loaded {
         let root = data.tree.root();
         let model = Rc::new(RowModel::new(data.clone()));
-        Loaded { data, serial: crate::next_serial(), model, view: ViewState::new(root), selected: None, view_root: root, rects: Vec::new(), shown_root: None, totals: None, edits: 0 }
+        Loaded { data, serial: crate::next_serial(), model, view: ViewState::new(root), selected: None, view_root: root, rects: Vec::new(), shown_root: None, totals: None, edits: 0, graph: Default::default() }
     }
 
     fn rect(node: NodeId) -> Rect {
@@ -1046,6 +1046,24 @@ mod tests {
         assert_eq!(SESSION.with_borrow(|s| s.layout_seq), seq + 1);
         assert_eq!(done_action(), Some(TreeAction::Detached));
         assert_eq!(SESSION.with_borrow_mut(|s| step_pending(s, false)), PendingStep::Idle);
+    }
+
+    #[test]
+    fn is_current_layout_begun_before_an_applied_removal_is_dropped() {
+        let g = running();
+        let worker = SESSION.with_borrow(|s| s.loaded.as_ref().unwrap().data.clone());
+        assert!(finished(g, true, removed()));
+        let job = SESSION.with_borrow_mut(crate::begin_layout).unwrap();
+        let (generation, seq) = (job.generation, job.seq);
+        assert!(SESSION.with_borrow(|s| crate::is_current(s, generation, seq)));
+        // The layout worker let go of its clone, as every worker does before it lands.
+        drop(job);
+        drop(worker);
+
+        assert_eq!(SESSION.with_borrow_mut(|s| step_pending(s, false)), PendingStep::Applied);
+
+        // A layout (treemap or graph) of the tree before the removal never lands.
+        assert!(!SESSION.with_borrow(|s| crate::is_current(s, generation, seq)));
     }
 
     #[test]
