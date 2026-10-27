@@ -128,8 +128,12 @@ pub fn format_day(_t: u32) -> String {
 }
 
 /// The legend of the age colours, newest first.
-pub const AGE_LEGEND: [(Age, &str); 4] =
-    [(Age::Recent, ""), (Age::Middle, ""), (Age::Old, ""), (Age::Unknown, "")];
+pub const AGE_LEGEND: [(Age, &str); 4] = [
+    (Age::Recent, "Changed in the last 6 months"),
+    (Age::Middle, "Changed 6 to 24 months ago"),
+    (Age::Old, "Changed more than 24 months ago"),
+    (Age::Unknown, "Date not known"),
+];
 
 /// The view to show: the graph only for a finished scan with data and when it is chosen.
 pub fn shown_view(state: &ScanState, loaded: bool, chosen: View) -> View {

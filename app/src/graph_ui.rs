@@ -16,6 +16,7 @@ use slint::{ComponentHandle, Image, ModelRc, Rgba8Pixel, SharedPixelBuffer, Shar
 use scan::{NodeId, Tree};
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 use treemap::FILE_LABEL_MIN_HEIGHT;
@@ -190,7 +191,8 @@ pub(crate) fn spawn_graph(ui: &MainWindow, job: LayoutJob) {
         open_other: l.graph.open_other.clone(),
         first_column: l.graph.first_column,
         colour: l.graph.colour,
-        types: l.graph.types.clone(),
+        // Only the file type colours read the cache.
+        types: if l.graph.colour == ColourMode::FileType { l.graph.types.clone() } else { HashMap::new() },
     })
     .unwrap_or_default();
     let weak = ui.as_weak();
@@ -222,8 +224,14 @@ fn land(ui: &MainWindow, Ready { graph, image, size, labels, expanders, note }: 
     if with_loaded(|l| l.graph.shown = Some(graph)).is_none() {
         return;
     }
-    // Red stub: the window gets nothing yet.
-    let _ = (ui, image, size, labels, expanders, note);
+    ui.set_graph_picture(image.map(Image::from_rgba8).unwrap_or_default());
+    ui.set_graph_layout_width(size.0);
+    ui.set_graph_layout_height(size.1);
+    ui.set_graph_labels(ModelRc::new(VecModel::from(labels)));
+    ui.set_graph_expanders(ModelRc::new(VecModel::from(expanders)));
+    ui.set_graph_note(note.into());
+    // The legend in the colours of the theme the picture was drawn in.
+    sync_view(ui);
     if SESSION.with_borrow(|s| s.flags.timing) {
         eprintln!("Graph {seq}: {} ms.", started.elapsed().as_millis());
     }
@@ -233,7 +241,11 @@ fn land(ui: &MainWindow, Ready { graph, image, size, labels, expanders, note }: 
 /// `Graph` (nothing is hit-tested on a graph that does not show). For a new scan and when the view
 /// leaves the graph.
 pub(crate) fn clear_picture(ui: &MainWindow) {
-    let _ = ui;
+    with_loaded(|l| l.graph.shown = None);
+    ui.set_graph_picture(Image::default());
+    ui.set_graph_labels(ModelRc::default());
+    ui.set_graph_expanders(ModelRc::default());
+    ui.set_graph_note(SharedString::new());
 }
 
 /// The legend of the age colours in `theme`: the texts of `AGE_LEGEND` in the colours the picture
@@ -252,7 +264,20 @@ pub(crate) fn age_legend(theme: Theme) -> Vec<LegendEntry> {
 /// and the toggle work (the graph could show: a finished scan with data), the chosen colours and
 /// the age legend in the window's theme.
 pub(crate) fn sync_view(ui: &MainWindow) {
-    let _ = ui;
+    let (shown, enabled, colour) = SESSION.with_borrow(|s| {
+        let loaded = s.loaded.is_some();
+        let colour = s.loaded.as_ref().map(|l| l.graph.colour).unwrap_or_default();
+        let shown = graph_view::shown_view(s.scan.state(), loaded, s.settings.view) == View::Graph;
+        (shown, offered(s), colour)
+    });
+    let theme = if ui.get_dark() { Theme::Dark } else { Theme::Light };
+    ui.set_graph_shown(shown);
+    ui.set_views_enabled(enabled);
+    ui.set_colour_choice(match colour {
+        ColourMode::Age => 0,
+        ColourMode::FileType => 1,
+    });
+    ui.set_graph_legend(ModelRc::new(VecModel::from(age_legend(theme))));
 }
 
 /// True when the graph could show: the view switch works.
@@ -264,13 +289,28 @@ fn offered(s: &Session) -> bool {
 /// the hover goes, a graph left is dropped, and the chosen view is laid out. Nothing while the
 /// switch is off or for the view that is already chosen.
 fn view_chosen(ui: &MainWindow, i: i32) {
-    let _ = (ui, i);
+    let view = if i == 1 { View::Graph } else { View::Treemap };
+    if !SESSION.with_borrow_mut(|s| offered(s) && std::mem::replace(&mut s.settings.view, view) != view) {
+        return;
+    }
+    persist(ui);
+    drop_hover(ui);
+    if view == View::Treemap {
+        clear_picture(ui);
+    }
+    sync_view(ui);
+    relayout(ui);
 }
 
 /// Colours were chosen in the graph bar (0 age, 1 file type): the graph is drawn again in them.
 /// The choice lasts for the session only.
 fn colour_chosen(ui: &MainWindow, i: i32) {
-    let _ = (ui, i);
+    let mode = if i == 1 { ColourMode::FileType } else { ColourMode::Age };
+    if with_loaded(|l| std::mem::replace(&mut l.graph.colour, mode) != mode) != Some(true) {
+        return;
+    }
+    sync_view(ui);
+    relayout(ui);
 }
 
 /// Wires the view switch, the colour toggle and the graph's size. The graph's own input (click,
@@ -345,20 +385,26 @@ fn types_of(tree: &Tree, parts: &[Part]) -> Vec<(Part, Option<Category>)> {
 /// worker thread. The landing keeps them by the rules of `store_totals` (`store_types`), lets go
 /// of the data, always calls `scan_apply::data_released`, then lays out again while the graph
 /// shows in File type mode: with the new types, or to count again after a removal.
+/// A count that panics lands as `None`: the running flag still clears and the data is let go;
+/// nothing is kept, and the bands keep the `Other` colour.
 fn count_graph_types(ui: &MainWindow, generation: u64, data: Arc<Data>, edits: u64, parts: Vec<Part>) {
     TYPES_RUNNING.set(true);
     let weak = ui.as_weak();
     std::thread::spawn(move || {
-        let found = types_of(&data.tree, &parts);
+        let found = catch_unwind(AssertUnwindSafe(|| types_of(&data.tree, &parts))).ok();
         // Err means the event loop has stopped: nothing left to update.
         let _ = slint::invoke_from_event_loop(move || {
             TYPES_RUNNING.set(false);
             let Some(ui) = weak.upgrade() else { return };
-            store_types(generation, &data, edits, found);
+            if let Some(found) = found {
+                store_types(generation, &data, edits, found);
+            }
             // Let go of the data, so a delete waiting for it can apply.
             drop(data);
+            let seq = SESSION.with_borrow(|s| s.layout_seq);
             scan_apply::data_released(&ui);
-            if SESSION.with_borrow(wants_types) {
+            // A removal the release applied took a new `layout_seq` and laid out again already.
+            if SESSION.with_borrow(|s| s.layout_seq == seq && wants_types(s)) {
                 relayout(&ui);
             }
         });
