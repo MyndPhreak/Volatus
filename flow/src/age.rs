@@ -16,13 +16,35 @@ pub enum Age {
 }
 
 /// Age class of `newest` (scan time encoding, 0 = unknown) at time `now`.
-pub fn age_of(_newest: u32, _now: u32) -> Age {
-    Age::Unknown
+pub fn age_of(newest: u32, now: u32) -> Age {
+    if newest == scan::time::UNKNOWN {
+        return Age::Unknown;
+    }
+    let secs = now.saturating_sub(newest);
+    if secs <= RECENT_SECS {
+        Age::Recent
+    } else if secs <= MIDDLE_SECS {
+        Age::Middle
+    } else {
+        Age::Old
+    }
 }
 
-/// Band colour (RGB) of an age class.
-pub fn age_colour(_a: Age, _theme: Theme) -> [u8; 3] {
-    [0; 3]
+/// Band colour (RGB) of an age class. Each known class has 3:1 contrast with the backdrop of
+/// its theme (#f3f3f3 light, #202020 dark). Unknown is the `Category::Other` gray.
+pub fn age_colour(a: Age, theme: Theme) -> [u8; 3] {
+    let hex: u32 = match (theme, a) {
+        (Theme::Dark, Age::Recent) => 0x2fd6b8,
+        (Theme::Dark, Age::Middle) => 0xe8a02b,
+        (Theme::Dark, Age::Old) => 0xe5533a,
+        (Theme::Dark, Age::Unknown) => 0x757575,
+        (Theme::Light, Age::Recent) => 0x178a7e,
+        (Theme::Light, Age::Middle) => 0xa86a0c,
+        (Theme::Light, Age::Old) => 0xd0452d,
+        (Theme::Light, Age::Unknown) => 0x8a8a8a,
+    };
+    let [_, r, g, b] = hex.to_be_bytes();
+    [r, g, b]
 }
 
 #[cfg(test)]
