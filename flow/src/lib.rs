@@ -1,11 +1,13 @@
 //! Folder flow graph: pure layout and drawing, no window code.
 
 pub mod age;
+mod split;
 
 use std::collections::HashSet;
 
 use scan::{NodeId, Tree};
 use treemap::filetype::Category;
+pub use split::{members, split};
 pub use treemap::Theme;
 
 /// A group merges into "other" below this share of its parent, in percent.
@@ -85,16 +87,6 @@ pub struct Split {
 // Stub: P2.T3 fills the layout. The names below keep `_` until later tasks use them.
 pub fn layout(_input: &Input) -> Graph {
     Graph::default()
-}
-
-// Stub: P2.T2.
-pub fn split(_tree: &Tree, _parent: NodeId, _px_per_byte: f64, _min_px: f64, _keep_small: bool) -> Split {
-    Split { folders: Vec::new(), files: None, other: None }
-}
-
-// Stub: P2.T2.
-pub fn members(_tree: &Tree, _part: &Part) -> Vec<NodeId> {
-    Vec::new()
 }
 
 // Stub: P2.T3.
