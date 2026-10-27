@@ -44,6 +44,8 @@ struct Item {
     is_dir: bool,
     size: u64,
     file_id: u64,
+    /// Last write time, from the listing.
+    modified: u32,
 }
 
 /// Appends the entries of one `FILE_ID_BOTH_DIR_INFO` buffer, without `.` and `..`.
@@ -66,6 +68,7 @@ fn parse_listing(b: &[u8], items: &mut Vec<Item>) -> Option<()> {
                 is_dir: attrs & FILE_ATTRIBUTE_DIRECTORY != 0 && !link,
                 size: u64_at(b, off + offset_of!(Info, EndOfFile))?,
                 file_id: u64_at(b, off + offset_of!(Info, FileId))?,
+                modified: crate::time::from_filetime(u64_at(b, off + offset_of!(Info, LastWriteTime))? as i64),
                 name,
             });
         }
@@ -178,7 +181,7 @@ fn walk_dir(ctx: &Ctx, dir: &Path, dir_id: u64) -> Result<Out, ScanError> {
             size,
             allocated: size,
             is_dir: item.is_dir,
-            modified: crate::time::UNKNOWN,
+            modified: item.modified,
         };
         out.entries.push((entry, if item.is_dir { 0 } else { item.file_id }));
     }
