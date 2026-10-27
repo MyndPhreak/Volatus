@@ -188,3 +188,49 @@ fn scan_unreadable_root_returns_io_error() {
 
     assert!(matches!(result, Err(ScanError::Io(_))), "got {:?}", result.map(|(_, s)| s.skipped));
 }
+
+/// A fixed time well inside the u32 range: 2021-01-01T00:00:00Z.
+fn fixed_time() -> std::time::SystemTime {
+    std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_609_459_200)
+}
+
+fn set_modified(path: &Path, t: std::time::SystemTime) {
+    std::fs::File::options().write(true).open(path).unwrap().set_modified(t).unwrap();
+}
+
+#[test]
+fn walk_file_time_is_its_last_write_time() {
+    let t = TempDir::new();
+    set_modified(&t.file("a.bin", 10), fixed_time());
+
+    let (tree, _) = walk_only(t.path());
+
+    let a = tree.children(tree.root()).next().unwrap();
+    assert_eq!(tree.node(a).modified, scan::time::from_system_time(fixed_time()));
+}
+
+#[test]
+fn walk_folder_time_is_its_newest_file() {
+    let t = TempDir::new();
+    let older = fixed_time();
+    let newer = older + std::time::Duration::from_secs(86_400);
+    set_modified(&t.file("sub/old.bin", 1), older);
+    set_modified(&t.file("sub/new.bin", 1), newer);
+
+    let (tree, _) = walk_only(t.path());
+
+    let sub = tree.children(tree.root()).next().unwrap();
+    assert_eq!(tree.node(sub).modified, scan::time::from_system_time(newer));
+    assert_eq!(tree.node(tree.root()).modified, scan::time::from_system_time(newer));
+}
+
+#[test]
+fn walk_empty_folder_time_is_unknown() {
+    let t = TempDir::new();
+    std::fs::create_dir(t.path().join("empty")).unwrap();
+
+    let (tree, _) = walk_only(t.path());
+
+    let empty = tree.children(tree.root()).next().unwrap();
+    assert_eq!(tree.node(empty).modified, scan::time::UNKNOWN);
+}
