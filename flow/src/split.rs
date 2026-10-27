@@ -19,7 +19,7 @@ fn band_order(tree: &Tree, a: NodeId, b: NodeId) -> Ordering {
 }
 
 /// The merge rule. Integer share test (exact at the 3 % line); `u128` cannot overflow.
-fn is_merged(size: u64, parent: u64, px_per_byte: f64, min_px: f64, keep_small: bool) -> bool {
+pub(crate) fn is_merged(size: u64, parent: u64, px_per_byte: f64, min_px: f64, keep_small: bool) -> bool {
     let share = !keep_small && u128::from(size) * 100 < u128::from(parent) * u128::from(MERGE_PERCENT);
     share || (size as f64) * px_per_byte < min_px
 }

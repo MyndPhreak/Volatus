@@ -1,12 +1,14 @@
 //! Folder flow graph: pure layout and drawing, no window code.
 
 pub mod age;
+mod layout;
 mod split;
 
 use std::collections::HashSet;
 
 use scan::{NodeId, Tree};
 use treemap::filetype::Category;
+pub use layout::{folder_rects, hit, label_spots, layout};
 pub use split::{members, split};
 pub use treemap::Theme;
 
@@ -24,6 +26,9 @@ pub const BAND_W: f64 = 12.0;
 pub enum Part {
     Folder(NodeId),
     Files(NodeId),
+    /// The merged folders (the smallest `folders` of the parent's sized subfolders) and, when
+    /// `files`, the parent's direct files. Valid only for the tree it was split from: re-split
+    /// after the tree changes.
     Other { parent: NodeId, folders: u32, files: bool },
 }
 
@@ -82,26 +87,6 @@ pub struct Split {
     pub files: Option<u64>,
     /// (folders merged, files merged, bytes)
     pub other: Option<(u32, bool, u64)>,
-}
-
-// Stub: P2.T3 fills the layout. The names below keep `_` until later tasks use them.
-pub fn layout(_input: &Input) -> Graph {
-    Graph::default()
-}
-
-// Stub: P2.T3.
-pub fn hit(_graph: &Graph, _x: f64, _y: f64) -> Option<usize> {
-    None
-}
-
-// Stub: P2.T3.
-pub fn folder_rects(_graph: &Graph) -> Vec<treemap::Rect> {
-    Vec::new()
-}
-
-// Stub: P2.T3.
-pub fn label_spots(_graph: &Graph, _min_h: f64, _cap: usize) -> Vec<usize> {
-    Vec::new()
 }
 
 // Stub: P2.T4.
