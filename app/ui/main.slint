@@ -188,6 +188,10 @@ export component MainWindow inherits Window {
     in property <int> theme-choice;
     /// The chosen unit of sizes: 0 Dynamic, 1 Byte, 2 KB, 3 MB, 4 GB, 5 TB.
     in property <int> unit-choice;
+    /// Whether the app always starts as administrator.
+    in property <bool> always-admin;
+    /// The user changed the "Always start as administrator" switch.
+    callback always-admin-toggled(bool);
     /// Why the settings are not saved, or "".
     in property <string> settings-error;
     /// A theme was chosen in the flyout. The argument is its index, as in `theme-choice`.
@@ -719,10 +723,12 @@ export component MainWindow inherits Window {
             y: Glass.margin + 52px + Glass.gap;
             theme-choice: root.theme-choice;
             unit-choice: root.unit-choice;
+            always-admin: root.always-admin;
             error: root.settings-error;
             shown: [root.show-header, root.show-tree, root.show-strip, root.show-chips, root.show-labels];
             theme-chosen(i) => { root.theme-chosen(i); }
             unit-chosen(i) => { root.unit-chosen(i); }
+            always-admin-toggled(on) => { root.always-admin-toggled(on); }
             part-toggled(i, on) => { root.part-toggled(i, on); }
             close => {
                 root.settings-open = false;

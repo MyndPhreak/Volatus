@@ -7,6 +7,8 @@ use scan::{Method, ScanOptions};
 pub struct Flags {
     /// `--timing`: show scan timings in the banner and on stderr.
     pub timing: bool,
+    /// `--no-elevate`: do not attempt auto-elevation on startup.
+    pub no_elevate: bool,
     /// `--method mft|walk`. `None` for `auto` or when not given.
     pub method: Option<Method>,
     /// `--threads N`. `None` when not given.
@@ -65,6 +67,7 @@ pub fn parse_args_with<I: IntoIterator<Item = String>>(args: I, logical: usize) 
         let (name, inline) = option.split_once('=').map_or((option, None), |(n, v)| (n, Some(v.to_owned())));
         match name {
             "timing" if inline.is_none() => out.flags.timing = true,
+            "no-elevate" if inline.is_none() => out.flags.no_elevate = true,
             "method" | "threads" => {
                 let value = inline.or_else(|| args.next_if(|next| !next.starts_with("--")));
                 if name == "method" {
@@ -134,6 +137,11 @@ mod tests {
     #[test]
     fn parse_args_timing_only_sets_the_flag() {
         assert_eq!(parse(&["--timing"]), args(true, None));
+    }
+
+    #[test]
+    fn parse_args_no_elevate_sets_the_flag() {
+        assert_eq!(parse(&["--no-elevate"]), Args { flags: Flags { no_elevate: true, ..Flags::default() }, path: None, notices: vec![] });
     }
 
     #[test]
@@ -473,7 +481,7 @@ mod tests {
     #[test]
     fn parse_args_options_and_folder_in_any_order() {
         let folder = "C:\\My Files\\caf\u{e9} \u{4e2d}\u{6587}";
-        let want = Flags { timing: true, method: Some(Method::Walk), threads: Some(8) };
+        let want = Flags { timing: true, method: Some(Method::Walk), threads: Some(8), ..Flags::default() };
         let options = [vec!["--timing"], vec!["--method", "walk"], vec!["--threads=8"]];
         let orders = [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]];
         for order in orders {
@@ -501,7 +509,7 @@ mod tests {
 
     #[test]
     fn scan_options_carry_method_and_threads_and_keep_the_default_chunk() {
-        let flags = Flags { timing: true, method: Some(Method::Mft), threads: Some(3) };
+        let flags = Flags { timing: true, method: Some(Method::Mft), threads: Some(3), ..Flags::default() };
         let want = ScanOptions { method: Some(Method::Mft), threads: Some(3), ..ScanOptions::default() };
         assert_eq!(flags.scan_options(), want);
         assert_eq!(Flags::default().scan_options(), ScanOptions::default());

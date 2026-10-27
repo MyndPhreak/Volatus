@@ -390,6 +390,7 @@ fn apply_settings(ui: &MainWindow) {
     let s = SESSION.with_borrow(|s| s.settings.clone());
     ui.set_theme_choice(s.theme.index());
     ui.set_unit_choice(s.unit.index());
+    ui.set_always_admin(s.always_admin);
     ui.set_size_column(size_column_width(s.unit));
     apply_shown(ui);
     // A forced scheme is written before the window shows, so the first frame has it. Follow
@@ -468,6 +469,15 @@ fn wire_settings(ui: &MainWindow) {
             ui.set_unit_choice(unit.index());
             persist(&ui);
             resync_after_unit_change(&ui);
+        }
+    });
+    ui.on_always_admin_toggled({
+        let weak = ui.as_weak();
+        move |on| {
+            let Some(ui) = weak.upgrade() else { return };
+            SESSION.with_borrow_mut(|s| s.settings.always_admin = on);
+            ui.set_always_admin(on);
+            persist(&ui);
         }
     });
     // A part shown or hidden: the layout change reaches the map through `treemap-resized`.
@@ -2073,15 +2083,50 @@ fn attach_parent_console() {
     unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
 }
 
+/// Whether the process should attempt an elevated restart on startup.
+fn should_auto_elevate(always_admin: bool, is_admin: bool, no_elevate: bool) -> bool {
+    always_admin && !is_admin && !no_elevate
+}
+
+/// Attempts to restart as administrator if the setting is enabled and the process is not elevated.
+/// Returns true if an elevated copy was started (the current process should exit).
+/// If elevation fails or is declined, appends a notice to `args.notices` and returns false.
+fn auto_elevate_on_start(
+    always_admin: bool,
+    is_admin: bool,
+    args: &mut cli::Args,
+    launch: impl FnOnce(&str, cli::Flags) -> Result<(), String>,
+) -> bool {
+    if !should_auto_elevate(always_admin, is_admin, args.flags.no_elevate) {
+        return false;
+    }
+    let scan_path = args.path.as_deref().unwrap_or("");
+    let mut flags = args.flags;
+    flags.no_elevate = true;
+    match launch(scan_path, flags) {
+        Ok(()) => true,
+        Err(e) => {
+            eprintln!("Auto-restart as administrator was declined or failed: {e}");
+            args.notices.push("Administrator rights were declined. Running as standard user.".into());
+            false
+        }
+    }
+}
+
 fn main() {
     #[cfg(not(debug_assertions))]
     attach_parent_console();
-    let args = cli::parse_args(std::env::args().skip(1));
-    apply_args(&args);
+    let mut args = cli::parse_args(std::env::args().skip(1));
+
     // The settings are read before the first size is formatted (the banner, the drive cards).
     let path = settings::settings_path();
     let loaded = path.as_deref().map_or((Settings::default(), settings::Loaded::Fresh), settings::load);
     report_load(&loaded.1);
+    if auto_elevate_on_start(loaded.0.always_admin, elevate::is_admin(), &mut args, elevate::restart_as_admin) {
+        return;
+    }
+
+    apply_args(&args);
     let settings_error = SESSION.with_borrow_mut(|s| adopt_settings(s, path, loaded));
     let ui = MainWindow::new().expect("create window");
     ui.set_settings_error(settings_error.into());
@@ -4003,5 +4048,63 @@ mod tests {
             (errors, calls.get(), now),
             (vec![SAVE_ERROR, SAVE_ERROR], 0, Settings { show_labels: false, show_header: false, ..Settings::default() })
         );
+    }
+
+    // ---- always start as administrator ----
+    use super::{should_auto_elevate, auto_elevate_on_start};
+
+    #[test]
+    fn should_auto_elevate_only_when_setting_on_and_not_admin_and_not_flagged() {
+        assert!(!should_auto_elevate(false, false, false));
+        assert!(!should_auto_elevate(false, true, false));
+        assert!(!should_auto_elevate(true, true, false));
+        assert!(!should_auto_elevate(true, false, true));
+        assert!(!should_auto_elevate(true, true, true));
+        assert!(should_auto_elevate(true, false, false));
+    }
+
+    #[test]
+    fn auto_elevate_on_start_success_launches_and_sets_no_elevate() {
+        let mut args = crate::cli::parse_args(["C:\\Data".to_string()]);
+        let launched = Cell::new(None);
+        let ok = auto_elevate_on_start(true, false, &mut args, |path, flags| {
+            launched.set(Some((path.to_string(), flags)));
+            Ok(())
+        });
+        assert!(ok);
+        let (path, flags) = launched.into_inner().unwrap();
+        assert_eq!(path, "C:\\Data");
+        assert!(flags.no_elevate);
+        assert!(args.notices.is_empty());
+    }
+
+    #[test]
+    fn auto_elevate_on_start_declined_records_notice_and_continues() {
+        let mut args = crate::cli::parse_args(["C:\\Data".to_string()]);
+        let ok = auto_elevate_on_start(true, false, &mut args, |_, _| {
+            Err("UAC cancelled".into())
+        });
+        assert!(!ok);
+        assert_eq!(args.notices, vec!["Administrator rights were declined. Running as standard user.".to_string()]);
+    }
+
+    #[test]
+    fn toggle_always_admin_saves_and_persists() {
+        SESSION.with_borrow_mut(|s| adopt_settings(s, Some(path()), (Settings::default(), settings::Loaded::Fresh)));
+        let calls = Cell::new(0);
+        let saved = RefCell::new(None);
+
+        let error = SESSION.with_borrow_mut(|s| {
+            s.settings.always_admin = true;
+            persist_with(s, |_, set: &Settings| {
+                calls.set(calls.get() + 1);
+                *saved.borrow_mut() = Some(set.clone());
+                Ok(())
+            })
+        });
+
+        let want = Settings { always_admin: true, ..Settings::default() };
+        let now = SESSION.with_borrow(|s| s.settings.clone());
+        assert_eq!((error, calls.get(), saved.into_inner(), now), ("", 1, Some(want.clone()), want));
     }
 }

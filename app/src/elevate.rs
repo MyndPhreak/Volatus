@@ -46,10 +46,11 @@ pub fn quote_arg(path: &str) -> String {
 /// so it is left out).
 pub fn relaunch_args(scan_path: &str, flags: crate::cli::Flags) -> String {
     let timing = flags.timing.then(|| "--timing".to_string());
+    let no_elevate = flags.no_elevate.then(|| "--no-elevate".to_string());
     let method = flags.method.map(|m| format!("--method {}", if m == Method::Mft { "mft" } else { "walk" }));
     let threads = flags.threads.map(|n| format!("--threads {n}"));
     let folder = (!scan_path.is_empty()).then(|| format!("-- {}", quote_arg(scan_path)));
-    [timing, method, threads, folder].into_iter().flatten().collect::<Vec<_>>().join(" ")
+    [timing, no_elevate, method, threads, folder].into_iter().flatten().collect::<Vec<_>>().join(" ")
 }
 
 fn wide(s: &std::ffi::OsStr) -> Vec<u16> {
@@ -167,11 +168,13 @@ pub(crate) mod tests {
     #[test]
     fn relaunch_args_with_no_folder_parse_to_the_start_screen_with_timing_kept() {
         for timing in [false, true] {
-            let line = format!("volatus.exe {}", relaunch_args("", flags(timing)));
+            for no_elevate in [false, true] {
+            let line = format!("volatus.exe {}", relaunch_args("", Flags { timing, no_elevate, ..Flags::default() }));
 
             let parsed = crate::cli::parse_args(argv(&line).into_iter().skip(1));
 
-            assert_eq!(parsed, crate::cli::Args { flags: flags(timing), ..Default::default() }, "command line {line:?}");
+            assert_eq!(parsed, crate::cli::Args { flags: Flags { timing, no_elevate, ..Flags::default() }, ..Default::default() }, "command line {line:?}");
+            }
         }
     }
 
@@ -181,16 +184,16 @@ pub(crate) mod tests {
     }
 
     fn full(method: Option<Method>, threads: Option<usize>) -> Flags {
-        Flags { timing: true, method, threads }
+        Flags { timing: true, method, threads, ..Flags::default() }
     }
 
     #[test]
     fn relaunch_args_carry_method_and_threads_before_the_folder() {
         let f = full(Some(Method::Walk), Some(8));
         assert_eq!(relaunch_args("D:\\", f), "--timing --method walk --threads 8 -- \"D:\\\\\"");
-        let f = Flags { timing: false, method: Some(Method::Mft), threads: None };
+        let f = Flags { timing: false, method: Some(Method::Mft), threads: None, ..Flags::default() };
         assert_eq!(relaunch_args("", f), "--method mft");
-        let f = Flags { timing: false, method: None, threads: Some(2) };
+        let f = Flags { timing: false, method: None, threads: Some(2), ..Flags::default() };
         assert_eq!(relaunch_args("", f), "--threads 2");
     }
 
@@ -203,15 +206,17 @@ pub(crate) mod tests {
     fn relaunch_args_parse_back_to_the_same_options_and_folder() {
         let folders = ["", "C:\\", "C:\\My Files\\", "--method", "--threads=3", "-- x", "caf\u{e9} \"q\"", "\\\\server\\share\\"];
         for timing in [false, true] {
+            for no_elevate in [false, true] {
             for method in [None, Some(Method::Mft), Some(Method::Walk)] {
                 for threads in [None, Some(1), Some(32)] {
                     for folder in folders {
-                        let f = Flags { timing, method, threads };
+                        let f = Flags { timing, no_elevate, method, threads };
                         let line = format!("volatus.exe {}", relaunch_args(folder, f));
                         let parsed = crate::cli::parse_args_with(argv(&line).into_iter().skip(1), 8);
                         let path = (!folder.is_empty()).then(|| folder.to_string());
                         let want = crate::cli::Args { flags: f, path, notices: vec![] };
                         assert_eq!(parsed, want, "command line {line:?}");
+                    }
                     }
                 }
             }
