@@ -3,13 +3,14 @@
 pub mod age;
 mod layout;
 mod split;
+mod types;
 
 use std::collections::HashSet;
 
 use scan::{NodeId, Tree};
-use treemap::filetype::Category;
 pub use layout::{folder_rects, hit, label_spots, layout};
 pub use split::{members, split};
+pub use types::dominant;
 pub use treemap::Theme;
 
 /// A group merges into "other" below this share of its parent, in percent.
@@ -87,11 +88,6 @@ pub struct Split {
     pub files: Option<u64>,
     /// (folders merged, files merged, bytes)
     pub other: Option<(u32, bool, u64)>,
-}
-
-// Stub: P2.T4.
-pub fn dominant(_tree: &Tree, _roots: &[NodeId]) -> Option<Category> {
-    None
 }
 
 /// RGBA picture of the graph. Stub: P3.T1 draws; for now it is all zeros.
