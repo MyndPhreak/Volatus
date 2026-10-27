@@ -48,6 +48,27 @@ impl ThemeChoice {
     }
 }
 
+/// Which view of the scan the window shows. The last choice is remembered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum View {
+    #[default]
+    Treemap,
+    Graph,
+}
+
+impl View {
+    fn key(self) -> &'static str {
+        match self {
+            View::Treemap => "treemap",
+            View::Graph => "graph",
+        }
+    }
+
+    fn from_key(s: &str) -> Option<View> {
+        [View::Treemap, View::Graph].into_iter().find(|v| v.key() == s)
+    }
+}
+
 /// A part of the window that can be hidden.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Part {
@@ -67,6 +88,7 @@ impl Part {
 pub struct Settings {
     pub theme: ThemeChoice,
     pub unit: Unit,
+    pub view: View,
     pub show_header: bool,
     pub show_tree: bool,
     pub show_strip: bool,
@@ -80,6 +102,7 @@ impl Default for Settings {
         Settings {
             theme: ThemeChoice::System,
             unit: Unit::Dynamic,
+            view: View::Treemap,
             show_header: true,
             show_tree: true,
             show_strip: true,
@@ -196,6 +219,7 @@ pub fn to_json(s: &Settings) -> String {
     let v = serde_json::json!({
         "theme": s.theme.key(),
         "unit": unit_key(s.unit),
+        "view": s.view.key(),
         "show_header": s.show_header,
         "show_tree": s.show_tree,
         "show_strip": s.show_strip,
@@ -293,6 +317,7 @@ mod tests {
         Settings {
             theme: ThemeChoice::Dark,
             unit: Unit::Gb,
+            view: View::Graph,
             show_header: false,
             show_tree: true,
             show_strip: false,
@@ -381,6 +406,36 @@ mod tests {
         let (s, loaded) = parse(r#"{"always_admin":"yes"}"#);
         assert!(!s.always_admin);
         assert_eq!(loaded, Loaded::Partial(vec!["always_admin"]));
+    }
+
+    #[test]
+    fn view_defaults_to_treemap_when_missing() {
+        let (s, loaded) = parse(r#"{"theme":"dark"}"#);
+        assert_eq!(s.view, View::Treemap);
+        assert_eq!(loaded, Loaded::Ok);
+    }
+
+    #[test]
+    fn parse_reads_both_views() {
+        assert_eq!(parse(r#"{"view":"graph"}"#), (Settings { view: View::Graph, ..Settings::default() }, Loaded::Ok));
+        assert_eq!(parse(r#"{"view":"treemap"}"#), (Settings::default(), Loaded::Ok));
+    }
+
+    #[test]
+    fn parse_bad_view_falls_back_and_names_the_field() {
+        for text in [r#"{"view":"Graph"}"#, r#"{"view":1}"#, r#"{"view":null}"#] {
+            let (s, loaded) = parse(text);
+            assert_eq!(s.view, View::Treemap, "{text}");
+            assert_eq!(loaded, Loaded::Partial(vec!["view"]), "{text}");
+        }
+    }
+
+    #[test]
+    fn view_roundtrips_to_json() {
+        for view in [View::Treemap, View::Graph] {
+            let s = Settings { view, ..Settings::default() };
+            assert_eq!(parse(&to_json(&s)), (s, Loaded::Ok));
+        }
     }
 
     #[test]

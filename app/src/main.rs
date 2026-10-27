@@ -17,6 +17,7 @@ mod delete_ui;
 mod drives;
 mod elevate;
 mod footer;
+mod graph_view;
 mod menu;
 mod model;
 mod motion;

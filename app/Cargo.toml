@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 scan = { path = "../scan" }
 treemap = { path = "../treemap" }
+flow = { path = "../flow" }
 slint = { version = "1.18.1", features = ["raw-window-handle-06", "unstable-winit-030"] }
 window-vibrancy = "0.8"
 rfd = "0.17"
