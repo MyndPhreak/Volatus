@@ -2,6 +2,7 @@
 
 pub mod age;
 mod layout;
+mod render;
 mod split;
 mod types;
 
@@ -90,7 +91,15 @@ pub struct Split {
     pub other: Option<(u32, bool, u64)>,
 }
 
-/// RGBA picture of the graph. Stub: P3.T1 draws; for now it is all zeros.
-pub fn render(_graph: &Graph, _colours: &[[u8; 3]], w: u32, h: u32, _theme: Theme) -> Vec<u8> {
-    vec![0; w as usize * h as usize * 4]
+/// Straight RGBA picture of the graph, `w * h * 4` bytes, transparent background. Graph
+/// coordinates are pixels.
+///
+/// `colours[i]` is the colour of `graph.bands[i]`; a band past the end of `colours` is a neutral
+/// gray. Each flow is a smooth ribbon from its parent band's right edge to its child band's left
+/// edge, in the child's colour at partial alpha (the theme sets how much); overlapping ribbons
+/// add up but never reach full opacity. Bands are opaque, drawn over the ribbons, and cover
+/// their rectangle rounded to whole pixels as the treemap's tiles do. Anything outside the
+/// picture is clipped.
+pub fn render(graph: &Graph, colours: &[[u8; 3]], w: u32, h: u32, theme: Theme) -> Vec<u8> {
+    render::render(graph, colours, w, h, theme)
 }
