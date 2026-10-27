@@ -12,17 +12,26 @@ pub const FILETIME_2000: i64 = 125_911_584_000_000_000;
 /// Seconds from 1970-01-01 to 2000-01-01.
 const UNIX_TO_2000_SECS: u64 = 946_684_800;
 
+/// 100 ns ticks in a second.
+const TICKS_PER_SEC: i64 = 10_000_000;
+
 /// A FILETIME as seconds since 2000. `<= 0` is `UNKNOWN`; before 2000-01-01 00:00:01 is `1`;
 /// after 2136 is `u32::MAX`.
 pub fn from_filetime(ticks: i64) -> u32 {
-    let _ = ticks;
-    UNKNOWN
+    if ticks <= 0 {
+        return UNKNOWN;
+    }
+    // Truncating division: a time before 2000 gives zero or less, which the clamp lifts to 1.
+    let secs = (ticks - FILETIME_2000) / TICKS_PER_SEC;
+    secs.clamp(1, i64::from(u32::MAX)) as u32
 }
 
 /// A `SystemTime` as seconds since 2000, with the same clamps as `from_filetime`.
 pub fn from_system_time(t: SystemTime) -> u32 {
-    let _ = (t, UNIX_EPOCH + Duration::from_secs(UNIX_TO_2000_SECS));
-    UNKNOWN
+    match t.duration_since(UNIX_EPOCH + Duration::from_secs(UNIX_TO_2000_SECS)) {
+        Ok(d) => d.as_secs().clamp(1, u64::from(u32::MAX)) as u32,
+        Err(_) => 1,
+    }
 }
 
 #[cfg(test)]

@@ -83,7 +83,9 @@ impl Tree {
 
     /// Unlinks `n` from its parent and subtracts its sizes from every ancestor. `None`, and nothing
     /// changes, for the root, a node already detached, and a node under a detached one. The arena
-    /// slots stay in place and are not reused.
+    /// slots stay in place and are not reused. Ancestors keep their scanned `modified`: it may
+    /// still count the removed item, and only a rescan corrects it (recomputing needs a subtree
+    /// walk per ancestor).
     pub fn detach(&mut self, n: NodeId) -> Option<Detached> {
         // The root has no parent, and a detached node has its parent cleared below.
         let parent = self.node(n).parent?;

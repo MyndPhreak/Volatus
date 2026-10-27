@@ -229,23 +229,24 @@ fn first_child_positions(order: &[u32], level0: usize, off: &[u32]) -> Vec<u32> 
     at
 }
 
-/// (size, allocated) of every entry in `order`, children summed into parents level by level from
-/// the deepest. Each parent is written by exactly one task and only integers are added, so the
-/// result does not depend on the thread count. Directory records' own sizes are ignored.
+/// (size, allocated, newest modified) of every entry in `order`, children summed into parents
+/// level by level from the deepest. Each parent is written by exactly one task and only integers
+/// are added or compared, so the result does not depend on the thread count. Directory records'
+/// own sizes and times are ignored.
 fn roll_up_sizes(
     entries: &[RawEntry],
     order: &[u32],
     bounds: &[usize],
     kid_at: &[u32],
-) -> Vec<(u64, u64)> {
-    let mut sums: Vec<(u64, u64)> = order
+) -> Vec<(u64, u64, u32)> {
+    let mut sums: Vec<(u64, u64, u32)> = order
         .par_iter()
         .map(|&i| {
             let e = &entries[i as usize];
             if e.is_dir {
-                (0, 0)
+                (0, 0, UNKNOWN)
             } else {
-                (e.size, e.allocated)
+                (e.size, e.allocated, e.modified)
             }
         })
         .collect();
@@ -259,11 +260,12 @@ fn roll_up_sizes(
             .enumerate()
             .for_each(|(k, sum)| {
                 let j = start + k;
-                for &(size, allocated) in
+                for &(size, allocated, modified) in
                     &below[kid_at[j] as usize - end..kid_at[j + 1] as usize - end]
                 {
                     sum.0 += size;
                     sum.1 += allocated;
+                    sum.2 = sum.2.max(modified);
                 }
             });
     }
@@ -291,12 +293,13 @@ pub fn rollup(root: u64, entries: Vec<RawEntry>) -> Result<Rolled, ScanError> {
     let kid_at = first_child_positions(&order, level0, &off);
     drop((off, kids));
     let mut sums = roll_up_sizes(&entries, &order, &bounds, &kid_at);
-    // `$Orphan` holds the orphans' totals and rolls into the root.
+    // `$Orphan` holds the orphans' totals and newest time and rolls into the root.
     let orphan_sum = sums[1..level0]
         .iter()
-        .fold((0u64, 0u64), |a, s| (a.0 + s.0, a.1 + s.1));
+        .fold((0u64, 0u64, UNKNOWN), |a, s| (a.0 + s.0, a.1 + s.1, a.2.max(s.2)));
     sums[0].0 += orphan_sum.0;
     sums[0].1 += orphan_sum.1;
+    sums[0].2 = sums[0].2.max(orphan_sum.2);
 
     // Arena: reachable entries in input order. `pos` = position in `order`, NO_ENTRY = skipped.
     let mut pos = vec![NO_ENTRY; n];
@@ -350,7 +353,7 @@ pub fn rollup(root: u64, entries: Vec<RawEntry>) -> Result<Rolled, ScanError> {
             };
             (Some(NodeId(new_id[p])), next)
         };
-        let (size, allocated) = sums[j];
+        let (size, allocated, modified) = sums[j];
         let name = NameRef {
             start: starts[k],
             len: e.name.len() as u32,
@@ -363,7 +366,7 @@ pub fn rollup(root: u64, entries: Vec<RawEntry>) -> Result<Rolled, ScanError> {
             is_dir: e.is_dir,
             first_child,
             next_sibling,
-            modified: UNKNOWN,
+            modified,
         }
     };
     let root_node = node_at(0);
@@ -384,7 +387,7 @@ pub fn rollup(root: u64, entries: Vec<RawEntry>) -> Result<Rolled, ScanError> {
             is_dir: true,
             first_child: Some(node_at(1)),
             next_sibling: None,
-            modified: UNKNOWN,
+            modified: orphan_sum.2,
         });
     }
     let skipped = (n - order.len()) as u64;
