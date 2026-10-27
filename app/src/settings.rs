@@ -72,6 +72,7 @@ pub struct Settings {
     pub show_strip: bool,
     pub show_chips: bool,
     pub show_labels: bool,
+    pub always_admin: bool,
 }
 
 impl Default for Settings {
@@ -84,6 +85,7 @@ impl Default for Settings {
             show_strip: true,
             show_chips: true,
             show_labels: true,
+            always_admin: false,
         }
     }
 }
@@ -178,6 +180,14 @@ pub fn parse(text: &str) -> (Settings, Loaded) {
         }
     }
 
+    match map.get("always_admin") {
+        None => {}
+        Some(v) => match v.as_bool() {
+            Some(on) => s.always_admin = on,
+            None => bad.push("always_admin"),
+        },
+    }
+
     let loaded = if bad.is_empty() { Loaded::Ok } else { Loaded::Partial(bad) };
     (s, loaded)
 }
@@ -191,6 +201,7 @@ pub fn to_json(s: &Settings) -> String {
         "show_strip": s.show_strip,
         "show_chips": s.show_chips,
         "show_labels": s.show_labels,
+        "always_admin": s.always_admin,
     });
     serde_json::to_string_pretty(&v).unwrap_or_default()
 }
@@ -287,6 +298,7 @@ mod tests {
             show_strip: false,
             show_chips: true,
             show_labels: false,
+            always_admin: true,
         }
     }
 
@@ -299,6 +311,7 @@ mod tests {
             assert!(s.shown(p), "{p:?} should be shown by default");
         }
         assert!(s.show_header && s.show_tree && s.show_strip && s.show_chips && s.show_labels);
+        assert!(!s.always_admin);
     }
 
     #[test]
@@ -331,6 +344,7 @@ mod tests {
         assert_eq!(s.unit, Unit::Dynamic);
         assert!(!s.show_tree);
         assert!(s.show_header && s.show_strip && s.show_chips && s.show_labels);
+        assert!(!s.always_admin);
         assert_eq!(loaded, Loaded::Partial(vec!["unit"]));
     }
 
@@ -354,7 +368,19 @@ mod tests {
         assert_eq!(s.theme, ThemeChoice::Dark);
         assert_eq!(s.unit, Unit::Dynamic);
         assert!(s.show_header && s.show_tree && s.show_strip && s.show_chips && s.show_labels);
+        assert!(!s.always_admin);
         assert_eq!(loaded, Loaded::Ok);
+    }
+
+    #[test]
+    fn parse_always_admin_roundtrips_and_validates_type() {
+        let (s, loaded) = parse(r#"{"always_admin":true}"#);
+        assert!(s.always_admin);
+        assert_eq!(loaded, Loaded::Ok);
+
+        let (s, loaded) = parse(r#"{"always_admin":"yes"}"#);
+        assert!(!s.always_admin);
+        assert_eq!(loaded, Loaded::Partial(vec!["always_admin"]));
     }
 
     #[test]
@@ -414,6 +440,7 @@ mod tests {
         fs::write(dir.file(), text).unwrap();
         let (s, loaded) = load(&dir.file());
         assert_eq!(s.theme, ThemeChoice::Dark);
+        assert!(!s.always_admin);
         assert_eq!(loaded, Loaded::Partial(vec!["unit"]));
         let bad = dir.0.join("settings.json.bad");
         assert!(bad.exists(), "settings.json.bad should exist");

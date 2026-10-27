@@ -143,6 +143,9 @@ Press Tab to move to the next control, and Shift+Tab to move back.
     strip and the chips are hidden.
   - "Tile labels": the names on the tiles and the folder frames. The name of the tile under the
     pointer still shows. The tooltips stay.
+- **Startup**: "Always start as administrator". When turned on, Volatus checks whether it has
+  administrator rights each time it starts. If not, it requests elevation through Windows UAC and
+  restarts. If elevation is declined, Volatus continues running as a standard user.
 - A choice takes effect at once. Volatus saves each change in `%APPDATA%\Volatus\settings.json`
   and reads this file at start.
 - If Volatus finds a wrong or damaged field in the file, it keeps the file as `settings.json.bad`

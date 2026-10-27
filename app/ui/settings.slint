@@ -195,6 +195,9 @@ export component SettingsFlyout inherits GlassPanel {
     callback unit-chosen(int);
     /// Part `i` (an index in `shown`) was shown (true) or hidden (false).
     callback part-toggled(int, bool);
+    /// Whether the app always starts as administrator.
+    in property <bool> always-admin;
+    callback always-admin-toggled(bool);
     callback close();
 
     init => {
@@ -244,6 +247,13 @@ export component SettingsFlyout inherits GlassPanel {
                 text: name;
                 on: root.shown[i];
                 toggled(on) => { root.part-toggled(i, on); }
+            }
+            Rectangle { height: 6px; }
+            GroupTitle { text: "Startup"; }
+            PartSwitch {
+                text: "Always start as administrator";
+                on: root.always-admin;
+                toggled(on) => { root.always-admin-toggled(on); }
             }
             if root.error != "" : Text {
                 text: root.error;
