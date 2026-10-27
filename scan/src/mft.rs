@@ -52,6 +52,8 @@ pub struct Record {
     pub data: Option<DataSize>,
     /// Holds a name-surrogate reparse point (junction, symlink): never followed.
     pub surrogate: bool,
+    /// `$STANDARD_INFORMATION` last write (`time` encoding); `UNKNOWN` when unreadable.
+    pub modified: u32,
 }
 
 /// Low 48 bits of a file reference are the record number; the high 16 are a sequence number.
@@ -201,6 +203,7 @@ pub fn parse_record(buf: &mut [u8], number: u64) -> Result<Option<Record>, Malfo
         names: Vec::new(),
         data: None,
         surrogate: false,
+        modified: crate::time::UNKNOWN,
     };
     for a in attributes(buf)? {
         match a.ty {

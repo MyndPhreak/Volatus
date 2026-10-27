@@ -192,6 +192,28 @@ pub fn dir(parent: u64, name: &str) -> Vec<u8> {
     record(IN_USE | DIR, 0, &[file_name(parent, name, WIN32)])
 }
 
+/// Resident `$STANDARD_INFORMATION` (0x10): a 0x48-byte value, last write (FILETIME) at 0x08.
+pub fn standard_information(last_write: i64) -> Vec<u8> {
+    let mut v = vec![0u8; 0x48];
+    put64(&mut v, 0x08, last_write as u64);
+    resident_attr(0x10, "", &v)
+}
+
+/// `file` with a `$STANDARD_INFORMATION` first (attributes are in type order on disk).
+pub fn file_at(parent: u64, name: &str, size: u64, last_write: i64) -> Vec<u8> {
+    let d = if size <= 256 {
+        resident_data(size as usize)
+    } else {
+        data(size, size.div_ceil(CLUSTER as u64) * CLUSTER as u64)
+    };
+    record(IN_USE, 0, &[standard_information(last_write), file_name(parent, name, WIN32), d])
+}
+
+/// `dir` with a `$STANDARD_INFORMATION` first.
+pub fn dir_at(parent: u64, name: &str, last_write: i64) -> Vec<u8> {
+    record(IN_USE | DIR, 0, &[standard_information(last_write), file_name(parent, name, WIN32)])
+}
+
 /// Mapping pairs for `(lcn, clusters)` runs, terminated by a zero byte.
 pub fn runs(list: &[(u64, u64)]) -> Vec<u8> {
     let mut out = Vec::new();
