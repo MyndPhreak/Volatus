@@ -2,15 +2,19 @@
 //! file types of the bands on screen (`count_graph_types`). Both follow the treemap's rules: a
 //! late result is dropped (`is_current`, `store_types`), and every worker lets go of its
 //! `Arc<Data>` clone and then calls `scan_apply::data_released`, so a pending removal can apply.
+//! Also the window side of the view switch and the colour toggle (`wire`, `sync_view`).
 
-use crate::graph_view::{self, ColourMode};
+use crate::graph_view::{self, AGE_LEGEND, ColourMode};
 use crate::model::{Unit, display_name};
 use crate::settings::View;
-use crate::{Data, LABEL_CAP, LayoutJob, MainWindow, SESSION, Session, Stored, current_unit, is_current, relayout, scan_apply, with_loaded};
+use crate::{
+    Data, LABEL_CAP, LayoutJob, LegendEntry, MainWindow, SESSION, Session, Stored, current_unit, drop_hover, is_current, persist, relayout,
+    scan_apply, with_loaded,
+};
 use flow::{Expander, Graph, Part, Theme};
-use slint::ComponentHandle;
+use slint::{ComponentHandle, Image, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel};
 use scan::{NodeId, Tree};
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
@@ -77,18 +81,39 @@ pub struct GraphInputs {
 }
 
 thread_local! {
-    /// The picture of the latest graph that landed, with the `Loaded::serial` of its scan. The
-    /// markup (P3.T4) shows it; a picture of another scan is never given out (`shown_picture`).
-    static PICTURE: RefCell<Option<(u64, GraphPicture)>> = const { RefCell::new(None) };
     /// A file-type worker runs: at most one at a time.
     static TYPES_RUNNING: Cell<bool> = const { Cell::new(false) };
 }
 
-/// The picture of the shown scan's latest graph, if one landed.
-#[cfg_attr(not(test), expect(dead_code, reason = "read by the markup in P3.T4"))]
-pub(crate) fn shown_picture() -> Option<GraphPicture> {
-    let serial = SESSION.with_borrow(|s| s.loaded.as_ref().map(|l| l.serial))?;
-    PICTURE.with_borrow(|p| p.as_ref().filter(|(of, _)| *of == serial).map(|(_, pic)| pic.clone()))
+/// A graph ready for the window, made on the worker: the picture as a pixel buffer that the
+/// window takes without a copy (`Image::from_rgba8`, as the treemap's `spawn_layout`), and the
+/// labels and expanders in the window's own structs.
+struct Ready {
+    graph: Graph,
+    /// `None` for a picture with no area.
+    image: Option<SharedPixelBuffer<Rgba8Pixel>>,
+    size: (f32, f32),
+    labels: Vec<crate::GraphLabel>,
+    expanders: Vec<crate::GraphExpander>,
+    note: &'static str,
+}
+
+impl Ready {
+    /// Turns a landing into what the window shows. Runs on the worker: the one copy of the
+    /// picture is made there.
+    fn of(GraphLanding { graph, picture }: GraphLanding) -> Ready {
+        let GraphPicture { image, width, height, size, labels, expanders, note } = picture;
+        let image = (width > 0 && height > 0).then(|| SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(&image, width, height));
+        let labels = labels
+            .into_iter()
+            .map(|l| crate::GraphLabel { x: l.x, y: l.y, width: l.width, height: l.height, name: l.name.into(), size: l.size.into() })
+            .collect();
+        let expanders = expanders
+            .into_iter()
+            .map(|e| crate::GraphExpander { x: e.x, y: e.y, size: e.size, expanded: e.expanded, name: e.name.into(), band: e.band })
+            .collect();
+        Ready { graph, image, size, labels, expanders, note }
+    }
 }
 
 /// Lays out and draws the graph of folder `view` at `w` x `h` physical pixels (`scale` physical
@@ -171,7 +196,7 @@ pub(crate) fn spawn_graph(ui: &MainWindow, job: LayoutJob) {
     let weak = ui.as_weak();
     std::thread::spawn(move || {
         let now = scan::time::from_system_time(SystemTime::now());
-        let landing = build(&data.tree, root, &inputs, w, h, f64::from(scale), theme, now, unit);
+        let ready = Ready::of(build(&data.tree, root, &inputs, w, h, f64::from(scale), theme, now, unit));
         // Let go of the data before the UI thread runs, so a delete waiting for it can apply.
         drop(data);
         // Err means the event loop has stopped: nothing left to update.
@@ -179,7 +204,7 @@ pub(crate) fn spawn_graph(ui: &MainWindow, job: LayoutJob) {
             let Some(ui) = weak.upgrade() else { return };
             let current = SESSION.with_borrow(|s| is_current(s, generation, seq));
             if current {
-                land(landing, seq, started);
+                land(&ui, ready, seq, started);
             }
             scan_apply::data_released(&ui);
             // After the release: a removal it applied makes this graph late (`is_current`).
@@ -190,19 +215,101 @@ pub(crate) fn spawn_graph(ui: &MainWindow, job: LayoutJob) {
     });
 }
 
-/// Shows a current graph: the graph goes to `Loaded::graph`, the picture to the window. With
-/// `--timing`, prints how long the graph took from the job's start.
-fn land(GraphLanding { graph, picture }: GraphLanding, seq: u64, started: Instant) {
-    let Some(serial) = with_loaded(|l| {
-        l.graph.shown = Some(graph);
-        l.serial
-    }) else {
+/// Shows a current graph: the graph goes to `Loaded::graph`, the picture, labels and expanders to
+/// the window, which takes the picture's buffer as it is. With `--timing`, prints how long the
+/// graph took from the job's start.
+fn land(ui: &MainWindow, Ready { graph, image, size, labels, expanders, note }: Ready, seq: u64, started: Instant) {
+    if with_loaded(|l| l.graph.shown = Some(graph)).is_none() {
         return;
-    };
-    PICTURE.with_borrow_mut(|p| *p = Some((serial, picture)));
+    }
+    // Red stub: the window gets nothing yet.
+    let _ = (ui, image, size, labels, expanders, note);
     if SESSION.with_borrow(|s| s.flags.timing) {
         eprintln!("Graph {seq}: {} ms.", started.elapsed().as_millis());
     }
+}
+
+/// Drops the graph the window shows: its picture, labels, expanders and text, and the shown
+/// `Graph` (nothing is hit-tested on a graph that does not show). For a new scan and when the view
+/// leaves the graph.
+pub(crate) fn clear_picture(ui: &MainWindow) {
+    let _ = ui;
+}
+
+/// The legend of the age colours in `theme`: the texts of `AGE_LEGEND` in the colours the picture
+/// uses (`flow::age::age_colour`).
+pub(crate) fn age_legend(theme: Theme) -> Vec<LegendEntry> {
+    AGE_LEGEND
+        .iter()
+        .map(|&(age, text)| {
+            let [r, g, b] = flow::age::age_colour(age, theme);
+            LegendEntry { text: text.into(), color: slint::Color::from_rgb_u8(r, g, b) }
+        })
+        .collect()
+}
+
+/// Pushes the view switch and the graph bar into the window: which view shows, whether the switch
+/// and the toggle work (the graph could show: a finished scan with data), the chosen colours and
+/// the age legend in the window's theme.
+pub(crate) fn sync_view(ui: &MainWindow) {
+    let _ = ui;
+}
+
+/// True when the graph could show: the view switch works.
+fn offered(s: &Session) -> bool {
+    graph_view::shown_view(s.scan.state(), s.loaded.is_some(), View::Graph) == View::Graph
+}
+
+/// A view was chosen in the top bar (0 treemap, 1 graph): it is kept in the settings and saved,
+/// the hover goes, a graph left is dropped, and the chosen view is laid out. Nothing while the
+/// switch is off or for the view that is already chosen.
+fn view_chosen(ui: &MainWindow, i: i32) {
+    let _ = (ui, i);
+}
+
+/// Colours were chosen in the graph bar (0 age, 1 file type): the graph is drawn again in them.
+/// The choice lasts for the session only.
+fn colour_chosen(ui: &MainWindow, i: i32) {
+    let _ = (ui, i);
+}
+
+/// Wires the view switch, the colour toggle and the graph's size. The graph's own input (click,
+/// keys, menu, expanders, hover, wheel) gets its handlers in P4.T3; until then it does nothing.
+pub(crate) fn wire(ui: &MainWindow) {
+    ui.on_view_chosen({
+        let weak = ui.as_weak();
+        move |i| {
+            if let Some(ui) = weak.upgrade() {
+                view_chosen(&ui, i);
+            }
+        }
+    });
+    ui.on_colour_chosen({
+        let weak = ui.as_weak();
+        move |i| {
+            if let Some(ui) = weak.upgrade() {
+                colour_chosen(&ui, i);
+            }
+        }
+    });
+    // The graph has the treemap's place: one size, one debounced layout (`treemap-resized`).
+    ui.on_graph_resized({
+        let weak = ui.as_weak();
+        move |w, h| {
+            if let Some(ui) = weak.upgrade() {
+                ui.invoke_treemap_resized(w, h);
+            }
+        }
+    });
+    ui.on_graph_click(|_, _| {});
+    ui.on_graph_open(|_, _| {});
+    ui.on_graph_menu(|_, _, _, _| {});
+    ui.on_graph_menu_key(|_, _, _, _| {});
+    ui.on_graph_key(|_| {});
+    ui.on_graph_expand(|_| {});
+    ui.on_graph_hover(|_, _| {});
+    ui.on_graph_leave(|| {});
+    ui.on_graph_scroll(|_| {});
 }
 
 /// True when the graph shows in File type mode: its bands want their file types.
@@ -283,7 +390,9 @@ mod tests {
     use crate::model::{Event, Summary};
     use crate::settings::View;
     use crate::{Loaded, RowModel, SESSION, begin_layout, is_current};
+    use i_slint_backend_testing::{AccessibleRole, ElementHandle};
     use scan::Method;
+    use slint::Model;
     use scan::rollup::{RawEntry, rollup};
     use std::rc::Rc;
 
@@ -453,20 +562,192 @@ mod tests {
         assert!(kept_types().is_empty());
     }
 
-    // ---- land: the graph and the picture of the shown scan ----
-    #[test]
-    fn land_keeps_the_graph_and_gives_the_picture_of_the_shown_scan_only() {
-        let d = data();
-        show_finished_scan(&d, View::Graph);
-        let landing = build(&d.tree, d.tree.root(), &GraphInputs::default(), 40, 30, 1.0, Theme::Light, 0, Unit::Dynamic);
+    // ---- TP3.4: the view switch, the colour toggle and the legend (headless) ----
 
-        land(landing.clone(), 1, Instant::now());
+    /// A window on the testing backend (this thread only), wired as `main` wires it, with a
+    /// finished scan of `data()` installed and `view` chosen. No delete is started here, so the
+    /// delete wiring (`delete_ui::wire`) is not needed.
+    fn window(view: View) -> MainWindow {
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = MainWindow::new().unwrap();
+        crate::wire_tree_and_treemap(&ui);
+        wire(&ui);
+        SESSION.with_borrow_mut(|s| {
+            let (generation, _) = s.scan.start().expect("no scan runs");
+            assert!(s.scan.apply(generation, Event::Finished(summary())));
+            s.settings.view = view;
+        });
+        crate::install(&ui, data());
+        crate::show_state(&ui);
+        ui.show().unwrap();
+        ui
+    }
+
+    /// The buttons the window shows with this label (found once per component level).
+    fn buttons(ui: &MainWindow, label: &str) -> Vec<ElementHandle> {
+        ElementHandle::find_by_accessible_label(ui, label).filter(|e| e.accessible_role() == Some(AccessibleRole::Button)).collect()
+    }
+
+    fn button(ui: &MainWindow, label: &str) -> ElementHandle {
+        buttons(ui, label).into_iter().next().unwrap_or_else(|| panic!("a {label:?} button"))
+    }
+
+    fn click(ui: &MainWindow, label: &str) {
+        button(ui, label).invoke_accessible_default_action();
+    }
+
+    fn graph_shows(ui: &MainWindow) -> bool {
+        ElementHandle::find_by_accessible_label(ui, "Folder graph").next().is_some()
+    }
+
+    fn chosen_view() -> View {
+        SESSION.with_borrow(|s| s.settings.view)
+    }
+
+    fn colour() -> ColourMode {
+        SESSION.with_borrow(|s| s.loaded.as_ref().unwrap().graph.colour)
+    }
+
+    const LEGEND: [&str; 4] =
+        ["Changed in the last 6 months", "Changed 6 to 24 months ago", "Changed more than 24 months ago", "Date not known"];
+
+    #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
+    fn switch_after_a_finished_scan_is_two_enabled_buttons_and_while_scanning_both_are_disabled() {
+        let ui = window(View::Treemap);
+        for label in ["Treemap", "Graph"] {
+            assert_eq!(button(&ui, label).accessible_enabled(), Some(true), "{label} after a finished scan");
+        }
+        assert_eq!(button(&ui, "Treemap").accessible_checked(), Some(true));
+        assert_eq!(button(&ui, "Graph").accessible_checked(), Some(false));
+
+        SESSION.with_borrow_mut(|s| {
+            let _ = s.scan.start().expect("no scan runs");
+        });
+        crate::show_state(&ui);
+
+        for label in ["Treemap", "Graph"] {
+            assert_eq!(button(&ui, label).accessible_enabled(), Some(false), "{label} while scanning");
+        }
+        // A disabled switch changes nothing.
+        click(&ui, "Graph");
+        assert_eq!(chosen_view(), View::Treemap);
+    }
+
+    #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
+    fn graph_button_shows_the_folder_graph_and_treemap_goes_back() {
+        let ui = window(View::Treemap);
+        assert!(!graph_shows(&ui));
+
+        click(&ui, "Graph");
+
+        assert_eq!(chosen_view(), View::Graph);
+        assert!(graph_shows(&ui), "the element labelled \"Folder graph\" shows");
+        assert_eq!(button(&ui, "Graph").accessible_checked(), Some(true));
+
+        click(&ui, "Treemap");
+
+        assert_eq!(chosen_view(), View::Treemap);
+        assert!(!graph_shows(&ui));
+        assert_eq!(button(&ui, "Treemap").accessible_checked(), Some(true));
+    }
+
+    #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
+    fn graph_bar_has_age_and_file_type_and_age_shows_the_four_legend_texts() {
+        assert_eq!(AGE_LEGEND.map(|(_, text)| text), LEGEND);
+        let ui = window(View::Graph);
+        assert!(graph_shows(&ui));
+        assert_eq!(button(&ui, "Age").accessible_checked(), Some(true));
+        assert_eq!(button(&ui, "File type").accessible_checked(), Some(false));
+        for text in LEGEND {
+            assert!(ElementHandle::find_by_accessible_label(&ui, text).next().is_some(), "legend {text:?}");
+        }
+
+        click(&ui, "File type");
+
+        assert_eq!(colour(), ColourMode::FileType);
+        assert_eq!(button(&ui, "File type").accessible_checked(), Some(true));
+        // The footer chips are the legend of the file types: no age legend.
+        for text in LEGEND {
+            assert!(ElementHandle::find_by_accessible_label(&ui, text).next().is_none(), "no legend {text:?}");
+        }
+
+        click(&ui, "Age");
+
+        assert_eq!(colour(), ColourMode::Age);
+        assert!(ElementHandle::find_by_accessible_label(&ui, LEGEND[0]).next().is_some());
+    }
+
+    #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
+    fn legend_swatches_are_the_age_colours_of_the_window_theme() {
+        let ui = window(View::Graph);
+        for (scheme, theme) in [(slint::language::ColorScheme::Dark, Theme::Dark), (slint::language::ColorScheme::Light, Theme::Light)] {
+            ui.global::<crate::Palette>().set_color_scheme(scheme);
+            sync_view(&ui);
+            let got: Vec<(String, slint::Color)> = ui.get_graph_legend().iter().map(|e| (e.text.to_string(), e.color)).collect();
+            let want: Vec<(String, slint::Color)> = AGE_LEGEND
+                .iter()
+                .map(|&(age, text)| {
+                    let [r, g, b] = flow::age::age_colour(age, theme);
+                    (text.to_string(), slint::Color::from_rgb_u8(r, g, b))
+                })
+                .collect();
+            assert_eq!(got, want, "{theme:?}");
+        }
+    }
+
+    // ---- land: the picture goes to the window as a buffer, without a copy on the UI thread ----
+    #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
+    fn land_shows_the_picture_labels_and_expanders_and_a_new_scan_drops_them() {
+        let ui = window(View::Graph);
+        let d = SESSION.with_borrow(|s| s.loaded.as_ref().unwrap().data.clone());
+        let landing = build(&d.tree, d.tree.root(), &GraphInputs::default(), 400, 300, 1.0, Theme::Light, 0, Unit::Dynamic);
+        assert!(!landing.picture.labels.is_empty() && !landing.picture.expanders.is_empty());
+
+        land(&ui, Ready::of(landing.clone()), 1, Instant::now());
 
         let shown = SESSION.with_borrow(|s| s.loaded.as_ref().and_then(|l| l.graph.shown.clone()));
-        assert_eq!((shown, shown_picture()), (Some(landing.graph), Some(landing.picture)));
-        // Another scan on screen: the picture is not its own.
-        SESSION.with_borrow_mut(|s| s.loaded = Some(loaded(&data())));
-        assert_eq!(shown_picture(), None);
+        assert_eq!(shown, Some(landing.graph.clone()));
+        let picture = ui.get_graph_picture().to_rgba8();
+        assert!(picture.is_some(), "an RGBA picture in the window");
+        let picture = picture.unwrap();
+        assert_eq!((picture.width(), picture.height()), (400, 300));
+        assert_eq!(picture.as_bytes(), &landing.picture.image[..]);
+        assert_eq!((ui.get_graph_layout_width(), ui.get_graph_layout_height()), (400.0, 300.0));
+        let labels: Vec<String> = ui.get_graph_labels().iter().map(|l| l.name.to_string()).collect();
+        assert_eq!(labels, landing.picture.labels.iter().map(|l| l.name.clone()).collect::<Vec<_>>());
+        let expanders: Vec<(String, i32)> = ui.get_graph_expanders().iter().map(|e| (e.name.to_string(), e.band)).collect();
+        assert_eq!(expanders, landing.picture.expanders.iter().map(|e| (e.name.clone(), e.band)).collect::<Vec<_>>());
+        // The expander has its accessible label.
+        let name = &landing.picture.expanders[0].name;
+        assert!(!buttons(&ui, &format!("Expand {name}")).is_empty(), "an \"Expand {name}\" button");
+
+        // A new scan drops the graph of the old one.
+        crate::install(&ui, data());
+
+        let size = ui.get_graph_picture().size();
+        assert_eq!((size.width, size.height), (0, 0), "no picture");
+        assert_eq!((ui.get_graph_labels().row_count(), ui.get_graph_expanders().row_count()), (0, 0));
+        assert!(SESSION.with_borrow(|s| s.loaded.as_ref().unwrap().graph.shown.is_none()));
+    }
+
+    #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
+    fn treemap_chosen_drops_the_graph_picture() {
+        let ui = window(View::Graph);
+        let d = SESSION.with_borrow(|s| s.loaded.as_ref().unwrap().data.clone());
+        let landing = build(&d.tree, d.tree.root(), &GraphInputs::default(), 40, 30, 1.0, Theme::Light, 0, Unit::Dynamic);
+        land(&ui, Ready::of(landing), 1, Instant::now());
+
+        click(&ui, "Treemap");
+
+        let size = ui.get_graph_picture().size();
+        assert_eq!((size.width, size.height), (0, 0), "no picture");
+        assert!(SESSION.with_borrow(|s| s.loaded.as_ref().unwrap().graph.shown.is_none()));
     }
 
     // ---- build: the worker's pure part ----

@@ -612,6 +612,7 @@ fn show_state(ui: &MainWindow) {
     ui.set_show_elevate(offer);
     ui.set_outdated(SESSION.with_borrow(|s| rescan_shown(&state, s.outdated)));
     ui.set_scan_title(SESSION.with_borrow(|s| model::scan_title(&s.scan_root)).into());
+    graph_ui::sync_view(ui);
     delete_ui::sync(ui);
 }
 
@@ -1460,6 +1461,7 @@ fn install(ui: &MainWindow, data: Arc<Data>) {
         });
         s.fade_next = true;
     });
+    graph_ui::clear_picture(ui);
     sync_rows(ui);
     relayout(ui);
     count_types(ui, data);
@@ -1579,6 +1581,7 @@ fn clear(ui: &MainWindow) {
     let tip = forget_scan(|n| show_hover(ui, n));
     ui.set_rows(ModelRc::default());
     ui.set_treemap(Image::default());
+    graph_ui::clear_picture(ui);
     ui.set_crumbs(ModelRc::default());
     ui.set_labels(ModelRc::default());
     ui.set_file_labels(ModelRc::default());
@@ -2214,6 +2217,7 @@ fn main() {
         }
     });
     wire_tree_and_treemap(&ui);
+    graph_ui::wire(&ui);
     delete_ui::wire(&ui, delete_ui::Deps::real());
 
     ui.show().expect("show window");
