@@ -113,8 +113,8 @@ pub const AGE_LEGEND: [(Age, &str); 4] =
     [(Age::Recent, ""), (Age::Middle, ""), (Age::Old, ""), (Age::Unknown, "")];
 
 /// The view to show: the graph only for a finished scan with data and when it is chosen.
-pub fn shown_view(_state: &ScanState, _loaded: bool, _chosen: View) -> View {
-    View::Treemap
+pub fn shown_view(state: &ScanState, loaded: bool, chosen: View) -> View {
+    if loaded && matches!(state, ScanState::Done(_)) { chosen } else { View::Treemap }
 }
 
 #[cfg(test)]

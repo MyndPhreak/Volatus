@@ -187,6 +187,13 @@ pub fn parse(text: &str) -> (Settings, Loaded) {
             None => bad.push("unit"),
         },
     }
+    match map.get("view") {
+        None => {}
+        Some(v) => match v.as_str().and_then(View::from_key) {
+            Some(view) => s.view = view,
+            None => bad.push("view"),
+        },
+    }
     for (key, part) in [
         ("show_header", Part::Header),
         ("show_tree", Part::Tree),

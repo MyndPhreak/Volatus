@@ -217,6 +217,7 @@ version = "0.2.0"
 dependencies = [
  "arboard",
  "embed-resource",
+ "flow",
  "i-slint-backend-testing",
  "raw-window-handle",
  "rayon",
