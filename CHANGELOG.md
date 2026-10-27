@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/MyndPhreak/Volatus/compare/v0.2.0...v0.3.0) (2026-10-27)
+
+
+### Features
+
+* add setting to always start as administrator ([#10](https://github.com/MyndPhreak/Volatus/issues/10)) ([e39472c](https://github.com/MyndPhreak/Volatus/commit/e39472c154a57e51f07957da0a830f892bc40585))
+
 ## [0.2.0](https://github.com/MyndPhreak/Volatus/compare/v0.1.0...v0.2.0) (2026-10-26)
 
 
