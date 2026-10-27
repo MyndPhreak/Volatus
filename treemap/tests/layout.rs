@@ -3,10 +3,10 @@ use scan::{NodeId, Tree};
 use treemap::{Rect, layout, render};
 
 fn tree_of(sizes: &[u64]) -> Tree {
-    let mut entries = vec![RawEntry { id: 0, parent: 0, name: "root".into(), size: 0, allocated: 0, is_dir: true }];
+    let mut entries = vec![RawEntry { id: 0, parent: 0, name: "root".into(), size: 0, allocated: 0, is_dir: true, modified: scan::time::UNKNOWN }];
     for (i, &s) in sizes.iter().enumerate() {
         let id = i as u64 + 1;
-        entries.push(RawEntry { id, parent: 0, name: format!("f{id}"), size: s, allocated: s, is_dir: false });
+        entries.push(RawEntry { id, parent: 0, name: format!("f{id}"), size: s, allocated: s, is_dir: false, modified: scan::time::UNKNOWN });
     }
     rollup(0, entries).unwrap().tree
 }
@@ -134,7 +134,7 @@ fn layout_equal_sizes_order_by_node_id() {
 
 /// Tree from `(id, parent, size, is_dir)` rows under a root folder with id 0. Node names are `n{id}`.
 fn nested(rows: &[(u64, u64, u64, bool)]) -> Tree {
-    let mut entries = vec![RawEntry { id: 0, parent: 0, name: "root".into(), size: 0, allocated: 0, is_dir: true }];
+    let mut entries = vec![RawEntry { id: 0, parent: 0, name: "root".into(), size: 0, allocated: 0, is_dir: true, modified: scan::time::UNKNOWN }];
     entries.extend(rows.iter().map(|&(id, parent, size, is_dir)| RawEntry {
         id,
         parent,
@@ -142,6 +142,7 @@ fn nested(rows: &[(u64, u64, u64, bool)]) -> Tree {
         size,
         allocated: size,
         is_dir,
+        modified: scan::time::UNKNOWN,
     }));
     rollup(0, entries).unwrap().tree
 }

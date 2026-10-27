@@ -5,11 +5,11 @@ use scan::ScanError;
 use scan::rollup::{RawEntry, rollup};
 
 fn dir(id: u64, parent: u64, name: &str) -> RawEntry {
-    RawEntry { id, parent, name: name.into(), size: 0, allocated: 0, is_dir: true }
+    RawEntry { id, parent, name: name.into(), size: 0, allocated: 0, is_dir: true, modified: scan::time::UNKNOWN }
 }
 
 fn file(id: u64, parent: u64, name: &str, size: u64) -> RawEntry {
-    RawEntry { id, parent, name: name.into(), size, allocated: size + 10, is_dir: false }
+    RawEntry { id, parent, name: name.into(), size, allocated: size + 10, is_dir: false, modified: scan::time::UNKNOWN }
 }
 
 #[test]
@@ -370,7 +370,8 @@ fn forest(seed: u64, n: usize, weird: bool) -> (u64, Vec<RawEntry>) {
         let is_dir = rng.chance(35);
         let size = rng.below(10_000) as u64;
         let (size, allocated) = if is_dir && rng.chance(50) { (0, 0) } else { (size, size + rng.below(4096) as u64) };
-        all.push(RawEntry { id, parent, name, size, allocated, is_dir });
+        let modified = if rng.chance(30) { scan::time::UNKNOWN } else { rng.below(1_000_000) as u32 + 1 };
+        all.push(RawEntry { id, parent, name, size, allocated, is_dir, modified });
         if is_dir && depth < 40 {
             open_dirs.push((id, depth + 1));
         }
@@ -506,4 +507,110 @@ fn rollup_weird_forest_is_identical_in_pools_of_1_4_and_8_threads() {
 
         assert_same_tree(&got, &want);
     }
+}
+
+// ---- entry times: "newest inside" ----
+
+fn file_at(id: u64, parent: u64, name: &str, modified: u32) -> RawEntry {
+    RawEntry { modified, ..file(id, parent, name, 1) }
+}
+
+fn dir_at(id: u64, parent: u64, name: &str, modified: u32) -> RawEntry {
+    RawEntry { modified, ..dir(id, parent, name) }
+}
+
+fn modified_of(t: &scan::Tree, parent: scan::NodeId, name: &str) -> u32 {
+    let n = t.children(parent).find(|&n| t.name(n) == name).unwrap();
+    t.node(n).modified
+}
+
+#[test]
+fn rollup_folder_modified_is_the_max_of_its_files_at_three_levels() {
+    let entries = vec![
+        dir(1, 1, "root"),
+        dir(2, 1, "a"),
+        dir(3, 2, "b"),
+        file_at(4, 3, "deep", 70),
+        file_at(5, 3, "deep2", 20),
+        file_at(6, 2, "mid", 40),
+        file_at(7, 1, "top", 10),
+    ];
+
+    let t = rollup(1, entries).unwrap().tree;
+
+    let (root, a) = (t.root(), t.children(t.root()).find(|&n| t.name(n) == "a").unwrap());
+    assert_eq!(modified_of(&t, a, "b"), 70);
+    assert_eq!(t.node(a).modified, 70);
+    assert_eq!(t.node(root).modified, 70);
+    assert_eq!(modified_of(&t, root, "top"), 10);
+}
+
+#[test]
+fn rollup_folder_modified_ignores_the_directory_records_own_value() {
+    let entries = vec![
+        dir_at(1, 1, "root", 500),
+        dir_at(2, 1, "folder", 99),
+        file_at(3, 2, "a", 10),
+        file_at(4, 2, "b", 30),
+        file_at(5, 2, "c", 20),
+    ];
+
+    let t = rollup(1, entries).unwrap().tree;
+
+    let folder = t.children(t.root()).next().unwrap();
+    assert_eq!(t.node(folder).modified, 30);
+    assert_eq!(t.node(t.root()).modified, 30);
+}
+
+#[test]
+fn rollup_empty_folder_and_all_unknown_files_are_unknown() {
+    let entries = vec![
+        dir_at(1, 1, "root", 5),
+        dir_at(2, 1, "empty", 99),
+        dir(3, 1, "unknown"),
+        file_at(4, 3, "x", scan::time::UNKNOWN),
+        file_at(5, 3, "y", scan::time::UNKNOWN),
+    ];
+
+    let t = rollup(1, entries).unwrap().tree;
+
+    assert_eq!(modified_of(&t, t.root(), "empty"), scan::time::UNKNOWN);
+    assert_eq!(modified_of(&t, t.root(), "unknown"), scan::time::UNKNOWN);
+    assert_eq!(t.node(t.root()).modified, scan::time::UNKNOWN);
+}
+
+#[test]
+fn rollup_known_and_unknown_files_mixed_give_the_known_max() {
+    let entries = vec![
+        dir(1, 1, "root"),
+        file_at(2, 1, "a", scan::time::UNKNOWN),
+        file_at(3, 1, "b", 8),
+        file_at(4, 1, "c", scan::time::UNKNOWN),
+        file_at(5, 1, "d", 3),
+    ];
+
+    let t = rollup(1, entries).unwrap().tree;
+
+    assert_eq!(t.node(t.root()).modified, 8);
+}
+
+#[test]
+fn rollup_orphan_node_gets_the_orphans_max_and_the_root_includes_it() {
+    let entries = vec![
+        dir(1, 1, "root"),
+        file_at(2, 1, "kept", 5),
+        file_at(3, 77, "lost1", 40),
+        file_at(4, 78, "lost2", 90),
+        file_at(5, 79, "lost3", 60),
+    ];
+
+    let t = rollup(1, entries).unwrap().tree;
+
+    assert_eq!(modified_of(&t, t.root(), "$Orphan"), 90);
+    assert_eq!(t.node(t.root()).modified, 90);
+}
+
+#[test]
+fn node_size_stays_within_the_8_byte_budget() {
+    assert!(std::mem::size_of::<scan::Node>() <= 64, "node grew past the 8-byte budget");
 }

@@ -241,6 +241,7 @@ mod tests {
             size,
             allocated: size,
             is_dir,
+            modified: scan::time::UNKNOWN,
         };
         let entries = vec![
             e(0, 0, &root.to_string_lossy(), 0, true),

@@ -18,7 +18,7 @@ impl Lcg {
 fn random_tree(rng: &mut Lcg) -> Tree {
     let n = 2 + rng.below(400);
     let mut dirs = vec![0u64];
-    let mut e = vec![RawEntry { id: 0, parent: 0, name: "root".into(), size: 0, allocated: 0, is_dir: true }];
+    let mut e = vec![RawEntry { id: 0, parent: 0, name: "root".into(), size: 0, allocated: 0, is_dir: true, modified: scan::time::UNKNOWN }];
     for id in 1..n {
         let parent = dirs[rng.below(dirs.len() as u64) as usize];
         let is_dir = rng.below(3) == 0;
@@ -26,7 +26,7 @@ fn random_tree(rng: &mut Lcg) -> Tree {
         if is_dir {
             dirs.push(id);
         }
-        e.push(RawEntry { id, parent, name: format!("n{id}"), size, allocated: size, is_dir });
+        e.push(RawEntry { id, parent, name: format!("n{id}"), size, allocated: size, is_dir, modified: scan::time::UNKNOWN });
     }
     rollup(0, e).unwrap().tree
 }

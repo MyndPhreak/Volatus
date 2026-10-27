@@ -2,6 +2,7 @@
 
 pub mod mft;
 pub mod rollup;
+pub mod time;
 pub mod walk;
 
 use std::path::{Path, PathBuf};
@@ -29,6 +30,8 @@ pub struct Node {
     pub is_dir: bool,
     pub first_child: Option<NodeId>,
     pub next_sibling: Option<NodeId>,
+    /// Last write time (`time` encoding): a file's own, a folder's newest inside.
+    pub modified: u32,
 }
 
 /// What `Tree::detach` removed: the node's rolled-up sizes and the files and folders under it

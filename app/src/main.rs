@@ -2298,9 +2298,9 @@ mod tests {
     /// (x, y, width, height) in logical pixels.
     fn labels_of_one_frame(w: f64, h: f64, scale: f64) -> Vec<(f32, f32, f32, f32)> {
         let entries = vec![
-            RawEntry { id: 0, parent: 0, name: "root".into(), size: 0, allocated: 0, is_dir: true },
-            RawEntry { id: 1, parent: 0, name: "f".into(), size: 0, allocated: 0, is_dir: true },
-            RawEntry { id: 2, parent: 1, name: "g".into(), size: 10, allocated: 10, is_dir: false },
+            RawEntry { id: 0, parent: 0, name: "root".into(), size: 0, allocated: 0, is_dir: true, modified: scan::time::UNKNOWN },
+            RawEntry { id: 1, parent: 0, name: "f".into(), size: 0, allocated: 0, is_dir: true, modified: scan::time::UNKNOWN },
+            RawEntry { id: 2, parent: 1, name: "g".into(), size: 10, allocated: 10, is_dir: false, modified: scan::time::UNKNOWN },
         ];
         let tree = rollup(0, entries).unwrap().tree;
         let f = tree.children(tree.root()).next().unwrap();
@@ -2323,8 +2323,8 @@ mod tests {
     /// Under the root: `folders` empty folders "d0", "d1", …, then files "clip0.mp4", "clip1.mp4", …
     /// of the sizes in `files`. Returns the tree, the folders and the files, in that order.
     fn flat(folders: usize, files: &[u64]) -> (Tree, Vec<NodeId>, Vec<NodeId>) {
-        let mut e = vec![RawEntry { id: 0, parent: 0, name: "root".into(), size: 0, allocated: 0, is_dir: true }];
-        e.extend((0..folders).map(|i| RawEntry { id: i as u64 + 1, parent: 0, name: format!("d{i}"), size: 0, allocated: 0, is_dir: true }));
+        let mut e = vec![RawEntry { id: 0, parent: 0, name: "root".into(), size: 0, allocated: 0, is_dir: true, modified: scan::time::UNKNOWN }];
+        e.extend((0..folders).map(|i| RawEntry { id: i as u64 + 1, parent: 0, name: format!("d{i}"), size: 0, allocated: 0, is_dir: true, modified: scan::time::UNKNOWN }));
         e.extend(files.iter().enumerate().map(|(i, &s)| RawEntry {
             id: (folders + i) as u64 + 1,
             parent: 0,
@@ -2332,6 +2332,7 @@ mod tests {
             size: s,
             allocated: s,
             is_dir: false,
+            modified: scan::time::UNKNOWN,
         }));
         let tree = rollup(0, e).unwrap().tree;
         let by_name = |n: String| tree.children(tree.root()).find(|&c| tree.name(c) == n).unwrap();
@@ -2455,7 +2456,7 @@ mod tests {
     // ---- names with hidden characters reach the window as placeholders ----
     /// root(0){ folder "d\u{202E}x"(1){ file "g"(3) }, file "invoice\u{202E}fdp.exe"(2) }
     fn spoofed() -> (Tree, NodeId, NodeId) {
-        let e = |id: u64, parent: u64, name: &str, is_dir: bool| RawEntry { id, parent, name: name.into(), size: 10, allocated: 10, is_dir };
+        let e = |id: u64, parent: u64, name: &str, is_dir: bool| RawEntry { id, parent, name: name.into(), size: 10, allocated: 10, is_dir, modified: scan::time::UNKNOWN };
         let entries = vec![e(0, 0, "root", true), e(1, 0, "d\u{202E}x", true), e(2, 0, "invoice\u{202E}fdp.exe", false), e(3, 1, "g", false)];
         let tree = rollup(0, entries).unwrap().tree;
         let find = |n: &str| tree.children(tree.root()).find(|&c| tree.name(c) == n).unwrap();
@@ -2833,8 +2834,8 @@ mod tests {
 
     fn data() -> Arc<Data> {
         let entries = vec![
-            RawEntry { id: 0, parent: 0, name: "root".into(), size: 0, allocated: 0, is_dir: true },
-            RawEntry { id: 1, parent: 0, name: "a.txt".into(), size: 10, allocated: 10, is_dir: false },
+            RawEntry { id: 0, parent: 0, name: "root".into(), size: 0, allocated: 0, is_dir: true, modified: scan::time::UNKNOWN },
+            RawEntry { id: 1, parent: 0, name: "a.txt".into(), size: 10, allocated: 10, is_dir: false, modified: scan::time::UNKNOWN },
         ];
         let tree = rollup(0, entries).unwrap().tree;
         Arc::new(Data { counts: crate::tree_view::file_counts(&tree), tree })
@@ -2957,7 +2958,7 @@ mod tests {
     // ---- footer totals after a removal ----
     /// root(0){ docs(1){ a.txt(4)=100, b.pdf(5)=50 }, c.txt(2)=10, d.exe(3)=30 }
     fn typed() -> Arc<Data> {
-        let e = |id: u64, parent: u64, name: &str, size: u64, is_dir: bool| RawEntry { id, parent, name: name.into(), size, allocated: size, is_dir };
+        let e = |id: u64, parent: u64, name: &str, size: u64, is_dir: bool| RawEntry { id, parent, name: name.into(), size, allocated: size, is_dir, modified: scan::time::UNKNOWN };
         let entries = vec![
             e(0, 0, "root", 0, true),
             e(1, 0, "docs", 0, true),
@@ -3090,7 +3091,7 @@ mod tests {
         };
         let n = 1 + next(200);
         let mut dirs = vec![0u64];
-        let mut entries = vec![RawEntry { id: 0, parent: 0, name: "root".into(), size: 0, allocated: 0, is_dir: true }];
+        let mut entries = vec![RawEntry { id: 0, parent: 0, name: "root".into(), size: 0, allocated: 0, is_dir: true, modified: scan::time::UNKNOWN }];
         for id in 1..n {
             let parent = dirs[next(dirs.len() as u64) as usize];
             let is_dir = next(3) == 0;
@@ -3099,7 +3100,7 @@ mod tests {
             if is_dir {
                 dirs.push(id);
             }
-            entries.push(RawEntry { id, parent, name, size, allocated: size, is_dir });
+            entries.push(RawEntry { id, parent, name, size, allocated: size, is_dir, modified: scan::time::UNKNOWN });
         }
         let tree = rollup(0, entries).unwrap().tree;
         Arc::new(Data { counts: crate::tree_view::file_counts(&tree), tree })

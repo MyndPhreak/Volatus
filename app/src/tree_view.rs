@@ -380,6 +380,7 @@ mod tests {
             size,
             allocated: size,
             is_dir,
+            modified: scan::time::UNKNOWN,
         };
         let entries = vec![
             e(0, 0, "root", 0, true),
@@ -755,7 +756,7 @@ mod tests {
     #[test]
     fn neighbour_rect_framed_grid_gives_the_same_moves_as_the_plain_grid() {
         // Four equal files: a 2 x 2 grid. Framed at 104 x 104, the inset leaves the plain 100 x 100 grid.
-        let e = |id: u64, size: u64| RawEntry { id, parent: 0, name: format!("f{id}"), size, allocated: size, is_dir: id == 0 };
+        let e = |id: u64, size: u64| RawEntry { id, parent: 0, name: format!("f{id}"), size, allocated: size, is_dir: id == 0, modified: scan::time::UNKNOWN };
         let t = rollup(0, vec![e(0, 0), e(1, 5), e(2, 5), e(3, 5), e(4, 5)]).unwrap().tree;
         let plain = treemap::layout(&t, t.root(), 100, 100);
         let framed = treemap::layout_framed(&t, t.root(), 104, 104, treemap::Chrome::scaled(1.0));
@@ -782,6 +783,7 @@ mod tests {
             size,
             allocated: size,
             is_dir,
+            modified: scan::time::UNKNOWN,
         };
         rollup(
             0,
@@ -1094,6 +1096,7 @@ mod tests {
             size,
             allocated: size,
             is_dir,
+            modified: scan::time::UNKNOWN,
         };
         let t = rollup(0, vec![e(0, 0, "root", 0, true), e(1, 0, name, 0, true), e(2, 1, "f", size, false)]).unwrap().tree;
         let folder = find(&t, t.root(), name);
@@ -1127,7 +1130,7 @@ mod tests {
     // ---- file_label ----
     /// root(0){ file `name`(1) of `size` bytes }
     fn one_file(name: &str, size: u64) -> (Tree, NodeId) {
-        let e = |id: u64, name: &str, size: u64, is_dir: bool| RawEntry { id, parent: 0, name: name.into(), size, allocated: size, is_dir };
+        let e = |id: u64, name: &str, size: u64, is_dir: bool| RawEntry { id, parent: 0, name: name.into(), size, allocated: size, is_dir, modified: scan::time::UNKNOWN };
         let t = rollup(0, vec![e(0, "root", 0, true), e(1, name, size, false)]).unwrap().tree;
         let file = find(&t, t.root(), name);
         (t, file)
@@ -1174,13 +1177,13 @@ mod tests {
     /// A chain of folders: the root named `root_name`, then one folder per name in `names`, each
     /// in the one before, and a file "f" in the last. The folders from the root down.
     fn chain(root_name: &str, names: &[&str]) -> (Tree, Vec<NodeId>) {
-        let dir = |id: u64, parent: u64, name: &str| RawEntry { id, parent, name: name.into(), size: 0, allocated: 0, is_dir: true };
+        let dir = |id: u64, parent: u64, name: &str| RawEntry { id, parent, name: name.into(), size: 0, allocated: 0, is_dir: true, modified: scan::time::UNKNOWN };
         let mut entries = vec![dir(0, 0, root_name)];
         for (i, name) in names.iter().enumerate() {
             entries.push(dir(i as u64 + 1, i as u64, name));
         }
         let last = names.len() as u64;
-        entries.push(RawEntry { id: last + 1, parent: last, name: "f".into(), size: 1, allocated: 1, is_dir: false });
+        entries.push(RawEntry { id: last + 1, parent: last, name: "f".into(), size: 1, allocated: 1, is_dir: false, modified: scan::time::UNKNOWN });
         let t = rollup(0, entries).unwrap().tree;
         let mut folders = vec![t.root()];
         for name in names {
@@ -1209,7 +1212,7 @@ mod tests {
 
     #[test]
     fn crumbs_tree_with_only_the_root_is_one_crumb_for_the_root() {
-        let t = rollup(0, vec![RawEntry { id: 0, parent: 0, name: "D:\\".into(), size: 0, allocated: 0, is_dir: true }])
+        let t = rollup(0, vec![RawEntry { id: 0, parent: 0, name: "D:\\".into(), size: 0, allocated: 0, is_dir: true, modified: scan::time::UNKNOWN }])
             .unwrap()
             .tree;
         assert_eq!(crumbs(&t, t.root()), vec![(Some(t.root()), "D:".to_string())]);
@@ -1330,6 +1333,7 @@ mod tests {
             size,
             allocated: size,
             is_dir,
+            modified: scan::time::UNKNOWN,
         };
         let entries = vec![
             e(0, 0, "C:\\", 0, true),
@@ -1432,7 +1436,7 @@ mod tests {
     #[test]
     fn tooltip_lines_long_name_is_kept_whole() {
         let long = format!("{}.bin", "Long file name ".repeat(20));
-        let e =|id: u64, parent: u64, name: &str, is_dir: bool| RawEntry { id, parent, name: name.into(), size: 1, allocated: 1, is_dir };
+        let e =|id: u64, parent: u64, name: &str, is_dir: bool| RawEntry { id, parent, name: name.into(), size: 1, allocated: 1, is_dir, modified: scan::time::UNKNOWN };
         let t = rollup(0, vec![e(0, 0, "C:\\", true), e(1, 0, &long, false)]).unwrap().tree;
         let node = find(&t, t.root(), &long);
         assert_eq!(tooltip_lines(&t, &file_counts(&t), node, Unit::Dynamic).0, format!("C:\\{long}"));

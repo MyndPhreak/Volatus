@@ -178,6 +178,7 @@ fn walk_dir(ctx: &Ctx, dir: &Path, dir_id: u64) -> Result<Out, ScanError> {
             size,
             allocated: size,
             is_dir: item.is_dir,
+            modified: crate::time::UNKNOWN,
         };
         out.entries.push((entry, if item.is_dir { 0 } else { item.file_id }));
     }
@@ -223,6 +224,7 @@ pub fn walk(
         size: 0,
         allocated: 0,
         is_dir: true,
+        modified: crate::time::UNKNOWN,
     });
     let rolled = rollup(ROOT_ID, entries)?;
     let phases = Phases { read, rollup: started.elapsed() - read, ..Phases::default() };
@@ -243,7 +245,7 @@ mod tests {
     use super::*;
 
     fn file(id: u64) -> RawEntry {
-        RawEntry { id, parent: ROOT_ID, name: format!("f{id}"), size: 10, allocated: 10, is_dir: false }
+        RawEntry { id, parent: ROOT_ID, name: format!("f{id}"), size: 10, allocated: 10, is_dir: false, modified: crate::time::UNKNOWN }
     }
 
     #[test]

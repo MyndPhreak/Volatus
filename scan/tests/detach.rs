@@ -2,11 +2,11 @@ use scan::rollup::{RawEntry, rollup};
 use scan::{NodeId, Tree};
 
 fn dir(id: u64, parent: u64, name: &str) -> RawEntry {
-    RawEntry { id, parent, name: name.into(), size: 0, allocated: 0, is_dir: true }
+    RawEntry { id, parent, name: name.into(), size: 0, allocated: 0, is_dir: true, modified: scan::time::UNKNOWN }
 }
 
 fn file(id: u64, parent: u64, name: &str, size: u64) -> RawEntry {
-    RawEntry { id, parent, name: name.into(), size, allocated: size + 10, is_dir: false }
+    RawEntry { id, parent, name: name.into(), size, allocated: size + 10, is_dir: false, modified: scan::time::UNKNOWN }
 }
 
 /// root { a { f1 (10), f2 (20) }, b (5), c (7) }
@@ -127,4 +127,22 @@ fn detach_twice_returns_none_the_second_time() {
 
     assert_eq!(t.detach(b), None);
     assert_eq!(t.node(root).size, size_after_first);
+}
+
+#[test]
+fn detach_newest_file_leaves_ancestor_modified_as_scanned() {
+    let entries = vec![
+        dir(1, 1, "root"),
+        dir(2, 1, "a"),
+        RawEntry { modified: 10, ..file(3, 2, "old", 1) },
+        RawEntry { modified: 90, ..file(4, 2, "new", 1) },
+    ];
+    let mut t = rollup(1, entries).unwrap().tree;
+    let a = find(&t, t.root(), "a");
+    let new = find(&t, a, "new");
+    assert_eq!((t.node(a).modified, t.node(t.root()).modified), (90, 90), "scanned");
+
+    t.detach(new).unwrap();
+
+    assert_eq!((t.node(a).modified, t.node(t.root()).modified), (90, 90));
 }

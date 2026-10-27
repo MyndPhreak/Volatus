@@ -1,5 +1,6 @@
 //! Parent linking and size roll-up from flat records (shared by walker and MFT).
 
+use crate::time::UNKNOWN;
 use crate::{NameRef, Node, NodeId, ScanError, Tree};
 use rayon::prelude::*;
 use std::collections::HashMap;
@@ -36,6 +37,8 @@ pub struct RawEntry {
     pub size: u64,
     pub allocated: u64,
     pub is_dir: bool,
+    /// Last write time (`time` encoding). A directory's own value is ignored.
+    pub modified: u32,
 }
 
 #[derive(Debug)]
@@ -360,6 +363,7 @@ pub fn rollup(root: u64, entries: Vec<RawEntry>) -> Result<Rolled, ScanError> {
             is_dir: e.is_dir,
             first_child,
             next_sibling,
+            modified: UNKNOWN,
         }
     };
     let root_node = node_at(0);
@@ -380,6 +384,7 @@ pub fn rollup(root: u64, entries: Vec<RawEntry>) -> Result<Rolled, ScanError> {
             is_dir: true,
             first_child: Some(node_at(1)),
             next_sibling: None,
+            modified: UNKNOWN,
         });
     }
     let skipped = (n - order.len()) as u64;

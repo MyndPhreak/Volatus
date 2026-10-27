@@ -13,7 +13,7 @@ use std::collections::HashSet;
 fn random_entries(rng: &mut Rng) -> Vec<RawEntry> {
     let n = 1 + rng.below(300);
     let mut dirs = vec![0u64];
-    let mut entries = vec![RawEntry { id: 0, parent: 0, name: "root".into(), size: 0, allocated: 0, is_dir: true }];
+    let mut entries = vec![RawEntry { id: 0, parent: 0, name: "root".into(), size: 0, allocated: 0, is_dir: true, modified: scan::time::UNKNOWN }];
     for id in 1..n as u64 {
         let parent = dirs[rng.below(dirs.len())];
         let is_dir = rng.chance(35);
@@ -22,7 +22,7 @@ fn random_entries(rng: &mut Rng) -> Vec<RawEntry> {
         if is_dir {
             dirs.push(id);
         }
-        entries.push(RawEntry { id, parent, name: format!("n{id}"), size, allocated, is_dir });
+        entries.push(RawEntry { id, parent, name: format!("n{id}"), size, allocated, is_dir, modified: scan::time::UNKNOWN });
     }
     entries
 }

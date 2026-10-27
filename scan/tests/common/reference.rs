@@ -4,6 +4,7 @@
 use scan::mft::Record;
 use scan::rollup::{RawEntry, Rolled};
 use scan::{NameRef, Node, NodeId};
+use scan::time::UNKNOWN;
 use std::collections::HashMap;
 
 /// Seeded xorshift64 (the generator of mft_records.rs). No new dependency, fully deterministic.
@@ -57,7 +58,7 @@ pub fn entries_reference(records: Vec<Record>) -> (Vec<RawEntry>, u64) {
         };
         let is_dir = r.is_dir && !r.surrogate;
         let (size, allocated) = if is_dir { (0, 0) } else { (data.size, data.allocated) };
-        out.push(RawEntry { id: r.number, parent: first.parent, name: first.name, size, allocated, is_dir });
+        out.push(RawEntry { id: r.number, parent: first.parent, name: first.name, size, allocated, is_dir, modified: scan::time::UNKNOWN });
     }
     (out, skipped)
 }
@@ -150,7 +151,7 @@ pub fn rollup_reference(root: u64, entries: Vec<RawEntry>) -> Option<RefRolled> 
     let mut nodes: Vec<Node> = Vec::with_capacity(entries.len() + 1);
     let mut names = String::with_capacity(entries.iter().map(|e| e.name.len()).sum::<usize>() + ORPHAN_NAME.len());
     let (mut files, mut dirs, mut orphans) = (0u64, 0u64, 0u64);
-    let mut push_node = |name: &str, size: u64, allocated: u64, is_dir: bool| -> u32 {
+    let mut push_node = |name: &str, size: u64, allocated: u64, is_dir: bool, modified: u32| -> u32 {
         let start = names.len() as u32;
         names.push_str(name);
         nodes.push(Node {
@@ -161,6 +162,7 @@ pub fn rollup_reference(root: u64, entries: Vec<RawEntry>) -> Option<RefRolled> 
             is_dir,
             first_child: None,
             next_sibling: None,
+            modified,
         });
         (nodes.len() - 1) as u32
     };
@@ -178,9 +180,10 @@ pub fn rollup_reference(root: u64, entries: Vec<RawEntry>) -> Option<RefRolled> 
             orphans += 1;
         }
         let (size, allocated) = if e.is_dir { (0, 0) } else { (e.size, e.allocated) };
-        new_id[i] = push_node(&e.name, size, allocated, e.is_dir);
+        let modified = if e.is_dir { UNKNOWN } else { e.modified };
+        new_id[i] = push_node(&e.name, size, allocated, e.is_dir, modified);
     }
-    let orphan_node = (orphans > 0).then(|| push_node(ORPHAN_NAME, 0, 0, true));
+    let orphan_node = (orphans > 0).then(|| push_node(ORPHAN_NAME, 0, 0, true, UNKNOWN));
     let root_node = new_id[root_idx];
 
     let link = |nodes: &mut Vec<Node>, child: u32, parent: u32| {
@@ -214,9 +217,11 @@ pub fn rollup_reference(root: u64, entries: Vec<RawEntry>) -> Option<RefRolled> 
     }
     for &n in order.iter().skip(1).rev() {
         let (size, allocated) = (nodes[n as usize].size, nodes[n as usize].allocated);
+        let modified = nodes[n as usize].modified;
         let p = nodes[n as usize].parent.expect("linked").0 as usize;
         nodes[p].size += size;
         nodes[p].allocated += allocated;
+        nodes[p].modified = nodes[p].modified.max(modified);
     }
     Some(RefRolled { nodes, names, root: NodeId(root_node), files, dirs, orphans, skipped })
 }
@@ -247,6 +252,7 @@ pub fn assert_same_tree(got: &Rolled, want: &RefRolled) {
         assert_eq!(g.size, w.size, "node {i} size");
         assert_eq!(g.allocated, w.allocated, "node {i} allocated");
         assert_eq!(g.is_dir, w.is_dir, "node {i} is_dir");
+        assert_eq!(g.modified, w.modified, "node {i} modified");
         assert_eq!(g.first_child, w.first_child, "node {i} first_child");
         assert_eq!(g.next_sibling, w.next_sibling, "node {i} next_sibling");
     }

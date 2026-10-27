@@ -269,7 +269,7 @@ pub fn entries(mut records: Vec<Record>) -> (Vec<RawEntry>, u64) {
         // A junction or directory symlink is a zero-size file entry, as in the walker.
         let is_dir = r.is_dir && !r.surrogate;
         let (size, allocated) = if is_dir { (0, 0) } else { (data.size, data.allocated) };
-        out.push(RawEntry { id: r.number, parent: first.parent, name: first.name, size, allocated, is_dir });
+        out.push(RawEntry { id: r.number, parent: first.parent, name: first.name, size, allocated, is_dir, modified: crate::time::UNKNOWN });
     }
     (out, skipped)
 }
@@ -561,6 +561,7 @@ fn subtree(tree: &Tree, node: NodeId, name: &str) -> Vec<RawEntry> {
                 size: nd.size,
                 allocated: nd.allocated,
                 is_dir: nd.is_dir,
+                modified: crate::time::UNKNOWN,
             }
         })
         .collect()
