@@ -6,7 +6,7 @@
 
 use crate::model::{ScanState, Unit};
 use crate::settings::View;
-use flow::age::Age;
+use flow::age::{Age, age_colour, age_of};
 use flow::{Band, Graph, Part, Theme};
 use scan::{NodeId, Tree};
 use std::collections::{HashMap, HashSet};
@@ -77,18 +77,31 @@ pub fn key(_g: &Graph, _tree: &Tree, _selected: Option<NodeId>, _key: &str) -> K
     KeyAct::Nothing
 }
 
+/// The colour of each band of `g`, in band order. Age: the age class of the band's newest change
+/// at `now`. File type: the tile colour of the band's cached dominant type; a band not counted
+/// yet (`missing_types`), or with no bytes, gets the `Category::Other` colour.
 pub fn colours(
-    _g: &Graph,
-    _mode: ColourMode,
-    _now: u32,
-    _theme: Theme,
-    _types: &HashMap<Part, Option<Category>>,
+    g: &Graph,
+    mode: ColourMode,
+    now: u32,
+    theme: Theme,
+    types: &HashMap<Part, Option<Category>>,
 ) -> Vec<[u8; 3]> {
-    Vec::new()
+    g.bands
+        .iter()
+        .map(|b| match mode {
+            ColourMode::Age => age_colour(age_of(b.newest, now), theme),
+            ColourMode::FileType => {
+                let c = types.get(&b.part).copied().flatten().unwrap_or(Category::Other);
+                treemap::filetype::colour(c, theme)
+            }
+        })
+        .collect()
 }
 
-pub fn missing_types(_g: &Graph, _types: &HashMap<Part, Option<Category>>) -> Vec<Part> {
-    Vec::new()
+/// The parts of `g`'s bands whose file type is not in the cache `types`, in band order.
+pub fn missing_types(g: &Graph, types: &HashMap<Part, Option<Category>>) -> Vec<Part> {
+    g.bands.iter().map(|b| b.part).filter(|p| !types.contains_key(p)).collect()
 }
 
 pub fn band_label(_tree: &Tree, _b: &Band, _unit: Unit) -> (String, String) {
@@ -105,8 +118,8 @@ pub fn summary(_tree: &Tree, _g: &Graph, _unit: Unit) -> String {
 
 /// The text the graph shows over `g`, the layout of folder `view`, or "" for none: the treemap's
 /// `NO_SIZES` when the folder has no file with a size. A graph with no area shows no text.
-pub fn graph_note(_tree: &Tree, _view: NodeId, _g: &Graph, _has_area: bool) -> &'static str {
-    ""
+pub fn graph_note(tree: &Tree, view: NodeId, g: &Graph, has_area: bool) -> &'static str {
+    if has_area && g.bands.is_empty() && tree.node(view).size == 0 { crate::tree_view::NO_SIZES } else { "" }
 }
 
 /// A day as `2026-10-26`.
@@ -127,7 +140,6 @@ pub fn shown_view(state: &ScanState, loaded: bool, chosen: View) -> View {
 mod tests {
     use super::*;
     use crate::model::Summary;
-    use flow::age::{age_colour, age_of};
     use scan::rollup::{RawEntry, rollup};
     use scan::{Method, Phases};
     use std::time::Duration;

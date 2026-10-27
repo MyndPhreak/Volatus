@@ -681,21 +681,24 @@ fn begin_layout(s: &mut Session) -> Option<LayoutJob> {
     if s.flags.timing {
         eprintln!("Layout {}.", s.layout_seq);
     }
-    Some(LayoutJob { data, root, generation: s.scan.generation(), seq: s.layout_seq, size: s.map_size, view: View::Treemap })
+    let view = graph_view::shown_view(s.scan.state(), true, s.settings.view);
+    Some(LayoutJob { data, root, generation: s.scan.generation(), seq: s.layout_seq, size: s.map_size, view })
 }
 
 /// True when a layout of scan `generation` and layout `seq` may still land: no newer layout, no
 /// applied removal (`scan_apply::step_pending` takes a new `layout_seq`) and no other scan since.
-fn is_current(_s: &Session, _generation: u64, _seq: u64) -> bool {
-    true
+fn is_current(s: &Session, generation: u64, seq: u64) -> bool {
+    (s.scan.generation(), s.layout_seq) == (generation, seq)
 }
 
-/// Lays out and draws the treemap for the current folder and window size on a worker thread.
-/// The window keeps the old image until the new one arrives. A result is dropped if a newer
-/// layout or a new scan started meanwhile.
+/// Lays out and draws the shown view (treemap or graph) for the current folder and window size on
+/// a worker thread. The window keeps the old image until the new one arrives. A result is dropped
+/// if a newer layout or a new scan started meanwhile.
 fn relayout(ui: &MainWindow) {
-    if let Some(job) = SESSION.with_borrow_mut(begin_layout) {
-        spawn_layout(ui, job);
+    match SESSION.with_borrow_mut(begin_layout) {
+        Some(job) if job.view == View::Graph => graph_ui::spawn_graph(ui, job),
+        Some(job) => spawn_layout(ui, job),
+        None => {}
     }
 }
 
@@ -721,8 +724,7 @@ fn spawn_layout(ui: &MainWindow, LayoutJob { data, root, generation, seq, size: 
         // Err means the event loop has stopped: nothing left to update.
         let _ = slint::invoke_from_event_loop(move || {
             let Some(ui) = weak.upgrade() else { return };
-            let current = SESSION.with_borrow(|s| (s.scan.generation(), s.layout_seq));
-            if current == (generation, seq) {
+            if SESSION.with_borrow(|s| is_current(s, generation, seq)) {
                 land(&ui, Layout { root, rects, image, labels, size: (w as f32 / scale, h as f32 / scale) });
             }
             scan_apply::data_released(&ui);
