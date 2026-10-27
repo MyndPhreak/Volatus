@@ -14,10 +14,15 @@ const MISSING: [u8; 3] = [128, 128, 128];
 /// lighter touch keeps the bands in front. Light: pale colours on a light background need more.
 fn ribbon_alpha(theme: Theme) -> u32 {
     match theme {
-        Theme::Dark => 102,  // 40 %
-        Theme::Light => 128, // 50 %
+        Theme::Dark => RIBBON_ALPHA_DARK,
+        Theme::Light => RIBBON_ALPHA_LIGHT,
     }
 }
+
+/// Ribbon opacity in the dark theme: 40 %.
+const RIBBON_ALPHA_DARK: u32 = 102;
+/// Ribbon opacity in the light theme: 50 %.
+const RIBBON_ALPHA_LIGHT: u32 = 128;
 
 /// See [`crate::render`].
 pub fn render(graph: &Graph, colours: &[[u8; 3]], w: u32, h: u32, theme: Theme) -> Vec<u8> {

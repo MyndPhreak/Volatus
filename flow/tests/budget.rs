@@ -1,8 +1,8 @@
 //! TP2.4: the time budget of the graph at 5 million nodes.
 //!
 //! Run in release: `cargo test -p flow --release --test budget -- --ignored`.
-//! `flow::render` is a stub until P3.T1 lands, so until then this times the layout plus the stub;
-//! the render call stays so the test is complete once the picture is drawn.
+//! It times `layout` plus `render`. Both take the picture size in physical pixels; `scale` only
+//! converts the logical constants.
 
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
@@ -82,8 +82,8 @@ fn budget_5m_nodes_layout_and_render_under_100_ms() {
                 view,
                 expanded: &expanded,
                 open_other: &open_other,
-                w: f64::from(px_w) / scale,
-                h: f64::from(px_h) / scale,
+                w: f64::from(px_w),
+                h: f64::from(px_h),
                 scale,
                 first_column: 0,
             });

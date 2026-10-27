@@ -37,6 +37,32 @@ fn opaque(c: [u8; 3]) -> [u8; 4] {
     [c[0], c[1], c[2], 255]
 }
 
+/// Alpha of one fully covered ribbon: 40 % dark, 50 % light.
+fn one_ribbon(theme: Theme) -> u8 {
+    match theme {
+        Theme::Dark => 102,
+        Theme::Light => 128,
+    }
+}
+
+/// Alpha of two identical ribbons, one over the other: `a + a * (255 - a) / 255`, rounded.
+fn two_ribbons(theme: Theme) -> u8 {
+    match theme {
+        Theme::Dark => 163,  // 102 + 61
+        Theme::Light => 192, // 128 + 64
+    }
+}
+
+#[test]
+fn render_two_identical_ribbons_add_up_exactly() {
+    let mut g = fixture();
+    g.flows = vec![g.flows[0], g.flows[0]];
+    for theme in [Theme::Dark, Theme::Light] {
+        let px = render(&g, &colours(), W, H, theme);
+        assert_eq!(pixel(&px, W, 111, 65)[3], two_ribbons(theme), "{theme:?}");
+    }
+}
+
 #[test]
 fn render_empty_graph_is_all_zero_bytes() {
     for theme in [Theme::Dark, Theme::Light] {
@@ -64,6 +90,8 @@ fn render_mid_flow_pixel_is_the_child_colour_translucent() {
         // Half way across the upper ribbon: from (20, 80) to (50, 110), so (35, 95) there.
         let [r, g, b, a] = pixel(&px, W, 111, 65);
         assert!((1..=254).contains(&a), "alpha {a}");
+        // Fully covered: exactly the theme's ribbon alpha.
+        assert_eq!(a, one_ribbon(theme), "{theme:?}");
         for (got, want) in [r, g, b].into_iter().zip(UPPER) {
             assert!(got.abs_diff(want) <= 3, "{:?} is not near {UPPER:?}", [r, g, b]);
         }
@@ -125,6 +153,8 @@ fn render_overlapping_ribbons_never_reach_opaque() {
         assert_eq!(pixel(&px, W, 16, 70), opaque(PARENT), "the band stays on top");
         let mid = pixel(&px, W, 111, 65)[3];
         assert!((1..=254).contains(&mid), "alpha {mid}");
+        // Fifty layers saturate, and the cap holds them at exactly 254.
+        assert_eq!(mid, 254, "{theme:?}");
         // Outside the bands, no pixel is opaque.
         let inside = |x: u32, y: u32| g.bands.iter().any(|b| f64::from(x) >= b.x && f64::from(x) < b.x + b.w && f64::from(y) >= b.y && f64::from(y) < b.y + b.h);
         for y in 0..H {

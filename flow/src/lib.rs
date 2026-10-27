@@ -63,6 +63,8 @@ pub struct Flow {
     pub to_y: (f64, f64),
 }
 
+/// The laid-out graph. Every coordinate (`Band` x, y, w, h and `Flow` from_y, to_y) is in
+/// physical pixels, the same space as the `w` and `h` given to `layout` and to `render`.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Graph {
     pub bands: Vec<Band>,
@@ -77,9 +79,15 @@ pub struct Input<'a> {
     pub view: NodeId,
     pub expanded: &'a HashSet<NodeId>,
     pub open_other: &'a HashSet<NodeId>,
+    /// The picture width in physical pixels: the same `w` later passed to `render`.
     pub w: f64,
+    /// The picture height in physical pixels: the same `h` later passed to `render`.
     pub h: f64,
+    /// Physical pixels per logical pixel. It only converts the logical constants (`MERGE_PX`,
+    /// `BAND_W` and the gaps between bands) to physical pixels.
     pub scale: f64,
+    /// The first column shown, for scrolling sideways. Clamped so that the last
+    /// `VISIBLE_COLUMNS` columns fill the picture; the clamped value is `Graph::first_column`.
     pub first_column: u16,
 }
 
@@ -92,7 +100,7 @@ pub struct Split {
 }
 
 /// Straight RGBA picture of the graph, `w * h * 4` bytes, transparent background. Graph
-/// coordinates are pixels.
+/// coordinates are physical pixels, so `w` and `h` are the ones given to `layout`.
 ///
 /// `colours[i]` is the colour of `graph.bands[i]`; a band past the end of `colours` is a neutral
 /// gray. Each flow is a smooth ribbon from its parent band's right edge to its child band's left
