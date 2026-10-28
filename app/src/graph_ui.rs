@@ -868,9 +868,18 @@ mod tests {
     #[test]
     #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
     fn crumb_up_while_the_graph_shows_leaves_no_zoom_out_waiting() {
+        let _forced = crate::motion::set_test_animation(Some(true));
         let ui = window(View::Graph);
         let root = SESSION.with_borrow(|s| s.loaded.as_ref().unwrap().data.tree.root());
         stale_treemap_of(child("a"));
+        // Precondition, so the test cannot pass by chance: without the graph check, going up
+        // would leave a zoom out waiting for the next treemap (motion on, the treemap shows `a`).
+        let way = SESSION.with_borrow(|s| {
+            let l = s.loaded.as_ref().unwrap();
+            crate::tree_view::zoom_way(&l.data.tree, l.shown_root, &l.rects, root)
+        });
+        assert_eq!(way, crate::tree_view::ZoomWay::Out(child("a")));
+        assert!(crate::motion_on(), "motion is forced on");
 
         ui.invoke_crumb_open(root.0 as i32);
 
@@ -895,10 +904,19 @@ mod tests {
     #[test]
     #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
     fn treemap_chosen_after_folder_changes_in_the_graph_shows_no_zoom() {
+        // The last treemap showed `a`; in the graph the view goes up to the root.
+        let _forced = crate::motion::set_test_animation(Some(true));
         let ui = window(View::Graph);
         let root = SESSION.with_borrow(|s| s.loaded.as_ref().unwrap().data.tree.root());
-        // The last treemap showed `a`; in the graph the view goes up to the root.
         stale_treemap_of(child("a"));
+        // Precondition, so the test cannot pass by chance: without the graph check, going up
+        // would leave a zoom out waiting for the next treemap (motion on, the treemap shows `a`).
+        let way = SESSION.with_borrow(|s| {
+            let l = s.loaded.as_ref().unwrap();
+            crate::tree_view::zoom_way(&l.data.tree, l.shown_root, &l.rects, root)
+        });
+        assert_eq!(way, crate::tree_view::ZoomWay::Out(child("a")));
+        assert!(crate::motion_on(), "motion is forced on");
         ui.invoke_crumb_open(root.0 as i32);
 
         click(&ui, "Treemap");
