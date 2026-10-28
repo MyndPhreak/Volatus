@@ -445,11 +445,16 @@ mod tests {
     }
 
     fn graph_of(t: &Tree, expanded: &[&str], first_column: u16) -> Graph {
+        graph_with(t, t.root(), expanded, &[], first_column)
+    }
+
+    /// The layout of folder `view` with these folders expanded and these "other" bands opened.
+    fn graph_with(t: &Tree, view: NodeId, expanded: &[&str], open_other: &[&str], first_column: u16) -> Graph {
         let expanded: HashSet<NodeId> = expanded.iter().map(|n| id(t, n)).collect();
-        let open_other = HashSet::new();
+        let open_other: HashSet<NodeId> = open_other.iter().map(|n| id(t, n)).collect();
         flow::layout(&flow::Input {
             tree: t,
-            view: t.root(),
+            view,
             expanded: &expanded,
             open_other: &open_other,
             w: 800.0,
@@ -541,7 +546,8 @@ mod tests {
             (&closed, Some(a), "right", KeyAct::Toggle(a)),
             (&open, Some(a), "right", KeyAct::Select(a1)),
             (&closed, Some(b), "right", KeyAct::Nothing),
-            (&closed, Some(root), "right", KeyAct::Nothing),
+            // The view band (column 0) is always open: Right goes to its largest folder band.
+            (&closed, Some(root), "right", KeyAct::Select(a)),
             // Left: collapse, go to the parent band, or nothing on column 0.
             (&open, Some(a), "left", KeyAct::Toggle(a)),
             (&closed, Some(a), "left", KeyAct::Select(root)),
@@ -574,6 +580,48 @@ mod tests {
         for (g, selected, k, want) in cases {
             assert_eq!(key(g, &t, selected, k), want, "{k:?} on {selected:?}");
         }
+    }
+
+    /// root { 40 folders of one 1-byte file each }: every folder is 2.5 % of root, so all merge.
+    fn all_merged_tree() -> Tree {
+        let e = |id: u64, parent: u64, name: String, size: u64, is_dir: bool| RawEntry {
+            id,
+            parent,
+            name,
+            size,
+            allocated: size,
+            is_dir,
+            modified: NOW,
+        };
+        let mut entries = vec![e(0, 0, "root".into(), 0, true)];
+        for i in 1..=40 {
+            entries.push(e(i, 0, format!("d{i}"), 0, true));
+            entries.push(e(100 + i, i, format!("f{i}.bin"), 1, false));
+        }
+        rollup(0, entries).unwrap().tree
+    }
+
+    #[test]
+    fn key_right_on_the_view_band_enters_the_graph() {
+        let t = deep_tree();
+        // From no selection: the first arrow selects the view band, Right goes to its largest child.
+        let g = graph_of(&t, &[], 0);
+        let KeyAct::Select(first) = key(&g, &t, None, "right") else { panic!("no first band") };
+        assert_eq!(first, t.root());
+        assert_eq!(key(&g, &t, Some(first), "right"), KeyAct::Select(id(&t, "a")));
+
+        // A view folder that holds only files: no folder band to go to.
+        let a2 = id(&t, "a2");
+        let files_only = graph_with(&t, a2, &[], &[], 0);
+        assert_eq!(files_only.bands.iter().map(|b| b.part).collect::<Vec<_>>(), vec![Part::Folder(a2), Part::Files(a2)]);
+        assert_eq!(key(&files_only, &t, Some(a2), "right"), KeyAct::Nothing);
+
+        // A view folder whose subfolders all merge into "other": nothing to go to.
+        let m = all_merged_tree();
+        let merged = graph_with(&m, m.root(), &[], &[], 0);
+        let parts: Vec<Part> = merged.bands.iter().map(|b| b.part).collect();
+        assert_eq!(parts, vec![Part::Folder(m.root()), Part::Other { parent: m.root(), folders: 40, files: false }]);
+        assert_eq!(key(&merged, &m, Some(m.root()), "right"), KeyAct::Nothing);
     }
 
     #[test]
@@ -708,7 +756,19 @@ mod tests {
     #[test]
     fn guard_paths_agree_on_every_band() {
         let t = deep_tree();
-        let graphs = [graph_of(&t, &[], 0), graph_of(&t, &["a"], 0), graph_of(&t, &["a", "a1", "a1x"], 1)];
+        let root = t.root();
+        let graphs = [
+            graph_of(&t, &[], 0),
+            graph_of(&t, &["a"], 0),
+            graph_of(&t, &["a", "a1", "a1x"], 1),
+            // Opened "other" bands: `d` (2 % of root) and `a3` (2 % of a) are drawn as folders.
+            graph_with(&t, root, &["a"], &["root", "a"], 0),
+            graph_with(&t, root, &["a", "a1", "a1x"], &["root", "a"], 1),
+        ];
+        let opened = &graphs[3];
+        for name in ["d", "a3"] {
+            assert!(opened.bands.iter().any(|b| b.part == Part::Folder(id(&t, name))), "{name} opened in {opened:?}");
+        }
         for g in &graphs {
             assert!(!g.bands.is_empty());
             for (i, band) in g.bands.iter().enumerate() {
