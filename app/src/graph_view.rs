@@ -4,7 +4,8 @@
 #![cfg_attr(not(test), expect(dead_code, reason = "wired in a later task"))]
 #![cfg_attr(test, allow(dead_code))]
 
-use crate::model::{ScanState, Unit};
+use crate::model::{ScanState, Unit, display_name, format_size, group_digits};
+use crate::tree_view::{format_percent, frame_label};
 use crate::nav::{Dir, neighbour_rect};
 use crate::settings::View;
 use flow::age::{Age, age_colour, age_of};
@@ -223,16 +224,95 @@ pub fn missing_types(g: &Graph, types: &HashMap<Part, Option<Category>>) -> Vec<
     g.bands.iter().map(|b| b.part).filter(|p| !types.contains_key(p)).collect()
 }
 
-pub fn band_label(_tree: &Tree, _b: &Band, _unit: Unit) -> (String, String) {
-    (String::new(), String::new())
+/// The label of band `b` on the graph: (name, size). A folder band is labelled as a frame of the
+/// treemap; "files" is a folder's own files; "other (N)" stands for N merged folders (and the
+/// files when they merged too). Names go through `display_name`.
+pub fn band_label(tree: &Tree, b: &Band, unit: Unit) -> (String, String) {
+    let size = format_size(b.size, unit);
+    match b.part {
+        Part::Folder(n) => frame_label(tree, n, unit),
+        Part::Files(_) => ("files".into(), size),
+        Part::Other { folders: 0, .. } => ("other files".into(), size),
+        Part::Other { folders, .. } => (format!("other ({folders})"), size),
+    }
 }
 
-pub fn tooltip(_tree: &Tree, _counts: &[u64], _b: &Band, _unit: Unit) -> (String, String) {
-    (String::new(), String::new())
+/// The tooltip of band `b`: (title, detail). The title is the path of the folder, "Files in
+/// <path>" or "Other folders in <path>". The detail is the size, the share of the parent folder,
+/// what is inside and the newest change. `counts` is the file count of each node
+/// (`tree_view::file_counts`).
+pub fn tooltip(tree: &Tree, counts: &[u64], b: &Band, unit: Unit) -> (String, String) {
+    let path = |n: NodeId| display_name(&tree.path(n).to_string_lossy()).into_owned();
+    // The share is of the folder above the band: for a folder band its parent (the view folder
+    // is all of itself), for "files" and "other" the folder that holds them.
+    let (title, parent, inside) = match b.part {
+        Part::Folder(n) => {
+            let files = counts.get(n.0 as usize).copied().unwrap_or(0);
+            (path(n), tree.node(n).parent.unwrap_or(n), count_text(files, "file", "files"))
+        }
+        Part::Files(f) => {
+            let files = flow::members(tree, &b.part).len() as u64;
+            (format!("Files in {}", path(f)), f, count_text(files, "file", "files"))
+        }
+        Part::Other { parent, folders: 0, .. } => {
+            let files = flow::members(tree, &b.part).len() as u64;
+            (format!("Other files in {}", path(parent)), parent, count_text(files, "file", "files"))
+        }
+        Part::Other { parent, folders, files } => {
+            let mut inside = count_text(u64::from(folders), "folder", "folders");
+            if files {
+                inside.push_str(" and files");
+            }
+            (format!("Other folders in {}", path(parent)), parent, inside)
+        }
+    };
+    let share = format_percent(b.size, tree.node(parent).size);
+    let of = display_name(tree.name(parent));
+    let detail = format!("{}. {share} of {of}. {inside}. Last change: {}.", format_size(b.size, unit), last_change(b.newest));
+    (title, detail)
 }
 
-pub fn summary(_tree: &Tree, _g: &Graph, _unit: Unit) -> String {
-    String::new()
+/// "1 file" or "2 files", with the digits grouped.
+fn count_text(n: u64, one: &str, many: &str) -> String {
+    format!("{} {}", group_digits(n), if n == 1 { one } else { many })
+}
+
+/// A newest change as the tooltip says it: the day, or "not known".
+fn last_change(t: u32) -> String {
+    if t == scan::time::UNKNOWN { "not known".into() } else { format_day(t) }
+}
+
+/// What a screen reader says of graph `g`: the view folder, the bands drawn after it and the
+/// largest of them. The view folder is the one of the first band (its tree parent when the graph
+/// is scrolled, and the view band is out of view).
+pub fn summary(tree: &Tree, g: &Graph, unit: Unit) -> String {
+    let Some(first) = g.bands.first() else { return "Folder graph: 0 bands.".into() };
+    let view = match first.part {
+        Part::Folder(n) if first.column == 0 => Some(n),
+        Part::Folder(n) => tree.node(n).parent,
+        Part::Files(f) => Some(f),
+        Part::Other { parent, .. } => Some(parent),
+    };
+    let name = |n: NodeId| display_name(tree.name(n)).into_owned();
+    let of = view.map_or(String::new(), |v| format!(" of {}", name(v)));
+    // The view band (column 0) is the graph's root, not one of its bands.
+    let mut bands = g.bands.iter().filter(|b| !(b.column == 0 && matches!(b.part, Part::Folder(_))));
+    let Some(mut largest) = bands.next() else { return format!("Folder graph{of}: 0 bands.") };
+    let mut count = 1;
+    for b in bands {
+        count += 1;
+        if b.size > largest.size {
+            largest = b;
+        }
+    }
+    let largest_name = match largest.part {
+        Part::Folder(n) => name(n),
+        Part::Files(_) => "files".into(),
+        Part::Other { folders: 0, .. } => "other files".into(),
+        Part::Other { .. } => "other".into(),
+    };
+    let noun = if count == 1 { "band" } else { "bands" };
+    format!("Folder graph{of}: {count} {noun}, largest {largest_name}, {}.", format_size(largest.size, unit))
 }
 
 /// The text the graph shows over `g`, the layout of folder `view`, or "" for none: the treemap's
@@ -241,9 +321,20 @@ pub fn graph_note(tree: &Tree, view: NodeId, g: &Graph, has_area: bool) -> &'sta
     if has_area && g.bands.is_empty() && tree.node(view).size == 0 { crate::tree_view::NO_SIZES } else { "" }
 }
 
-/// A day as `2026-10-26`.
-pub fn format_day(_t: u32) -> String {
-    String::new()
+/// A day as `2026-10-26`: `t` is seconds since 2000-01-01 UTC. Civil-from-days (Howard Hinnant).
+pub fn format_day(t: u32) -> String {
+    // Days from 0000-03-01 to 2000-01-01.
+    const DAYS_TO_2000: i64 = 730_425;
+    let z = i64::from(t / 86_400) + DAYS_TO_2000;
+    let era = z.div_euclid(146_097);
+    let day_of_era = z.rem_euclid(146_097);
+    let year_of_era = (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let mp = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    format!("{year:04}-{month:02}-{day:02}")
 }
 
 /// The legend of the age colours, newest first.

@@ -362,8 +362,8 @@ pub(crate) fn wire(ui: &MainWindow) {
 /// Keeps `part` as the hovered band part. `true` when it is not the part hovered before: only then
 /// does the window get a new hover box.
 #[cfg_attr(not(test), expect(dead_code, reason = "wired in P4.T3"))]
-pub(crate) fn note_graph_hover(_part: Option<Part>) -> bool {
-    false
+pub(crate) fn note_graph_hover(part: Option<Part>) -> bool {
+    SESSION.with_borrow_mut(|s| std::mem::replace(&mut s.graph_hovered, part) != part)
 }
 
 /// True when the graph shows in File type mode: its bands want their file types.
