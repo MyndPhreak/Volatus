@@ -1766,6 +1766,11 @@ fn show_folder(ui: &MainWindow, folder: NodeId) {
 fn move_to_folder(ui: &MainWindow, folder: NodeId) {
     let way = with_loaded(|l| tree_view::zoom_way(&l.data.tree, l.shown_root, &l.rects, folder));
     SESSION.with_borrow_mut(|s| s.out_from = None);
+    // The treemap is hidden behind the graph: its rects are stale, and no treemap layout lands to
+    // end a zoom in or to play a zoom out.
+    if SESSION.with_borrow(|s| graph_view::shown_view(s.scan.state(), s.loaded.is_some(), s.settings.view)) == View::Graph {
+        return stop_move(ui);
+    }
     let (w, h) = map_px(ui);
     match way {
         Some(tree_view::ZoomWay::In((x, y, rw, rh))) if motion_on() => {

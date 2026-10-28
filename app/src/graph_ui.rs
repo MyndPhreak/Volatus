@@ -9,7 +9,7 @@ use crate::model::{Unit, display_name};
 use crate::settings::View;
 use crate::{
     Data, LABEL_CAP, LayoutJob, LegendEntry, MainWindow, SESSION, Session, Stored, current_unit, drop_hover, is_current, persist, relayout,
-    scan_apply, with_loaded,
+    scan_apply, stop_move, with_loaded,
 };
 use flow::{Expander, Graph, Part, Theme};
 use slint::{ComponentHandle, Image, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel};
@@ -295,8 +295,15 @@ fn view_chosen(ui: &MainWindow, i: i32) {
     }
     persist(ui);
     drop_hover(ui);
-    if view == View::Treemap {
-        clear_picture(ui);
+    match view {
+        View::Treemap => clear_picture(ui),
+        // The treemap hides: a move on it stops, and a zoom out waiting for its next layout goes.
+        // A first-scan fade still waiting (`fade_next`) stays: the treemap of this scan was never
+        // drawn, so its first picture fades in as after any scan.
+        View::Graph => {
+            stop_move(ui);
+            SESSION.with_borrow_mut(|s| s.out_from = None);
+        }
     }
     sync_view(ui);
     relayout(ui);
