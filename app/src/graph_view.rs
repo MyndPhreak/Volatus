@@ -41,6 +41,7 @@ impl GraphState {
 }
 
 /// What a click on the graph does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Act {
     Select(NodeId),
     ShowOther(NodeId),
@@ -48,6 +49,7 @@ pub enum Act {
 }
 
 /// What a key in the graph does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyAct {
     Select(NodeId),
     Toggle(NodeId),
@@ -273,6 +275,350 @@ mod tests {
         }
         for chosen in [View::Treemap, View::Graph] {
             assert_eq!(shown_view(&done(), false, chosen), View::Treemap, "done without data {chosen:?}");
+        }
+    }
+
+    // ---- actions, keys and graph state (TP4.1) ----
+
+    /// root 970 {
+    ///   a 500 { a1 300 { a1x 300 { a1y 300 { f.bin 300 } } }, a2 140 { g.bin }, a.txt 50, a3 10 { h.bin } },
+    ///   b 300 { b.bin },  c.txt 150,  d 20 { d1 20 { i.bin } }
+    /// }
+    /// Root's split: folders [a, b], files 150, other { d } (2 %). a's: [a1, a2], files 50,
+    /// other { a3 } (2 %). `b` and `a2` hold only files: no expander.
+    fn deep_tree() -> Tree {
+        let e = |id: u64, parent: u64, name: &str, size: u64, is_dir: bool| RawEntry {
+            id,
+            parent,
+            name: name.into(),
+            size,
+            allocated: size,
+            is_dir,
+            modified: NOW,
+        };
+        let entries = vec![
+            e(0, 0, "root", 0, true),
+            e(1, 0, "a", 0, true),
+            e(2, 0, "b", 0, true),
+            e(3, 0, "c.txt", 150, false),
+            e(4, 0, "d", 0, true),
+            e(5, 1, "a1", 0, true),
+            e(6, 1, "a2", 0, true),
+            e(7, 1, "a.txt", 50, false),
+            e(8, 1, "a3", 0, true),
+            e(9, 5, "a1x", 0, true),
+            e(10, 9, "a1y", 0, true),
+            e(11, 10, "f.bin", 300, false),
+            e(12, 6, "g.bin", 140, false),
+            e(13, 8, "h.bin", 10, false),
+            e(14, 2, "b.bin", 300, false),
+            e(15, 4, "d1", 0, true),
+            e(16, 15, "i.bin", 20, false),
+        ];
+        rollup(0, entries).unwrap().tree
+    }
+
+    /// The node named `name` (names are unique in the fixtures).
+    fn id(t: &Tree, name: &str) -> NodeId {
+        let mut stack = vec![t.root()];
+        while let Some(n) = stack.pop() {
+            if t.name(n) == name {
+                return n;
+            }
+            stack.extend(t.children(n));
+        }
+        panic!("no node {name}")
+    }
+
+    fn graph_of(t: &Tree, expanded: &[&str], first_column: u16) -> Graph {
+        let expanded: HashSet<NodeId> = expanded.iter().map(|n| id(t, n)).collect();
+        let open_other = HashSet::new();
+        flow::layout(&flow::Input {
+            tree: t,
+            view: t.root(),
+            expanded: &expanded,
+            open_other: &open_other,
+            w: 800.0,
+            h: 600.0,
+            scale: 1.0,
+            first_column,
+        })
+    }
+
+    fn index_of(g: &Graph, part: Part) -> usize {
+        g.bands.iter().position(|b| b.part == part).unwrap_or_else(|| panic!("no band {part:?} in {g:?}"))
+    }
+
+    #[test]
+    fn fixture_has_the_bands_the_action_tests_need() {
+        let t = deep_tree();
+        let g = graph_of(&t, &[], 0);
+        let (root, a, b, d) = (t.root(), id(&t, "a"), id(&t, "b"), id(&t, "d"));
+        let parts: Vec<Part> = g.bands.iter().map(|b| b.part).collect();
+        let other = Part::Other { parent: root, folders: 1, files: false };
+        assert_eq!(parts, vec![Part::Folder(root), Part::Folder(a), Part::Folder(b), Part::Files(root), other]);
+        assert_eq!(g.bands[1].expander, flow::Expander::Collapsed);
+        assert_eq!(g.bands[2].expander, flow::Expander::None);
+        assert!(!g.bands.iter().any(|band| band.part == Part::Folder(d)), "d is merged");
+    }
+
+    #[test]
+    fn click_menu_and_open_table() {
+        let t = deep_tree();
+        let g = graph_of(&t, &[], 0);
+        let (root, a) = (t.root(), id(&t, "a"));
+        let other = Part::Other { parent: root, folders: 1, files: false };
+        let cases = [
+            (Some(Part::Folder(a)), Act::Select(a), Some(a), Some(a)),
+            (Some(Part::Files(root)), Act::Select(root), None, None),
+            (Some(other), Act::ShowOther(root), None, None),
+            (None, Act::Nothing, None, None),
+        ];
+        for (part, want_click, want_menu, want_open) in cases {
+            let hit = part.map(|p| index_of(&g, p));
+            assert_eq!(click(&g, hit), want_click, "click {part:?}");
+            assert_eq!(menu_target(&g, hit), want_menu, "menu {part:?}");
+            assert_eq!(open_target(&g, hit), want_open, "open {part:?}");
+        }
+    }
+
+    #[test]
+    fn click_hit_past_the_last_band_is_nothing() {
+        let t = deep_tree();
+        let g = graph_of(&t, &[], 0);
+        let past = Some(g.bands.len());
+        assert_eq!(click(&g, past), Act::Nothing);
+        assert_eq!(menu_target(&g, past), None);
+        assert_eq!(open_target(&g, past), None);
+    }
+
+    #[test]
+    fn key_target_only_a_drawn_folder_band() {
+        let t = deep_tree();
+        let g = graph_of(&t, &[], 0);
+        let a = id(&t, "a");
+        assert_eq!(key_target(&g, Some(a)), Some(a), "drawn folder");
+        assert_eq!(key_target(&g, Some(t.root())), Some(t.root()), "the view folder band");
+        assert_eq!(key_target(&g, Some(id(&t, "c.txt"))), None, "a file");
+        assert_eq!(key_target(&g, Some(id(&t, "d"))), None, "a merged folder");
+        assert_eq!(key_target(&g, Some(id(&t, "a1"))), None, "a folder under a collapsed one");
+        assert_eq!(key_target(&g, None), None, "no selection");
+
+        // Five columns, scrolled by one: column 0 (the view folder) is not drawn.
+        let scrolled = graph_of(&t, &["a", "a1", "a1x"], 1);
+        assert_eq!((scrolled.columns, scrolled.first_column), (5, 1));
+        assert_eq!(key_target(&scrolled, Some(t.root())), None, "a folder in a scrolled-out column");
+        assert_eq!(key_target(&scrolled, Some(a)), Some(a));
+    }
+
+    #[test]
+    fn key_table() {
+        let t = deep_tree();
+        let closed = graph_of(&t, &[], 0);
+        let open = graph_of(&t, &["a"], 0);
+        let (root, a, b, a1) = (t.root(), id(&t, "a"), id(&t, "b"), id(&t, "a1"));
+        let (file, merged) = (id(&t, "c.txt"), id(&t, "d"));
+        let cases: [(&Graph, Option<NodeId>, &str, KeyAct); 30] = [
+            // Up and Down: the neighbour folder band.
+            (&closed, Some(a), "down", KeyAct::Select(b)),
+            (&closed, Some(b), "up", KeyAct::Select(a)),
+            (&open, Some(a1), "down", KeyAct::Select(id(&t, "a2"))),
+            // Right: expand, go to the first child folder band, or nothing.
+            (&closed, Some(a), "right", KeyAct::Toggle(a)),
+            (&open, Some(a), "right", KeyAct::Select(a1)),
+            (&closed, Some(b), "right", KeyAct::Nothing),
+            (&closed, Some(root), "right", KeyAct::Nothing),
+            // Left: collapse, go to the parent band, or nothing on column 0.
+            (&open, Some(a), "left", KeyAct::Toggle(a)),
+            (&closed, Some(a), "left", KeyAct::Select(root)),
+            (&open, Some(a1), "left", KeyAct::Select(a)),
+            (&closed, Some(b), "left", KeyAct::Select(root)),
+            (&closed, Some(root), "left", KeyAct::Nothing),
+            // An arrow with no selection, or a selection not drawn as a folder band: the first.
+            (&closed, None, "up", KeyAct::Select(root)),
+            (&closed, None, "down", KeyAct::Select(root)),
+            (&closed, None, "left", KeyAct::Select(root)),
+            (&closed, None, "right", KeyAct::Select(root)),
+            (&closed, Some(file), "right", KeyAct::Select(root)),
+            (&closed, Some(merged), "down", KeyAct::Select(root)),
+            // Enter opens a drawn folder band; Backspace goes up.
+            (&closed, Some(a), "enter", KeyAct::Open(a)),
+            (&closed, Some(file), "enter", KeyAct::Nothing),
+            (&closed, Some(a), "backspace", KeyAct::Up),
+            (&closed, None, "backspace", KeyAct::Up),
+            // Delete only through `key_target`.
+            (&closed, Some(a), "delete", KeyAct::Delete { node: a, shift: false }),
+            (&closed, Some(a), "shift-delete", KeyAct::Delete { node: a, shift: true }),
+            (&closed, Some(file), "delete", KeyAct::Nothing),
+            (&closed, Some(merged), "shift-delete", KeyAct::Nothing),
+            (&closed, None, "delete", KeyAct::Nothing),
+            // Other keys do nothing.
+            (&closed, Some(a), "space", KeyAct::Nothing),
+            (&closed, Some(a), "", KeyAct::Nothing),
+            (&closed, Some(a), "Delete", KeyAct::Nothing),
+        ];
+        for (g, selected, k, want) in cases {
+            assert_eq!(key(g, &t, selected, k), want, "{k:?} on {selected:?}");
+        }
+    }
+
+    #[test]
+    fn key_delete_on_a_scrolled_out_folder_does_nothing() {
+        let t = deep_tree();
+        let g = graph_of(&t, &["a", "a1", "a1x"], 1);
+        assert_eq!(key(&g, &t, Some(t.root()), "delete"), KeyAct::Nothing);
+        assert_eq!(key(&g, &t, Some(t.root()), "enter"), KeyAct::Nothing);
+    }
+
+    #[test]
+    fn key_up_and_down_agree_with_the_neighbour_folder_rect() {
+        let t = deep_tree();
+        let g = graph_of(&t, &["a", "a1"], 0);
+        let rects = flow::folder_rects(&g);
+        for selected in rects.iter().map(|r| Some(r.node)).chain([None]) {
+            for (k, dir) in [("up", crate::nav::Dir::Up), ("down", crate::nav::Dir::Down)] {
+                let want = crate::nav::neighbour_rect(&rects, selected, dir).map_or(KeyAct::Nothing, KeyAct::Select);
+                assert_eq!(key(&g, &t, selected, k), want, "{k} on {selected:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn graph_state_toggle_adds_then_removes() {
+        let mut s = GraphState::default();
+        s.toggle(NodeId(3));
+        assert_eq!(s.expanded, HashSet::from([NodeId(3)]));
+        s.toggle(NodeId(4));
+        s.toggle(NodeId(3));
+        assert_eq!(s.expanded, HashSet::from([NodeId(4)]));
+    }
+
+    #[test]
+    fn graph_state_show_other_adds_the_parent() {
+        let mut s = GraphState::default();
+        s.show_other(NodeId(2));
+        s.show_other(NodeId(2));
+        assert_eq!(s.open_other, HashSet::from([NodeId(2)]));
+    }
+
+    #[test]
+    fn graph_state_reroot_clears_expanded_open_other_and_first_column() {
+        let mut s = GraphState {
+            expanded: HashSet::from([NodeId(1)]),
+            open_other: HashSet::from([NodeId(2)]),
+            first_column: 3,
+            colour: ColourMode::FileType,
+            ..GraphState::default()
+        };
+        s.reroot();
+        assert!(s.expanded.is_empty());
+        assert!(s.open_other.is_empty());
+        assert_eq!(s.first_column, 0);
+        assert_eq!(s.colour, ColourMode::FileType, "the colour mode is kept");
+    }
+
+    #[test]
+    fn graph_state_after_detach_drops_ids_inside_and_the_shown_graph() {
+        let t = deep_tree();
+        let mut s = GraphState {
+            expanded: HashSet::from([NodeId(1), NodeId(5), NodeId(7)]),
+            open_other: HashSet::from([NodeId(5), NodeId(9)]),
+            first_column: 1,
+            shown: Some(graph_of(&t, &[], 0)),
+            types: HashMap::from([(Part::Files(NodeId(9)), Some(Category::Video))]),
+            ..GraphState::default()
+        };
+        s.after_detach(|n| n == NodeId(5) || n == NodeId(7));
+        assert_eq!(s.expanded, HashSet::from([NodeId(1)]));
+        assert_eq!(s.open_other, HashSet::from([NodeId(9)]));
+        assert!(s.shown.is_none());
+        assert!(s.types.is_empty());
+    }
+
+    #[test]
+    fn graph_state_after_detach_of_nothing_inside_keeps_the_sets() {
+        let mut s = GraphState { expanded: HashSet::from([NodeId(1)]), ..GraphState::default() };
+        s.after_detach(|_| false);
+        assert_eq!(s.expanded, HashSet::from([NodeId(1)]));
+    }
+
+    #[test]
+    fn graph_state_scroll_to_keeps_the_column_in_view_with_the_least_move() {
+        // (first_column before, column, columns, first_column after)
+        let cases = [
+            (0, 2, 10, 0),
+            (0, 3, 10, 0),
+            (0, 4, 10, 1),
+            (0, 9, 10, 6),
+            (6, 5, 10, 5),
+            (6, 0, 10, 0),
+            (3, 5, 10, 3),
+            (0, 2, 3, 0),
+            (0, 9, 6, 2),
+            (5, 1, 6, 1),
+            (5, 4, 6, 2),
+            (0, 0, 0, 0),
+        ];
+        for (before, column, columns, want) in cases {
+            let mut s = GraphState { first_column: before, ..GraphState::default() };
+            s.scroll_to(column, columns);
+            assert_eq!(s.first_column, want, "from {before} to column {column} of {columns}");
+        }
+    }
+
+    #[test]
+    fn graph_state_scroll_by_clamps_to_the_last_full_view() {
+        // (first_column before, delta, columns, first_column after)
+        let cases = [
+            (0, 3, 10, 3),
+            (3, -5, 10, 0),
+            (0, 100, 10, 6),
+            (2, 1, 10, 3),
+            (0, 1, 3, 0),
+            (0, 1, 4, 0),
+            (0, 1, 5, 1),
+            (6, i32::MIN, 10, 0),
+            (0, i32::MAX, 10, 6),
+        ];
+        for (before, delta, columns, want) in cases {
+            let mut s = GraphState { first_column: before, ..GraphState::default() };
+            s.scroll_by(delta, columns);
+            assert_eq!(s.first_column, want, "from {before} by {delta} of {columns}");
+        }
+    }
+
+    /// The pointer path (`menu_target` of the band under the pointer) and the key path (`click`
+    /// selects, then `key_target` of the selection) name the same folder on every band. A
+    /// "files" band selects its folder (design): the key path then names that folder's own band,
+    /// never the files band. An "other" band selects nothing.
+    #[test]
+    fn guard_paths_agree_on_every_band() {
+        let t = deep_tree();
+        let graphs = [graph_of(&t, &[], 0), graph_of(&t, &["a"], 0), graph_of(&t, &["a", "a1", "a1x"], 1)];
+        for g in &graphs {
+            assert!(!g.bands.is_empty());
+            for (i, band) in g.bands.iter().enumerate() {
+                let menu = menu_target(g, Some(i));
+                assert_eq!(open_target(g, Some(i)), menu, "open and menu agree on {:?}", band.part);
+                match (band.part, click(g, Some(i))) {
+                    (Part::Folder(n), Act::Select(s)) => {
+                        assert_eq!(s, n);
+                        assert_eq!(menu, Some(n), "{:?}", band.part);
+                        assert_eq!(key_target(g, Some(s)), menu, "{:?}", band.part);
+                    }
+                    (Part::Files(f), Act::Select(s)) => {
+                        assert_eq!(s, f);
+                        assert_eq!(menu, None, "no menu on {:?}", band.part);
+                        let folder_band = g.bands.iter().position(|b| b.part == Part::Folder(f));
+                        assert_eq!(key_target(g, Some(s)), menu_target(g, folder_band), "{:?}", band.part);
+                    }
+                    (Part::Other { parent, .. }, Act::ShowOther(p)) => {
+                        assert_eq!(p, parent);
+                        assert_eq!(menu, None, "no menu on {:?}", band.part);
+                    }
+                    (part, act) => panic!("{part:?} clicked gives {act:?}"),
+                }
+            }
         }
     }
 }
