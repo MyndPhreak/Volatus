@@ -300,9 +300,9 @@ mod tests {
 
     /// Files `(name, size)` directly under a root folder.
     fn files(list: &[(&str, u64)]) -> scan::Tree {
-        let mut entries = vec![RawEntry { id: 0, parent: 0, name: "root".into(), size: 0, allocated: 0, is_dir: true }];
+        let mut entries = vec![RawEntry { id: 0, parent: 0, name: "root".into(), size: 0, allocated: 0, is_dir: true, modified: scan::time::UNKNOWN }];
         for (i, &(name, size)) in list.iter().enumerate() {
-            entries.push(RawEntry { id: i as u64 + 1, parent: 0, name: name.into(), size, allocated: size, is_dir: false });
+            entries.push(RawEntry { id: i as u64 + 1, parent: 0, name: name.into(), size, allocated: size, is_dir: false, modified: scan::time::UNKNOWN });
         }
         rollup(0, entries).unwrap().tree
     }

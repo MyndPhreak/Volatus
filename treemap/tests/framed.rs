@@ -11,17 +11,17 @@ const ONE: Chrome = Chrome { header: 16.0, pad: 2.0 };
 
 /// Files of `sizes` directly under a root folder.
 fn tree_of(sizes: &[u64]) -> Tree {
-    let mut entries = vec![RawEntry { id: 0, parent: 0, name: "root".into(), size: 0, allocated: 0, is_dir: true }];
+    let mut entries = vec![RawEntry { id: 0, parent: 0, name: "root".into(), size: 0, allocated: 0, is_dir: true, modified: scan::time::UNKNOWN }];
     for (i, &s) in sizes.iter().enumerate() {
         let id = i as u64 + 1;
-        entries.push(RawEntry { id, parent: 0, name: format!("f{id}"), size: s, allocated: s, is_dir: false });
+        entries.push(RawEntry { id, parent: 0, name: format!("f{id}"), size: s, allocated: s, is_dir: false, modified: scan::time::UNKNOWN });
     }
     rollup(0, entries).unwrap().tree
 }
 
 /// Tree from `(id, parent, size, is_dir)` rows under a root folder with id 0. Node names are `n{id}`.
 fn nested(rows: &[(u64, u64, u64, bool)]) -> Tree {
-    let mut entries = vec![RawEntry { id: 0, parent: 0, name: "root".into(), size: 0, allocated: 0, is_dir: true }];
+    let mut entries = vec![RawEntry { id: 0, parent: 0, name: "root".into(), size: 0, allocated: 0, is_dir: true, modified: scan::time::UNKNOWN }];
     entries.extend(rows.iter().map(|&(id, parent, size, is_dir)| RawEntry {
         id,
         parent,
@@ -29,6 +29,7 @@ fn nested(rows: &[(u64, u64, u64, bool)]) -> Tree {
         size,
         allocated: size,
         is_dir,
+        modified: scan::time::UNKNOWN,
     }));
     rollup(0, entries).unwrap().tree
 }
@@ -1093,8 +1094,8 @@ fn unzoom_frame_with_no_area_or_not_finite_is_none() {
 /// One file named `name` as a `w` x `h` tile at `scale` in `theme`: the picture, the tree and the rects.
 fn named_tile(name: &str, w: u32, h: u32, scale: f64, theme: Theme) -> (Vec<u8>, Tree, Vec<Rect>) {
     let entries = vec![
-        RawEntry { id: 0, parent: 0, name: "root".into(), size: 0, allocated: 0, is_dir: true },
-        RawEntry { id: 1, parent: 0, name: name.into(), size: 10, allocated: 10, is_dir: false },
+        RawEntry { id: 0, parent: 0, name: "root".into(), size: 0, allocated: 0, is_dir: true, modified: scan::time::UNKNOWN },
+        RawEntry { id: 1, parent: 0, name: name.into(), size: 10, allocated: 10, is_dir: false, modified: scan::time::UNKNOWN },
     ];
     let tree = rollup(0, entries).unwrap().tree;
     let file = tree.children(tree.root()).next().unwrap();

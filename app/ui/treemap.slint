@@ -263,6 +263,55 @@ component FileLabelView inherits Rectangle {
     }
 }
 
+/// The tooltip of a hovered item, shared by the treemap and the folder graph: the path, then the
+/// details, inside an area of `area-width` x `area-height`. It starts after the pointer when it
+/// fits, else before it (the host's `tip-position`). A long path wraps after a folder (the host's
+/// `break-points`); a name longer than the line wraps inside it.
+export component TipBox inherits Rectangle {
+    in property <string> title;
+    in property <string> detail;
+    /// The pointer, in the area's logical pixels.
+    in property <length> pointer-x;
+    in property <length> pointer-y;
+    in property <length> area-width;
+    in property <length> area-height;
+    /// Where the tooltip starts on one axis: (pointer, tooltip size, area size, gap after the pointer).
+    pure callback tip-position(float, float, float, float) -> float;
+    /// The path with a break point after each folder.
+    pure callback break-points(string) -> string;
+    width: min(tip-lines.preferred-width, min(root.area-width, 520px));
+    height: tip-lines.preferred-height;
+    x: root.tip-position(root.pointer-x / 1px, self.width / 1px, root.area-width / 1px, 16) * 1px;
+    y: root.tip-position(root.pointer-y / 1px, self.height / 1px, root.area-height / 1px, 20) * 1px;
+    border-radius: 6px;
+    background: Palette.background;
+    border-width: 1px;
+    border-color: Glass.border;
+    drop-shadow-blur: 8px;
+    drop-shadow-color: #00000066;
+    tip-lines := VerticalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        padding-top: 5px;
+        padding-bottom: 6px;
+        spacing: 2px;
+        Text {
+            text: root.break-points(root.title);
+            accessible-role: none;
+            font-size: 12px;
+            wrap: word-wrap;
+            color: Palette.foreground;
+        }
+        Text {
+            text: root.detail;
+            accessible-role: none;
+            font-size: 12px;
+            wrap: word-wrap;
+            color: Palette.foreground.transparentize(30%);
+        }
+    }
+}
+
 /// The treemap picture (drawn by the host on a worker) with the layers above it: the frame
 /// and file labels, the map text, the selection outline, the hover and the focus ring.
 export component TreemapView inherits Rectangle {
@@ -496,41 +545,19 @@ export component TreemapView inherits Rectangle {
     // The tooltip of the hovered node, above the hover and inside the map: after the pointer when it
     // fits, else before it (the host's tip-position). A long path wraps after a folder (the host's
     // break-points); a name longer than the line wraps inside it.
-    if root.tip-visible && root.hover.visible && !root.zoom-shown : Rectangle {
-        width: min(tip-lines.preferred-width, min(root.width, 520px));
-        height: tip-lines.preferred-height;
-        x: root.tip-position(root.tip-x / 1px, self.width / 1px, root.width / 1px, 16) * 1px;
-        y: root.tip-position(root.tip-y / 1px, self.height / 1px, root.height / 1px, 20) * 1px;
-        border-radius: 6px;
-        background: Palette.background;
-        border-width: 1px;
-        border-color: Glass.border;
-        drop-shadow-blur: 8px;
-        drop-shadow-color: #00000066;
-        tip-lines := VerticalLayout {
-            padding-left: 8px;
-            padding-right: 8px;
-            padding-top: 5px;
-            padding-bottom: 6px;
-            spacing: 2px;
-            Text {
-                text: root.break-points(root.hover.title);
-                accessible-role: none;
-                font-size: 12px;
-                wrap: word-wrap;
-                color: Palette.foreground;
-            }
-            Text {
-                text: root.hover.detail;
-                accessible-role: none;
-                font-size: 12px;
-                wrap: word-wrap;
-                color: Palette.foreground.transparentize(30%);
-            }
-        }
+    if root.tip-visible && root.hover.visible && !root.zoom-shown : TipBox {
+        title: root.hover.title;
+        detail: root.hover.detail;
+        pointer-x: root.tip-x;
+        pointer-y: root.tip-y;
+        area-width: root.width;
+        area-height: root.height;
+        tip-position(pointer, size, extent, gap) => { return root.tip-position(pointer, size, extent, gap); }
+        break-points(path) => { return root.break-points(path); }
     }
     map-focus := FocusScope {
-        enabled: root.interactive;
+        // Hidden behind the graph, the map takes no focus (Tab, a click, `focus-map`).
+        enabled: root.interactive && root.visible;
         accessible-role: image;
         accessible-label: "Treemap";
         accessible-value: root.value;

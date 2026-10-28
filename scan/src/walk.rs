@@ -44,6 +44,8 @@ struct Item {
     is_dir: bool,
     size: u64,
     file_id: u64,
+    /// Last write time, from the listing.
+    modified: u32,
 }
 
 /// Appends the entries of one `FILE_ID_BOTH_DIR_INFO` buffer, without `.` and `..`.
@@ -66,6 +68,7 @@ fn parse_listing(b: &[u8], items: &mut Vec<Item>) -> Option<()> {
                 is_dir: attrs & FILE_ATTRIBUTE_DIRECTORY != 0 && !link,
                 size: u64_at(b, off + offset_of!(Info, EndOfFile))?,
                 file_id: u64_at(b, off + offset_of!(Info, FileId))?,
+                modified: crate::time::from_filetime(u64_at(b, off + offset_of!(Info, LastWriteTime))? as i64),
                 name,
             });
         }
@@ -178,6 +181,7 @@ fn walk_dir(ctx: &Ctx, dir: &Path, dir_id: u64) -> Result<Out, ScanError> {
             size,
             allocated: size,
             is_dir: item.is_dir,
+            modified: item.modified,
         };
         out.entries.push((entry, if item.is_dir { 0 } else { item.file_id }));
     }
@@ -223,6 +227,7 @@ pub fn walk(
         size: 0,
         allocated: 0,
         is_dir: true,
+        modified: crate::time::UNKNOWN,
     });
     let rolled = rollup(ROOT_ID, entries)?;
     let phases = Phases { read, rollup: started.elapsed() - read, ..Phases::default() };
@@ -243,7 +248,7 @@ mod tests {
     use super::*;
 
     fn file(id: u64) -> RawEntry {
-        RawEntry { id, parent: ROOT_ID, name: format!("f{id}"), size: 10, allocated: 10, is_dir: false }
+        RawEntry { id, parent: ROOT_ID, name: format!("f{id}"), size: 10, allocated: 10, is_dir: false, modified: crate::time::UNKNOWN }
     }
 
     #[test]

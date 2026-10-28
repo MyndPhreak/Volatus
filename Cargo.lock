@@ -217,6 +217,7 @@ version = "0.2.0"
 dependencies = [
  "arboard",
  "embed-resource",
+ "flow",
  "i-slint-backend-testing",
  "raw-window-handle",
  "rayon",
@@ -1256,6 +1257,14 @@ name = "float-cmp"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "98de4bbd547a563b716d8dfa9aad1cb19bfab00f4fa09a6a4ed21dbcf44ce9c4"
+
+[[package]]
+name = "flow"
+version = "0.1.0"
+dependencies = [
+ "scan",
+ "treemap",
+]
 
 [[package]]
 name = "fnv"

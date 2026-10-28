@@ -598,6 +598,7 @@ mod tests {
             size,
             allocated: size,
             is_dir,
+            modified: scan::time::UNKNOWN,
         };
         let entries = vec![
             e(0, 0, r"C:\data", 0, true),

@@ -17,6 +17,8 @@ mod delete_ui;
 mod drives;
 mod elevate;
 mod footer;
+mod graph_ui;
+mod graph_view;
 mod menu;
 mod model;
 mod motion;
@@ -42,7 +44,7 @@ use slint::{
 };
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
-use settings::{Part, Settings, ThemeChoice};
+use settings::{Part, Settings, ThemeChoice, View};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, mpsc};
@@ -177,6 +179,8 @@ struct Loaded {
     totals: Option<Vec<TypeTotal>>,
     /// Removals from the tree since it was installed. A count started before a removal is late.
     edits: u64,
+    /// The folder graph's state: expanded folders, colour mode, the shown graph, the type cache.
+    graph: graph_view::GraphState,
 }
 
 /// UI-thread state. Events from worker threads are applied here via `invoke_from_event_loop`.
@@ -207,6 +211,10 @@ struct Session {
     hovered: Option<NodeId>,
     /// Times the hovered node changed (`note_hover`). With `--timing` it is printed at exit.
     hover_changes: u64,
+    /// The graph band part under the pointer (`graph_ui::note_graph_hover`).
+    graph_hovered: Option<flow::Part>,
+    /// The graph's colour mode of the last scan dropped (`forget_scan`): the next scan keeps it.
+    kept_colour: graph_view::ColourMode,
     /// Latest pointer position over the treemap, in logical pixels.
     pointer: (f32, f32),
     /// Where the tooltip is in its life (see the tip module).
@@ -548,6 +556,8 @@ thread_local! {
         drives_seq: 0,
         hovered: None,
         hover_changes: 0,
+        graph_hovered: None,
+        kept_colour: graph_view::ColourMode::Age,
         pointer: (0.0, 0.0),
         tip: tip::TipState::Idle,
         hover_slowest: Duration::ZERO,
@@ -608,6 +618,7 @@ fn show_state(ui: &MainWindow) {
     ui.set_show_elevate(offer);
     ui.set_outdated(SESSION.with_borrow(|s| rescan_shown(&state, s.outdated)));
     ui.set_scan_title(SESSION.with_borrow(|s| model::scan_title(&s.scan_root)).into());
+    graph_ui::sync_view(ui);
     delete_ui::sync(ui);
 }
 
@@ -632,17 +643,21 @@ fn sync_rows(ui: &MainWindow) {
     ui.set_sort_descending(descending);
 }
 
-/// Moves the selection outline to the selected node's area in the shown treemap, or to its
-/// nearest drawn folder when the node itself is too small to draw (`tree_view::outline_node`).
+/// Moves the selection outline to the selected node's area in the shown treemap (or folder band of
+/// the shown graph), or to its nearest drawn folder when the node itself is not drawn
+/// (`tree_view::outline_node`).
 /// The treemap value for a screen reader names the selected node.
 fn sync_selection(ui: &MainWindow) {
     let scale = ui.window().scale_factor() as f64;
     let unit = current_unit();
     let value = with_loaded(|l| l.selected.map(|n| tree_view::map_value(&l.data.tree, n, unit))).flatten();
     ui.set_map_value(value.unwrap_or_default().into());
+    // While the graph shows, the outline is on its folder bands.
+    let graph = SESSION.with_borrow(graph_ui::outline_rects);
     let bounds = with_loaded(|l| {
-        let shown = tree_view::outline_node(&l.data.tree, &l.rects, l.selected?)?;
-        tree_view::selection_bounds(&l.rects, shown)
+        let rects = graph.as_ref().unwrap_or(&l.rects);
+        let shown = tree_view::outline_node(&l.data.tree, rects, l.selected?)?;
+        tree_view::selection_bounds(rects, shown)
     })
     .flatten();
     ui.set_has_selection(bounds.is_some());
@@ -654,14 +669,15 @@ fn sync_selection(ui: &MainWindow) {
     }
 }
 
-/// A treemap layout to run (`begin_layout`): the data, the folder, the scan and layout ids it is
-/// for, and the map size in logical pixels.
+/// A layout to run (`begin_layout`): the data, the folder, the scan and layout ids it is for, the
+/// map size in logical pixels, and the view (treemap or graph) it is for.
 struct LayoutJob {
     data: Arc<Data>,
     root: NodeId,
     generation: u64,
     seq: u64,
     size: (f32, f32),
+    view: View,
 }
 
 /// The session part of a new layout: a new `layout_seq` (any layout on its way is late now) and
@@ -676,22 +692,31 @@ fn begin_layout(s: &mut Session) -> Option<LayoutJob> {
     if s.flags.timing {
         eprintln!("Layout {}.", s.layout_seq);
     }
-    Some(LayoutJob { data, root, generation: s.scan.generation(), seq: s.layout_seq, size: s.map_size })
+    let view = graph_view::shown_view(s.scan.state(), true, s.settings.view);
+    Some(LayoutJob { data, root, generation: s.scan.generation(), seq: s.layout_seq, size: s.map_size, view })
 }
 
-/// Lays out and draws the treemap for the current folder and window size on a worker thread.
-/// The window keeps the old image until the new one arrives. A result is dropped if a newer
-/// layout or a new scan started meanwhile.
+/// True when a layout of scan `generation` and layout `seq` may still land: no newer layout, no
+/// applied removal (`scan_apply::step_pending` takes a new `layout_seq`) and no other scan since.
+fn is_current(s: &Session, generation: u64, seq: u64) -> bool {
+    (s.scan.generation(), s.layout_seq) == (generation, seq)
+}
+
+/// Lays out and draws the shown view (treemap or graph) for the current folder and window size on
+/// a worker thread. The window keeps the old image until the new one arrives. A result is dropped
+/// if a newer layout or a new scan started meanwhile.
 fn relayout(ui: &MainWindow) {
-    if let Some(job) = SESSION.with_borrow_mut(begin_layout) {
-        spawn_layout(ui, job);
+    match SESSION.with_borrow_mut(begin_layout) {
+        Some(job) if job.view == View::Graph => graph_ui::spawn_graph(ui, job),
+        Some(job) => spawn_layout(ui, job),
+        None => {}
     }
 }
 
 /// Runs `job` (`begin_layout`) on a worker thread and lands it when it is still the latest.
 /// ponytail: one thread per request and no early stop; fine while a layout takes well under
 /// a second and resizes are debounced. Upgrade path: a cancel flag per request.
-fn spawn_layout(ui: &MainWindow, LayoutJob { data, root, generation, seq, size: (lw, lh) }: LayoutJob) {
+fn spawn_layout(ui: &MainWindow, LayoutJob { data, root, generation, seq, size: (lw, lh), .. }: LayoutJob) {
     let scale = ui.window().scale_factor();
     let theme = if ui.get_dark() { Theme::Dark } else { Theme::Light };
     let (w, h) = ((lw * scale).round() as u32, (lh * scale).round() as u32);
@@ -710,8 +735,7 @@ fn spawn_layout(ui: &MainWindow, LayoutJob { data, root, generation, seq, size: 
         // Err means the event loop has stopped: nothing left to update.
         let _ = slint::invoke_from_event_loop(move || {
             let Some(ui) = weak.upgrade() else { return };
-            let current = SESSION.with_borrow(|s| (s.scan.generation(), s.layout_seq));
-            if current == (generation, seq) {
+            if SESSION.with_borrow(|s| is_current(s, generation, seq)) {
                 land(&ui, Layout { root, rects, image, labels, size: (w as f32 / scale, h as f32 / scale) });
             }
             scan_apply::data_released(&ui);
@@ -862,7 +886,9 @@ fn left_map(show: impl FnOnce(Option<NodeId>) -> bool) -> tip::TipAction {
 /// hover (`left_map`). Returns what the tooltip does next.
 fn forget_scan(show: impl FnOnce(Option<NodeId>) -> bool) -> tip::TipAction {
     SESSION.with_borrow_mut(|s| {
-        s.loaded = None;
+        if let Some(l) = s.loaded.take() {
+            s.kept_colour = l.graph.colour;
+        }
         s.held = None;
         s.out_from = None;
         s.fade_next = false;
@@ -891,6 +917,7 @@ fn leave(ui: &MainWindow) {
 /// under a pointer that has not moved is not looked up; the next pointer move finds it.
 fn drop_hover(ui: &MainWindow) {
     gate_hover(None, |n| show_hover(ui, n));
+    graph_ui::forget_hover(ui);
     tip_event(ui, tip::TipEvent::Layout);
 }
 
@@ -1056,7 +1083,7 @@ fn land(ui: &MainWindow, layout: Layout) {
 
 /// Motion is on now (`motion::allowed`). Read for each move, so a change of the setting counts at once.
 fn motion_on() -> bool {
-    motion::allowed(motion::client_area_animation())
+    motion::allowed(motion::animation_setting())
 }
 
 /// The treemap view in physical pixels.
@@ -1175,6 +1202,7 @@ fn select(ui: &MainWindow, node: NodeId) {
     if let Some(folder) = view {
         show_folder(ui, folder);
     }
+    graph_ui::scroll_to_selection(ui);
     sync_rows(ui);
     sync_selection(ui);
     let row = ui.get_selected_row();
@@ -1432,6 +1460,8 @@ fn install(ui: &MainWindow, data: Arc<Data>) {
     model.unit.set(current_unit());
     ui.set_rows(ModelRc::from(model.clone()));
     SESSION.with_borrow_mut(|s| {
+        // A new scan starts with an empty graph state; only the colour mode stays (session only).
+        let colour = s.loaded.as_ref().map_or(s.kept_colour, |l| l.graph.colour);
         s.loaded = Some(Loaded {
             data: data.clone(),
             serial: next_serial(),
@@ -1443,9 +1473,11 @@ fn install(ui: &MainWindow, data: Arc<Data>) {
             shown_root: None,
             totals: None,
             edits: 0,
+            graph: graph_view::GraphState { colour, ..graph_view::GraphState::default() },
         });
         s.fade_next = true;
     });
+    graph_ui::clear_picture(ui);
     sync_rows(ui);
     relayout(ui);
     count_types(ui, data);
@@ -1565,6 +1597,7 @@ fn clear(ui: &MainWindow) {
     let tip = forget_scan(|n| show_hover(ui, n));
     ui.set_rows(ModelRc::default());
     ui.set_treemap(Image::default());
+    graph_ui::clear_picture(ui);
     ui.set_crumbs(ModelRc::default());
     ui.set_labels(ModelRc::default());
     ui.set_file_labels(ModelRc::default());
@@ -1737,6 +1770,8 @@ fn toggle_row(ui: &MainWindow, i: i32) {
 /// Shows `folder` in the treemap. Lays it out again only if it is not the shown folder.
 fn show_folder(ui: &MainWindow, folder: NodeId) {
     if with_loaded(|l| std::mem::replace(&mut l.view_root, folder) != folder) == Some(true) {
+        // A new view folder for the graph too: nothing expanded, no scroll.
+        with_loaded(|l| l.graph.reroot());
         drop_hover(ui);
         move_to_folder(ui, folder);
         relayout(ui);
@@ -1749,6 +1784,11 @@ fn show_folder(ui: &MainWindow, folder: NodeId) {
 fn move_to_folder(ui: &MainWindow, folder: NodeId) {
     let way = with_loaded(|l| tree_view::zoom_way(&l.data.tree, l.shown_root, &l.rects, folder));
     SESSION.with_borrow_mut(|s| s.out_from = None);
+    // The treemap is hidden behind the graph: its rects are stale, and no treemap layout lands to
+    // end a zoom in or to play a zoom out.
+    if SESSION.with_borrow(|s| graph_view::shown_view(s.scan.state(), s.loaded.is_some(), s.settings.view)) == View::Graph {
+        return stop_move(ui);
+    }
     let (w, h) = map_px(ui);
     match way {
         Some(tree_view::ZoomWay::In((x, y, rw, rh))) if motion_on() => {
@@ -2200,6 +2240,7 @@ fn main() {
         }
     });
     wire_tree_and_treemap(&ui);
+    graph_ui::wire(&ui);
     delete_ui::wire(&ui, delete_ui::Deps::real());
 
     ui.show().expect("show window");
@@ -2298,9 +2339,9 @@ mod tests {
     /// (x, y, width, height) in logical pixels.
     fn labels_of_one_frame(w: f64, h: f64, scale: f64) -> Vec<(f32, f32, f32, f32)> {
         let entries = vec![
-            RawEntry { id: 0, parent: 0, name: "root".into(), size: 0, allocated: 0, is_dir: true },
-            RawEntry { id: 1, parent: 0, name: "f".into(), size: 0, allocated: 0, is_dir: true },
-            RawEntry { id: 2, parent: 1, name: "g".into(), size: 10, allocated: 10, is_dir: false },
+            RawEntry { id: 0, parent: 0, name: "root".into(), size: 0, allocated: 0, is_dir: true, modified: scan::time::UNKNOWN },
+            RawEntry { id: 1, parent: 0, name: "f".into(), size: 0, allocated: 0, is_dir: true, modified: scan::time::UNKNOWN },
+            RawEntry { id: 2, parent: 1, name: "g".into(), size: 10, allocated: 10, is_dir: false, modified: scan::time::UNKNOWN },
         ];
         let tree = rollup(0, entries).unwrap().tree;
         let f = tree.children(tree.root()).next().unwrap();
@@ -2323,8 +2364,8 @@ mod tests {
     /// Under the root: `folders` empty folders "d0", "d1", …, then files "clip0.mp4", "clip1.mp4", …
     /// of the sizes in `files`. Returns the tree, the folders and the files, in that order.
     fn flat(folders: usize, files: &[u64]) -> (Tree, Vec<NodeId>, Vec<NodeId>) {
-        let mut e = vec![RawEntry { id: 0, parent: 0, name: "root".into(), size: 0, allocated: 0, is_dir: true }];
-        e.extend((0..folders).map(|i| RawEntry { id: i as u64 + 1, parent: 0, name: format!("d{i}"), size: 0, allocated: 0, is_dir: true }));
+        let mut e = vec![RawEntry { id: 0, parent: 0, name: "root".into(), size: 0, allocated: 0, is_dir: true, modified: scan::time::UNKNOWN }];
+        e.extend((0..folders).map(|i| RawEntry { id: i as u64 + 1, parent: 0, name: format!("d{i}"), size: 0, allocated: 0, is_dir: true, modified: scan::time::UNKNOWN }));
         e.extend(files.iter().enumerate().map(|(i, &s)| RawEntry {
             id: (folders + i) as u64 + 1,
             parent: 0,
@@ -2332,6 +2373,7 @@ mod tests {
             size: s,
             allocated: s,
             is_dir: false,
+            modified: scan::time::UNKNOWN,
         }));
         let tree = rollup(0, e).unwrap().tree;
         let by_name = |n: String| tree.children(tree.root()).find(|&c| tree.name(c) == n).unwrap();
@@ -2455,7 +2497,7 @@ mod tests {
     // ---- names with hidden characters reach the window as placeholders ----
     /// root(0){ folder "d\u{202E}x"(1){ file "g"(3) }, file "invoice\u{202E}fdp.exe"(2) }
     fn spoofed() -> (Tree, NodeId, NodeId) {
-        let e = |id: u64, parent: u64, name: &str, is_dir: bool| RawEntry { id, parent, name: name.into(), size: 10, allocated: 10, is_dir };
+        let e = |id: u64, parent: u64, name: &str, is_dir: bool| RawEntry { id, parent, name: name.into(), size: 10, allocated: 10, is_dir, modified: scan::time::UNKNOWN };
         let entries = vec![e(0, 0, "root", true), e(1, 0, "d\u{202E}x", true), e(2, 0, "invoice\u{202E}fdp.exe", false), e(3, 1, "g", false)];
         let tree = rollup(0, entries).unwrap().tree;
         let find = |n: &str| tree.children(tree.root()).find(|&c| tree.name(c) == n).unwrap();
@@ -2833,8 +2875,8 @@ mod tests {
 
     fn data() -> Arc<Data> {
         let entries = vec![
-            RawEntry { id: 0, parent: 0, name: "root".into(), size: 0, allocated: 0, is_dir: true },
-            RawEntry { id: 1, parent: 0, name: "a.txt".into(), size: 10, allocated: 10, is_dir: false },
+            RawEntry { id: 0, parent: 0, name: "root".into(), size: 0, allocated: 0, is_dir: true, modified: scan::time::UNKNOWN },
+            RawEntry { id: 1, parent: 0, name: "a.txt".into(), size: 10, allocated: 10, is_dir: false, modified: scan::time::UNKNOWN },
         ];
         let tree = rollup(0, entries).unwrap().tree;
         Arc::new(Data { counts: crate::tree_view::file_counts(&tree), tree })
@@ -2859,6 +2901,7 @@ mod tests {
             shown_root: None,
             totals: None,
             edits: 0,
+            graph: Default::default(),
         }
     }
 
@@ -2957,7 +3000,7 @@ mod tests {
     // ---- footer totals after a removal ----
     /// root(0){ docs(1){ a.txt(4)=100, b.pdf(5)=50 }, c.txt(2)=10, d.exe(3)=30 }
     fn typed() -> Arc<Data> {
-        let e = |id: u64, parent: u64, name: &str, size: u64, is_dir: bool| RawEntry { id, parent, name: name.into(), size, allocated: size, is_dir };
+        let e = |id: u64, parent: u64, name: &str, size: u64, is_dir: bool| RawEntry { id, parent, name: name.into(), size, allocated: size, is_dir, modified: scan::time::UNKNOWN };
         let entries = vec![
             e(0, 0, "root", 0, true),
             e(1, 0, "docs", 0, true),
@@ -3090,7 +3133,7 @@ mod tests {
         };
         let n = 1 + next(200);
         let mut dirs = vec![0u64];
-        let mut entries = vec![RawEntry { id: 0, parent: 0, name: "root".into(), size: 0, allocated: 0, is_dir: true }];
+        let mut entries = vec![RawEntry { id: 0, parent: 0, name: "root".into(), size: 0, allocated: 0, is_dir: true, modified: scan::time::UNKNOWN }];
         for id in 1..n {
             let parent = dirs[next(dirs.len() as u64) as usize];
             let is_dir = next(3) == 0;
@@ -3099,7 +3142,7 @@ mod tests {
             if is_dir {
                 dirs.push(id);
             }
-            entries.push(RawEntry { id, parent, name, size, allocated: size, is_dir });
+            entries.push(RawEntry { id, parent, name, size, allocated: size, is_dir, modified: scan::time::UNKNOWN });
         }
         let tree = rollup(0, entries).unwrap().tree;
         Arc::new(Data { counts: crate::tree_view::file_counts(&tree), tree })

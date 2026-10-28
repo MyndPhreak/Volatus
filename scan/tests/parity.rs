@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::ntfs::{ROOT, dir, file, volume};
+use common::ntfs::{ROOT, dir, dir_at, file_at, volume};
 use common::{TempDir, make_placeholder};
 use scan::mft::scan_device;
 use scan::{Method, ScanOptions, Tree, scan_with};
@@ -11,13 +11,15 @@ use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::channel;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Every node as (path, size, is_dir), sorted: equal listings mean equal totals at every level.
-fn listing(tree: &Tree) -> Vec<(PathBuf, u64, bool)> {
+/// Every node as (path, size, is_dir, modified), sorted: equal listings mean equal totals and
+/// times at every level.
+fn listing(tree: &Tree) -> Vec<(PathBuf, u64, bool, u32)> {
     let mut out = Vec::new();
     let mut stack = vec![tree.root()];
     while let Some(n) = stack.pop() {
-        out.push((tree.path(n), tree.node(n).size, tree.node(n).is_dir));
+        out.push((tree.path(n), tree.node(n).size, tree.node(n).is_dir, tree.node(n).modified));
         stack.extend(tree.children(n));
     }
     out.sort();
@@ -25,13 +27,26 @@ fn listing(tree: &Tree) -> Vec<(PathBuf, u64, bool)> {
 }
 
 fn sample_tree(t: &TempDir) {
-    t.file("a.bin", 100);
-    t.file("zero.bin", 0);
-    t.file("sub/b.bin", 2000);
-    t.file("sub/deep/c.bin", 30);
-    t.file("sub/deep/big.bin", 70_000);
-    t.file("unicode-\u{540d}\u{524d}.txt", 5);
+    // Distinct, fixed last-write times (2021 plus a different number of days per file), so a
+    // listing that drops or mixes up times cannot match.
+    let stamp = |path: PathBuf, days: u64| {
+        let when = UNIX_EPOCH + std::time::Duration::from_secs(1_609_459_200 + days * 86_400);
+        fs::File::options().write(true).open(path).unwrap().set_modified(when).unwrap();
+    };
+    stamp(t.file("a.bin", 100), 1);
+    stamp(t.file("zero.bin", 0), 2);
+    stamp(t.file("sub/b.bin", 2000), 3);
+    stamp(t.file("sub/deep/c.bin", 30), 4);
+    stamp(t.file("sub/deep/big.bin", 70_000), 5);
+    stamp(t.file("unicode-\u{540d}\u{524d}.txt", 5), 6);
     fs::create_dir(t.path().join("empty")).unwrap();
+}
+
+/// A `SystemTime` as a FILETIME (100 ns ticks since 1601-01-01).
+fn filetime(t: SystemTime) -> i64 {
+    const SECS_1601_TO_1970: u64 = 11_644_473_600;
+    let d = t.duration_since(UNIX_EPOCH).unwrap();
+    ((d.as_secs() + SECS_1601_TO_1970) * 10_000_000 + u64::from(d.subsec_nanos() / 100)) as i64
 }
 
 /// Encodes the real folder `path` as FILE records under `parent`, numbering from `next`.
@@ -44,10 +59,10 @@ fn encode(path: &Path, parent: u64, next: &mut u64, out: &mut Vec<(u64, Vec<u8>)
         let name = e.file_name().into_string().unwrap();
         let md = e.metadata().unwrap();
         if md.is_dir() {
-            out.push((id, dir(parent, &name)));
+            out.push((id, dir_at(parent, &name, filetime(md.modified().unwrap()))));
             encode(&e.path(), id, next, out);
         } else {
-            out.push((id, file(parent, &name, md.len())));
+            out.push((id, file_at(parent, &name, md.len(), filetime(md.modified().unwrap()))));
         }
     }
 }

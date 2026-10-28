@@ -6,6 +6,7 @@ Volatus shows what uses the space on a Windows drive. It scans a drive or a fold
 - **Clear.** Nested folder frames carry their names. File tiles are colored by file type.
 - **Context menu.** Right-click a file or folder for the Windows menu, with Explore Folder, Command Prompt Here, Copy Path and the Volatus Delete on top. The Delete of Windows is not in the menu.
 - **Delete.** Volatus deletes what it shows. **Delete** moves the item to the Recycle Bin. **Shift+Delete** deletes it permanently and fast. Volatus asks you to confirm each delete. See the [Delete section](docs/USAGE.md#delete) of the usage guide.
+- **Flow graph.** A second view shows the folders as bands that flow to the right. Open a folder in place to see where its data goes. See the [Graph section](docs/USAGE.md#graph) of the usage guide.
 - **Windows 11 look.** Mica backdrop, and light and dark themes that follow Windows by default.
 - **Your settings.** A gear opens a flyout to choose the theme, the size unit and which parts of the window show. See [docs/USAGE.md](docs/USAGE.md#settings).
 

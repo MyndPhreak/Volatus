@@ -479,7 +479,7 @@ mod tests {
     // ---- prepare ----
     /// `C:\scan`{ "d<RLO>x"(1){ g(3) }, "invoice<RLO>fdp.exe"(2) }: names that display_name would change.
     fn spoofed() -> (Tree, NodeId, NodeId, NodeId) {
-        let e = |id: u64, parent: u64, name: &str, is_dir: bool| RawEntry { id, parent, name: name.into(), size: 10, allocated: 10, is_dir };
+        let e = |id: u64, parent: u64, name: &str, is_dir: bool| RawEntry { id, parent, name: name.into(), size: 10, allocated: 10, is_dir, modified: scan::time::UNKNOWN };
         let entries = vec![e(0, 0, "C:\\scan", true), e(1, 0, "d\u{202E}x", true), e(2, 0, "invoice\u{202E}fdp.exe", false), e(3, 1, "g", false)];
         let tree = rollup(0, entries).unwrap().tree;
         let find = |n: &str| tree.children(tree.root()).find(|&c| tree.name(c) == n).unwrap();
@@ -620,10 +620,10 @@ mod tests {
     /// `prepare` of the last node of the chain `root`\`names` (folders, then a file), with a disk
     /// that matches the scan.
     fn prepare_chain(root: &str, names: &[&str]) -> Prepared {
-        let mut entries = vec![RawEntry { id: 0, parent: 0, name: root.into(), size: 0, allocated: 0, is_dir: true }];
+        let mut entries = vec![RawEntry { id: 0, parent: 0, name: root.into(), size: 0, allocated: 0, is_dir: true, modified: scan::time::UNKNOWN }];
         for (i, name) in names.iter().enumerate() {
             let id = i as u64 + 1;
-            entries.push(RawEntry { id, parent: id - 1, name: (*name).into(), size: 10, allocated: 10, is_dir: i + 1 < names.len() });
+            entries.push(RawEntry { id, parent: id - 1, name: (*name).into(), size: 10, allocated: 10, is_dir: i + 1 < names.len(), modified: scan::time::UNKNOWN });
         }
         let tree = rollup(0, entries).unwrap().tree;
         let n = find(&tree, names);

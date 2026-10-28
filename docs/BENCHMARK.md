@@ -296,6 +296,92 @@ that is open elsewhere (with share delete) go at once, so its folder can be remo
 
 Limits: one machine, one NVMe SSD, one tree shape, warm cache, not elevated, Defender on.
 
+## Scan with entry times
+
+Volatus now stores a 4-byte last-write time per entry (both scanners). The plan limits the MFT
+scan slowdown to 5 % and the memory growth to 8 bytes per node. **The 5 % MFT gate is NOT yet
+verified.** The MFT scan needs an elevated terminal, which an agent cannot use. The final
+`docs/bench-ab.ps1` was only checked with the PowerShell parser (no errors); no agent ran it to
+completion. The walker numbers below come from running the two `bench.exe` files directly, except
+the two registry passes, which ran the script's logic early in development.
+
+### Steps for the user (elevated MFT A/B)
+
+1. In a **normal** terminal, build the bench in a checkout of `origin/main` and in this branch:
+
+   ```powershell
+   cargo build -p scan --release --example bench
+   ```
+
+2. Open **PowerShell as Administrator** and run (same wording as `bench.ps1` above):
+
+   ```powershell
+   cd C:\Users\mynd\DEV\storagetool
+   powershell -ExecutionPolicy Bypass -File docs\bench-ab.ps1 -Main <main checkout> -Branch <this checkout> -Root C:\ -Method mft
+   ```
+
+   The script ([docs/bench-ab.ps1](bench-ab.ps1)) warms both builds, then alternates main and
+   branch for `-Rounds 3` (5 runs each), prints the median of open, read, parse, rollup and total
+   for each build with the branch difference, and exits with 1 when the branch `total` median is
+   more than 5 % over main. It refuses `-Method mft` when not elevated. `-Method walk` needs no
+   elevation. `-KeepCsvDir <folder>` keeps the raw CSVs.
+
+3. Elevated live parity test:
+
+   ```powershell
+   cargo test -p scan --test parity -j 1 -- --ignored
+   ```
+
+### Results
+
+Node size: `size_of::<Node>()` = 56 bytes, pinned by `node_size_stays_within_the_8_byte_budget`
+(`scan/tests/rollup.rs`, asserts at most 64).
+
+Walker, not elevated, 2026-10-26, `--method walk --runs 5`, 3 alternating rounds (main, branch),
+warm, main = `origin/main` 0b755ab, branch = a0720c9. Median of `total` over all 15 runs per build.
+
+| Date | Folder | Files | main median | branch median | Difference |
+|---|---|---|---|---|---|
+| 2026-10-26 | `.cargo\registry`, pass 1 | 51,128 | 123.0 ms | 120.3 ms | -2.21 % |
+| 2026-10-26 | `.cargo\registry`, pass 2 | 51,128 | 128.7 ms | 123.8 ms | -3.80 % |
+| 2026-10-26 | `C:\Program Files`, pass 1 | 880,731 (91,949 dirs, 12 skipped) | 2,148.8 ms | 1,931.0 ms | -10.14 % |
+| 2026-10-26 | `C:\Program Files`, pass 2 | 880,731 | 1,919.0 ms | 2,033.1 ms | +5.94 % |
+| 2026-10-26 | `C:\Program Files`, both passes pooled (30 runs per build) | 880,731 | 2,072.9 ms | 2,010.0 ms | -3.03 % |
+| | **owner: elevated MFT A/B** (`C:\`, `-Method mft`) | | | | |
+| | **owner: elevated live parity** (`cargo test -p scan --test parity -j 1 -- --ignored`) | | | | |
+
+Program Files per-round medians of `total` (ms), pass 1: main 2,547 / 1,918 / 2,068, branch
+1,931 / 2,063 / 1,831. Pass 2: main 1,893 / 1,919 / 2,136, branch 2,238 / 2,009 / 2,011.
+Single runs ranged from 1,295 to 3,628 ms. The spread between rounds (about 10 %) is larger than
+the differences, so the walker numbers show no measurable slowdown but do not prove that none
+exists. Pass 2 alone is 5.94 % over; the walker has no 5 % gate, and this is noise on a busy
+machine. The registry passes are short (about 0.12 s). The MFT path is not covered by any of
+these numbers.
+
+## Flow graph timing
+
+The graph is laid out and drawn on a worker thread. The budget is 100 ms for a layout and a picture.
+
+- With `--timing`, every graph that lands writes one line to stderr: `Graph <seq>: <ms> ms.` `<seq>` is the number of the layout. `<ms>` is whole milliseconds from the start of the job to the landing.
+- Release budget test (ignored by default):
+
+  ```powershell
+  cargo test -p flow --release --test budget -j 1 -- --ignored
+  ```
+
+Measured by the builder on a synthetic tree of 5,000,000 nodes, layout and render, release build, final code. The picture has the physical size. The limit is 100 ms for the median.
+
+| Picture | Scale | Median |
+|---|---|---|
+| 1920 x 1080 | 1 | 32.0 ms |
+| 3840 x 2160 | 2 | 47.0 ms |
+
+The real-drive numbers are **not yet measured**. The table has one empty row for them.
+
+| Date | Drive | Check | `Graph <seq>` lines | Result |
+|---|---|---|---|---|
+| | **owner: M8, elevated, whole `C:\`, ten open/close/switch rounds** | | | |
+
 ## Deviations
 
 - The overlapped `$MFT` read replaced the old read loop with no feature flag (user approved).

@@ -6,6 +6,7 @@ use common::ntfs::*;
 use common::reference::{Rng, assert_same_entries, entries_reference};
 use scan::mft::{DataSize, FileName, Malformed, Record, entries, parse_record, scan_device};
 use scan::rollup::rollup;
+use scan::time::{FILETIME_2000, UNKNOWN};
 use scan::{Method, ScanError, ScanStats, Tree};
 use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::path::Path;
@@ -28,6 +29,19 @@ fn scan_image(image: Vec<u8>, sub: &str) -> Result<(Tree, ScanStats), ScanError>
 fn child_size(tree: &Tree, name: &str) -> u64 {
     let n = tree.children(tree.root()).find(|&c| tree.name(c) == name).expect(name);
     tree.node(n).size
+}
+
+/// FILETIME of `secs` whole seconds after 2000-01-01 (the `time` encoding of `secs`).
+fn at(secs: i64) -> i64 {
+    FILETIME_2000 + secs * 10_000_000
+}
+
+/// `modified` of the node at `path` (names joined by `/`) below the root.
+fn modified_at(tree: &Tree, path: &str) -> u32 {
+    let n = path.split('/').fold(tree.root(), |n, want| {
+        tree.children(n).find(|&c| tree.name(c) == want).expect(want)
+    });
+    tree.node(n).modified
 }
 
 // ---- parse_record ----
@@ -160,6 +174,38 @@ fn parse_record_directory_flag_sets_is_dir() {
 }
 
 #[test]
+fn parse_record_standard_information_gives_last_write_time() {
+    let r = parsed(record(IN_USE, 0, &[standard_information(at(50)), file_name(ROOT, "t.txt", WIN32)]));
+
+    assert_eq!(r.modified, 50);
+}
+
+#[test]
+fn parse_record_without_standard_information_is_unknown_time() {
+    let r = parsed(file(ROOT, "t.txt", 10));
+
+    assert_eq!((r.modified, r.data.map(|d| d.size)), (UNKNOWN, Some(10)));
+}
+
+#[test]
+fn parse_record_short_standard_information_is_unknown_time_not_malformed() {
+    let short = resident_attr(0x10, "", &at(50).to_le_bytes()); // 8 bytes: no room for 0x08..0x10
+
+    let r = parsed(record(IN_USE, 0, &[short, file_name(ROOT, "t.txt", WIN32), resident_data(10)]));
+
+    assert_eq!((r.modified, r.data.map(|d| d.size)), (UNKNOWN, Some(10)));
+}
+
+#[test]
+fn parse_record_non_resident_standard_information_is_unknown_time_not_malformed() {
+    let si = nonresident_attr(0x10, "", 0, 0, 4096, 0x48, None, &runs(&[(1000, 1)]));
+
+    let r = parsed(record(IN_USE, 0, &[si, file_name(ROOT, "t.txt", WIN32), resident_data(10)]));
+
+    assert_eq!((r.modified, r.data.map(|d| d.size)), (UNKNOWN, Some(10)));
+}
+
+#[test]
 fn parse_record_extension_record_reports_base() {
     let r = parsed(record(IN_USE, 300, &[data(1, 4096)]));
 
@@ -209,11 +255,12 @@ fn parse_record_truncated_is_rejected_at_every_length() {
 
 #[test]
 fn parse_record_random_mutations_never_panic() {
-    let base = record(
+    let plain = record(
         IN_USE,
         0,
         &[file_name(ROOT, "fuzz.bin", WIN32), file_name(ROOT, "FUZZ~1.BIN", DOS), data(5000, 8192), reparse(TAG_CLOUD)],
     );
+    let with_si = file_at(ROOT, "fuzz-si.bin", 5000, at(50));
     let mut seed = 0x2545_F491_4F6C_DD1Du64;
     let mut next = || {
         seed ^= seed << 13;
@@ -223,14 +270,18 @@ fn parse_record_random_mutations_never_panic() {
     };
 
     let mut outcomes = [0u32; 3];
-    for _ in 0..20_000 {
-        let mut b = base.clone();
+    let mut timed = 0u32;
+    for k in 0..20_000 {
+        let mut b = if k % 2 == 0 { plain.clone() } else { with_si.clone() };
         for _ in 0..(next() % 8 + 1) {
             let at = (next() % RECORD as u64) as usize;
             b[at] = next() as u8;
         }
         let i = match parse_record(&mut b, FIRST_USER) {
-            Ok(Some(_)) => 0,
+            Ok(Some(r)) => {
+                timed += u32::from(r.modified != UNKNOWN);
+                0
+            }
             Ok(None) => 1,
             Err(Malformed) => 2,
         };
@@ -243,6 +294,7 @@ fn parse_record_random_mutations_never_panic() {
     }
 
     assert!(outcomes[0] > 0 && outcomes[2] > 0, "fuzz reached both paths: {outcomes:?}");
+    assert!(timed > 0, "fuzz parsed a $STANDARD_INFORMATION time");
 }
 
 // ---- entries ----
@@ -382,6 +434,7 @@ fn rec(number: u64, base: Option<u64>, names: &[(u64, &str)], data: Option<(u64,
         names: names.iter().map(|&(parent, name)| FileName { parent, name: name.into() }).collect(),
         data: data.map(|(size, allocated)| DataSize { size, allocated }),
         surrogate: false,
+        modified: UNKNOWN,
     }
 }
 
@@ -503,6 +556,38 @@ fn entries_surrogate_in_extension_of_directory_gives_zero_size_file() {
     assert_eq!((list[0].is_dir, list[0].size, list[0].allocated), (false, 0, 0));
 }
 
+#[test]
+fn entries_base_without_time_takes_extension_time() {
+    let mut ext = rec(900, Some(50), &[], None);
+    ext.modified = 77;
+
+    let (list, _) = entries(vec![rec(50, None, &[(6, "f")], None), ext]);
+
+    assert_eq!(list[0].modified, 77);
+}
+
+#[test]
+fn entries_base_time_wins_over_extension_time() {
+    let mut base = rec(50, None, &[(6, "f")], None);
+    base.modified = 12;
+    let mut ext = rec(900, Some(50), &[], None);
+    ext.modified = 77;
+
+    let (list, _) = entries(vec![ext, base]);
+
+    assert_eq!(list[0].modified, 12);
+}
+
+#[test]
+fn entries_parsed_records_carry_their_time() {
+    let mut f = file_at(ROOT, "t.txt", 10, at(50));
+    let r = parse_record(&mut f, 30).unwrap().unwrap();
+
+    let (list, _) = entries(vec![r]);
+
+    assert_eq!(list[0].modified, 50);
+}
+
 // ---- entries: parity with the 81181b2 oracle on seeded record sets ----
 
 /// A mix of bases (some nameless, some with several names, some with duplicate numbers) and
@@ -522,6 +607,9 @@ fn records(seed: u64, n: usize) -> Vec<Record> {
         }
         if rng.chance(70) {
             r.data = Some(DataSize { size: rng.below(1000) as u64, allocated: rng.below(1000) as u64 });
+        }
+        if rng.chance(60) {
+            r.modified = 1 + rng.below(1000) as u32;
         }
         if rng.chance(20) && !numbers.is_empty() {
             r.base = Some(match rng.below(10) {
@@ -608,6 +696,39 @@ fn scan_device_sub_path_roots_tree_at_folder() {
 
     let names: Vec<&str> = tree.children(tree.root()).map(|n| tree.name(n)).collect();
     assert_eq!((tree.name(tree.root()), tree.node(tree.root()).size, names), ("X:\\", 100, vec!["b.txt"]));
+}
+
+fn timed_volume() -> Vec<(u64, Vec<u8>)> {
+    vec![
+        (16, dir_at(ROOT, "data", at(9_000))), // a folder's own time is ignored
+        (17, file_at(16, "a.bin", 5000, at(300))),
+        (18, dir_at(16, "sub", at(9_000))),
+        (19, file_at(18, "b.txt", 100, at(200))),
+        (20, file_at(ROOT, "top.txt", 7, at(100))),
+        (21, file(16, "untimed.bin", 50)),
+        (22, dir_at(ROOT, "empty", at(9_000))),
+    ]
+}
+
+#[test]
+fn scan_device_files_keep_their_time_and_folders_roll_up() {
+    let (tree, stats) = scan_image(volume(&timed_volume()), "").unwrap();
+
+    let got: Vec<u32> = ["data/a.bin", "data/sub/b.txt", "top.txt", "data/untimed.bin", "data/sub", "data", "empty"]
+        .iter()
+        .map(|p| modified_at(&tree, p))
+        .collect();
+    assert_eq!(got, vec![300, 200, 100, UNKNOWN, 200, 300, UNKNOWN]);
+    assert_eq!((tree.node(tree.root()).modified, child_size(&tree, "data"), stats.skipped), (300, 5150, 0));
+}
+
+#[test]
+fn scan_device_sub_path_keeps_times() {
+    let (tree, _) = scan_image(volume(&timed_volume()), "data").unwrap();
+
+    let got: Vec<u32> =
+        ["a.bin", "sub/b.txt", "sub", "untimed.bin"].iter().map(|p| modified_at(&tree, p)).collect();
+    assert_eq!((got, tree.node(tree.root()).modified), (vec![300, 200, 200, UNKNOWN], 300));
 }
 
 #[test]

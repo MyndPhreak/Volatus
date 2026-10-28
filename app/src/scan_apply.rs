@@ -505,12 +505,12 @@ pub(crate) fn remove_from(l: &mut Loaded, node: NodeId) -> Result<Option<Detache
     let tree = &l.data.tree;
     let removable = (node.0 as usize) < l.data.counts.len() && node != tree.root() && in_subtree(tree, node, tree.root());
     let gone = if removable && l.totals.is_some() { treemap::filetype::type_totals(&l.data.tree, node) } else { Vec::new() };
-    let Loaded { data, model, view, selected, view_root, rects, shown_root, .. } = l;
+    let Loaded { data, model, view, selected, view_root, rects, shown_root, graph, .. } = l;
     // The model's weak link goes first, so `get_mut` can see the data is not shared.
     model.release();
     let result = match Arc::get_mut(data) {
         None => Err(Busy),
-        Some(d) => Ok(remove_node(d, node, view, selected, view_root, rects, shown_root)),
+        Some(d) => Ok(remove_node(d, node, view, selected, view_root, rects, shown_root, graph)),
     };
     model.attach(data);
     if let Ok(Some(_)) = result {
@@ -522,7 +522,10 @@ pub(crate) fn remove_from(l: &mut Loaded, node: NodeId) -> Result<Option<Detache
 }
 
 /// `remove_from` on data the caller owns alone. Every id is read BEFORE `Tree::detach`, which
-/// clears the links `selection_after` and `view_for_deleted` walk.
+/// clears the links `selection_after` and `view_for_deleted` walk. The graph loses every id inside
+/// the subtree, its shown graph (so nothing is hit-tested on the old tree until the next landing)
+/// and its file-type cache (`GraphState::after_detach`).
+#[expect(clippy::too_many_arguments, reason = "the disjoint fields of `Loaded` that a removal changes")]
 fn remove_node(
     d: &mut Data,
     node: NodeId,
@@ -531,6 +534,7 @@ fn remove_node(
     view_root: &mut NodeId,
     rects: &mut Vec<treemap::Rect>,
     shown_root: &mut Option<NodeId>,
+    graph: &mut crate::graph_view::GraphState,
 ) -> Option<Detached> {
     // The root, an id outside the tree, and a node already removed (or under a removed folder)
     // stay as they are; nothing below changes for them.
@@ -545,6 +549,7 @@ fn remove_node(
     view.expanded.retain(|&n| !inside(n));
     rects.retain(|r| !inside(r.node));
     *shown_root = shown_root.filter(|&n| !inside(n));
+    graph.after_detach(inside);
     let detached = d.tree.detach(node)?;
     tree_view::counts_after_detach(&mut d.counts, &d.tree, Some(parent), &detached);
     *selected = next_selected;
@@ -571,6 +576,7 @@ mod tests {
             size,
             allocated: size,
             is_dir,
+            modified: scan::time::UNKNOWN,
         };
         let entries = vec![
             e(0, 0, "root", 0, true),
@@ -599,7 +605,7 @@ mod tests {
     fn loaded(data: Arc<Data>) -> Loaded {
         let root = data.tree.root();
         let model = Rc::new(RowModel::new(data.clone()));
-        Loaded { data, serial: crate::next_serial(), model, view: ViewState::new(root), selected: None, view_root: root, rects: Vec::new(), shown_root: None, totals: None, edits: 0 }
+        Loaded { data, serial: crate::next_serial(), model, view: ViewState::new(root), selected: None, view_root: root, rects: Vec::new(), shown_root: None, totals: None, edits: 0, graph: Default::default() }
     }
 
     fn rect(node: NodeId) -> Rect {
@@ -738,6 +744,93 @@ mod tests {
         assert_eq!(remove_from(&mut l, a), Ok(None));
         assert_eq!(l.data.tree.node(root).size, 10);
         assert!(l.model.data.borrow().upgrade().is_some());
+    }
+
+    // ---- the graph state after a removal (TP4.4) ----
+
+    use std::collections::HashSet;
+
+    /// A graph state as after a few layouts: these folders expanded and these "other" bands open,
+    /// a shown graph, a scroll and a file-type cache.
+    fn graph_state(l: &mut Loaded, expanded: &[NodeId], open_other: &[NodeId]) {
+        l.graph.expanded.extend(expanded);
+        l.graph.open_other.extend(open_other);
+        l.graph.first_column = 1;
+        l.graph.shown = Some(flow::Graph::default());
+        l.graph.types.insert(flow::Part::Files(l.data.tree.root()), Some(treemap::filetype::Category::Video));
+    }
+
+    #[test]
+    fn remove_from_expanded_folder_drops_it_and_its_descendants_from_the_graph_state() {
+        let d = data();
+        let (root, a, a2, c) = (d.tree.root(), find(&d.tree, "a"), find(&d.tree, "a2"), find(&d.tree, "c"));
+        let mut l = loaded(d);
+        graph_state(&mut l, &[a, a2, c], &[root, a, a2]);
+
+        assert!(matches!(remove_from(&mut l, a), Ok(Some(_))));
+
+        assert_eq!(l.graph.expanded, HashSet::from([c]));
+        assert_eq!(l.graph.open_other, HashSet::from([root]));
+        // The shown graph names removed folders, and the cache counts the old tree.
+        assert!(l.graph.shown.is_none(), "no graph of the old tree is hit-tested");
+        assert!(l.graph.types.is_empty());
+    }
+
+    #[test]
+    fn remove_from_an_unrelated_folder_keeps_the_expanded_set() {
+        let d = data();
+        let (root, a, a2, c) = (d.tree.root(), find(&d.tree, "a"), find(&d.tree, "a2"), find(&d.tree, "c"));
+        let mut l = loaded(d);
+        graph_state(&mut l, &[a, a2], &[root, a]);
+
+        assert!(matches!(remove_from(&mut l, c), Ok(Some(_))));
+
+        assert_eq!(l.graph.expanded, HashSet::from([a, a2]));
+        assert_eq!(l.graph.open_other, HashSet::from([root, a]));
+        assert_eq!(l.graph.first_column, 1);
+        // After any applied removal: no shown graph, no file-type cache.
+        assert!(l.graph.shown.is_none());
+        assert!(l.graph.types.is_empty());
+    }
+
+    #[test]
+    fn remove_from_shared_data_keeps_the_graph_state() {
+        let d = data();
+        let a = find(&d.tree, "a");
+        let mut l = loaded(d.clone());
+        graph_state(&mut l, &[a], &[a]);
+
+        assert_eq!(remove_from(&mut l, a), Err(Busy));
+
+        assert_eq!((l.graph.expanded.len(), l.graph.open_other.len(), l.graph.types.len()), (1, 1, 1));
+        assert!(l.graph.shown.is_some());
+    }
+
+    #[test]
+    fn graph_and_type_results_begun_before_an_applied_removal_are_dropped() {
+        let g = running();
+        let worker = SESSION.with_borrow(|s| s.loaded.as_ref().unwrap().data.clone());
+        assert!(finished(g, true, removed()));
+        SESSION.with_borrow_mut(|s| s.settings.view = crate::settings::View::Graph);
+        let job = SESSION.with_borrow_mut(crate::begin_layout).unwrap();
+        assert_eq!(job.view, crate::settings::View::Graph);
+        let (generation, seq) = (job.generation, job.seq);
+        let edits = SESSION.with_borrow(|s| s.loaded.as_ref().unwrap().edits);
+        // The graph worker let go of its clone; the type worker (`worker`) still holds one.
+        drop(job);
+        assert_eq!(SESSION.with_borrow_mut(|s| step_pending(s, false)), PendingStep::Busy);
+        drop(worker);
+
+        assert_eq!(SESSION.with_borrow_mut(|s| step_pending(s, false)), PendingStep::Applied);
+
+        assert!(!SESSION.with_borrow(|s| crate::is_current(s, generation, seq)), "the graph is of the old tree");
+        let (data, root) = SESSION.with_borrow(|s| {
+            let l = s.loaded.as_ref().unwrap();
+            (l.data.clone(), l.data.tree.root())
+        });
+        let found = vec![(flow::Part::Folder(root), Some(treemap::filetype::Category::Video))];
+        assert_eq!(crate::graph_ui::store_types(generation, &data, edits, found), crate::Stored::Recount);
+        assert!(SESSION.with_borrow(|s| s.loaded.as_ref().unwrap().graph.types.is_empty()));
     }
 
     #[test]
@@ -1045,6 +1138,24 @@ mod tests {
         assert_eq!(SESSION.with_borrow(|s| s.layout_seq), seq + 1);
         assert_eq!(done_action(), Some(TreeAction::Detached));
         assert_eq!(SESSION.with_borrow_mut(|s| step_pending(s, false)), PendingStep::Idle);
+    }
+
+    #[test]
+    fn is_current_layout_begun_before_an_applied_removal_is_dropped() {
+        let g = running();
+        let worker = SESSION.with_borrow(|s| s.loaded.as_ref().unwrap().data.clone());
+        assert!(finished(g, true, removed()));
+        let job = SESSION.with_borrow_mut(crate::begin_layout).unwrap();
+        let (generation, seq) = (job.generation, job.seq);
+        assert!(SESSION.with_borrow(|s| crate::is_current(s, generation, seq)));
+        // The layout worker let go of its clone, as every worker does before it lands.
+        drop(job);
+        drop(worker);
+
+        assert_eq!(SESSION.with_borrow_mut(|s| step_pending(s, false)), PendingStep::Applied);
+
+        // A layout (treemap or graph) of the tree before the removal never lands.
+        assert!(!SESSION.with_borrow(|s| crate::is_current(s, generation, seq)));
     }
 
     #[test]

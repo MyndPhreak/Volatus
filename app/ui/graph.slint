@@ -1,0 +1,420 @@
+import { Palette } from "std-widgets.slint";
+import { Glass } from "theme.slint";
+import { Hover, Keys, TipBox } from "treemap.slint";
+
+/// The label of one band, in logical pixels of the layout: the band's box, the folder name and
+/// its size. Text is formatted by the host.
+export struct GraphLabel {
+    x: length,
+    y: length,
+    width: length,
+    height: length,
+    name: string,
+    size: string,
+}
+
+/// The expand or collapse button of one folder band, in logical pixels of the layout: a square of
+/// `size` at (x, y). `band` is the band's index in the host's graph.
+export struct GraphExpander {
+    x: length,
+    y: length,
+    size: length,
+    expanded: bool,
+    name: string,
+    band: int,
+}
+
+/// One entry of the colour legend: its text and its colour, from the host.
+export struct LegendEntry {
+    text: string,
+    color: color,
+}
+
+/// One button of a group of two or more, such as "Treemap | Graph". The chosen one is filled.
+component Segment inherits Rectangle {
+    in property <string> text;
+    in property <bool> chosen;
+    in property <bool> enabled: true;
+    callback clicked();
+    min-width: label.preferred-width + 20px;
+    height: 28px;
+    border-radius: 4px;
+    // Disabled, the chosen one keeps a gray fill, so the view that shows is still marked.
+    background: root.chosen ? (root.enabled ? Palette.accent-background : Glass.track) : (touch.has-hover && root.enabled ? Glass.fill-hover : transparent);
+    border-width: focus.has-focus ? 2px : 0px;
+    border-color: root.chosen ? Palette.accent-foreground : Palette.accent-background;
+    focus := FocusScope {
+        enabled: root.enabled;
+        accessible-role: button;
+        accessible-label: root.text;
+        accessible-enabled: root.enabled;
+        accessible-checkable: true;
+        accessible-checked: root.chosen;
+        accessible-action-default => {
+            if (root.enabled) {
+                root.clicked();
+            }
+        }
+        key-pressed(event) => {
+            if (event.text == Key.Return || event.text == " ") {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+        label := Text {
+            text: root.text;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            color: !root.enabled ? Glass.dim : (root.chosen ? Palette.accent-foreground : Palette.foreground);
+            accessible-role: none;
+        }
+        touch := TouchArea {
+            enabled: root.enabled;
+            mouse-cursor: pointer;
+            clicked => {
+                focus.focus();
+                root.clicked();
+            }
+        }
+    }
+}
+
+/// A group of segments in a glass frame. The index of the chosen one is `chosen`.
+component Segments inherits Rectangle {
+    in property <[string]> names;
+    in property <int> chosen;
+    in property <bool> enabled: true;
+    callback picked(int);
+    height: 32px;
+    border-radius: 6px;
+    background: Glass.fill;
+    border-width: 1px;
+    border-color: Glass.border;
+    HorizontalLayout {
+        padding: 2px;
+        spacing: 2px;
+        for name[i] in root.names : Segment {
+            text: name;
+            chosen: i == root.chosen;
+            enabled: root.enabled;
+            clicked => { root.picked(i); }
+        }
+    }
+}
+
+/// The view switch of the top bar: "Treemap | Graph".
+export component ViewSwitch inherits Segments {
+    /// The graph shows.
+    in property <bool> graph;
+    /// The index of the chosen view: 0 treemap, 1 graph.
+    callback chosen-view(int);
+    names: ["Treemap", "Graph"];
+    chosen: root.graph ? 1 : 0;
+    picked(i) => { root.chosen-view(i); }
+}
+
+/// The bar of the graph under the crumbs: the colour toggle and, for the age colours, the legend.
+/// For the file type colours the footer chips are the legend.
+/// Its width never pushes on the window layout (as the crumbs): what does not fit is cut.
+export component GraphBar inherits Rectangle {
+    /// The chosen colours: 0 age, 1 file type.
+    in property <int> colour;
+    /// The legend of the age colours, from the host.
+    in property <[LegendEntry]> legend;
+    in property <bool> enabled: true;
+    callback colour-chosen(int);
+    height: 32px;
+    min-width: 0px;
+    clip: true;
+    HorizontalLayout {
+        spacing: 8px;
+        alignment: start;
+        Text {
+            text: "Color:";
+            vertical-alignment: center;
+            color: Glass.dim;
+            accessible-role: text;
+        }
+        Segments {
+            names: ["Age", "File type"];
+            chosen: root.colour;
+            enabled: root.enabled;
+            picked(i) => { root.colour-chosen(i); }
+        }
+        // Two rows of two, in small text, so the four entries fit beside the toggle in the bar.
+        if root.colour == 0 : GridLayout {
+            padding-left: 8px;
+            spacing-horizontal: 12px;
+            spacing-vertical: 0px;
+            for entry[i] in root.legend : HorizontalLayout {
+                row: mod(i, 2);
+                col: floor(i / 2);
+                spacing: 4px;
+                VerticalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 8px;
+                        height: 8px;
+                        border-radius: 2px;
+                        background: entry.color;
+                    }
+                }
+                Text {
+                    text: entry.text;
+                    font-size: 11px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    color: Palette.foreground.transparentize(20%);
+                    accessible-role: text;
+                    accessible-label: entry.text;
+                }
+            }
+        }
+    }
+}
+
+/// The folder graph: the picture (drawn by the host on a worker) with the layers above it: the
+/// band labels, the expanders, the text over the graph, the selection outline, the hover, the
+/// tooltip and the focus ring.
+export component GraphView inherits Rectangle {
+    /// The picture, in physical pixels, stretched over the whole view.
+    in property <image> source;
+    /// The graph size the picture, labels and expanders were made for, in logical pixels. After a
+    /// resize the picture is stretched until the new layout lands; the boxes go with it.
+    in property <length> layout-width;
+    in property <length> layout-height;
+    in property <[GraphLabel]> labels;
+    in property <[GraphExpander]> expanders;
+    /// Text over the graph when it shows nothing, or "".
+    in property <string> note;
+    /// What a screen reader says for the graph.
+    in property <string> value;
+    /// The selection outline, in logical pixels of the layout.
+    in property <bool> has-selection;
+    in property <length> selection-x;
+    in property <length> selection-y;
+    in property <length> selection-width;
+    in property <length> selection-height;
+    /// The band under the pointer and its tooltip, in logical pixels of the layout.
+    in property <Hover> hover;
+    in property <bool> tip-visible;
+    in property <length> tip-x;
+    in property <length> tip-y;
+    /// False while the delete dialog shows: the graph takes no focus and opens no menu.
+    in property <bool> interactive: true;
+    /// Each new value gives the graph the keyboard focus (the window's `focus-map` while the graph
+    /// shows: the graph is made only then, so the window cannot call `focus-graph`).
+    in property <int> focus-ticket;
+    changed focus-ticket => { graph-focus.focus(); }
+
+    /// The view changed size, in logical pixels.
+    callback resized(float, float);
+    /// A click, a double-click at a point in logical pixels.
+    callback clicked(float, float);
+    callback double-clicked(float, float);
+    /// A right-click at a graph point and at the same point in the window, in logical pixels.
+    callback menu(float, float, float, float);
+    /// The Menu key or Shift+F10: the box of the selection in the window (the whole graph when it is
+    /// not drawn), in logical pixels.
+    callback menu-key(float, float, float, float);
+    /// Key press: "up", "down", "left", "right", "enter", "backspace", "delete" or "shift-delete".
+    callback key(string);
+    /// The expander of band `i` was used.
+    callback expand(int);
+    /// The pointer moved over the graph, with no button down, to a point in logical pixels.
+    callback hovered(float, float);
+    /// The pointer left the graph.
+    callback left();
+    /// The wheel moved the columns: -1 to the left, 1 to the right.
+    callback scroll(int);
+    pure callback tip-position(float, float, float, float) -> float;
+    pure callback break-points(string) -> string;
+
+    /// From the layout's logical pixels to the view's, on each axis.
+    private property <float> fx: root.layout-width > 0 ? root.width / root.layout-width : 1;
+    private property <float> fy: root.layout-height > 0 ? root.height / root.layout-height : 1;
+
+    /// Gives the graph the keyboard focus.
+    public function focus-graph() {
+        graph-focus.focus();
+    }
+
+    // The image's pixel size must not feed back into the layout (as the treemap).
+    preferred-width: 0px;
+    preferred-height: 0px;
+    changed width => { root.resized(self.width / 1px, self.height / 1px); }
+    changed height => { root.resized(self.width / 1px, self.height / 1px); }
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        clip: true;
+        Image {
+            width: 100%;
+            height: 100%;
+            source: root.source;
+            image-fit: fill;
+            accessible-role: none;
+        }
+        // The name and size right of the band and its expander, over the flows, as on the
+        // treemap: the name keeps its full width when it fits and is cut with "…" when it does
+        // not; the size takes what is left.
+        for l in root.labels : Rectangle {
+            x: (l.x + l.width) * root.fx + 20px;
+            y: l.y * root.fy;
+            width: max(0px, min(180px, root.width - self.x));
+            height: l.height * root.fy;
+            band-name := Text {
+                x: 0px;
+                width: min(self.preferred-width, parent.width);
+                height: parent.height;
+                text: l.name;
+                font-size: 11px;
+                overflow: elide;
+                vertical-alignment: center;
+                color: Palette.foreground;
+                accessible-role: none;
+            }
+            Text {
+                x: band-name.width + 4px;
+                width: max(0px, parent.width - self.x);
+                height: parent.height;
+                text: "(" + l.size + ")";
+                font-size: 11px;
+                overflow: elide;
+                vertical-alignment: center;
+                color: Palette.foreground.transparentize(40%);
+                accessible-role: none;
+            }
+        }
+        if root.note != "" : Text {
+            text: root.note;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            wrap: word-wrap;
+            color: Palette.foreground;
+            accessible-role: text;
+        }
+    }
+    // The selection outline, above the bands.
+    if root.has-selection : Rectangle {
+        x: root.selection-x * root.fx;
+        y: root.selection-y * root.fy;
+        width: root.selection-width * root.fx;
+        height: root.selection-height * root.fy;
+        border-width: 2px;
+        border-color: Palette.foreground;
+        animate x, y, width, height { duration: 120ms; easing: ease-out; }
+    }
+    // The hover: a light highlight of the band.
+    if root.hover.visible : Rectangle {
+        x: root.hover.x * root.fx;
+        y: root.hover.y * root.fy;
+        width: root.hover.width * root.fx;
+        height: root.hover.height * root.fy;
+        background: Palette.foreground.transparentize(93%);
+        border-width: 1px;
+        border-color: Palette.foreground.transparentize(40%);
+    }
+    graph-focus := FocusScope {
+        enabled: root.interactive;
+        accessible-role: image;
+        accessible-label: "Folder graph";
+        accessible-value: root.value;
+        accessible-description: "Press an arrow key to move the selection. Press Right to expand a folder and Left to collapse it. Press Enter to open the folder. Press the Menu key for the context menu. Press Delete to delete the selected folder.";
+        key-pressed(event) => {
+            if (Keys.menu(event)) {
+                if (root.has-selection) {
+                    root.menu-key((root.absolute-position.x + root.selection-x * root.fx) / 1px, (root.absolute-position.y + root.selection-y * root.fy) / 1px, root.selection-width * root.fx / 1px, root.selection-height * root.fy / 1px);
+                } else {
+                    root.menu-key(root.absolute-position.x / 1px, root.absolute-position.y / 1px, root.width / 1px, root.height / 1px);
+                }
+                return accept;
+            }
+            if (Keys.event-name(event) == "" || event.text == " ") { return reject; }
+            root.key(Keys.event-name(event));
+            return accept;
+        }
+        TouchArea {
+            mouse-cursor: pointer;
+            pointer-event(event) => {
+                if (event.kind == PointerEventKind.move) {
+                    root.hovered(self.mouse-x / 1px, self.mouse-y / 1px);
+                } else if (event.kind == PointerEventKind.up && event.button == PointerEventButton.right && root.interactive) {
+                    graph-focus.focus();
+                    root.menu(self.mouse-x / 1px, self.mouse-y / 1px, (self.absolute-position.x + self.mouse-x) / 1px, (self.absolute-position.y + self.mouse-y) / 1px);
+                }
+            }
+            // Sideways: the horizontal wheel, or the vertical wheel with Shift.
+            scroll-event(event) => {
+                if (event.delta-x != 0) {
+                    root.scroll(event.delta-x > 0 ? -1 : 1);
+                    return accept;
+                }
+                if (event.modifiers.shift && event.delta-y != 0) {
+                    root.scroll(event.delta-y > 0 ? -1 : 1);
+                    return accept;
+                }
+                return reject;
+            }
+            changed has-hover => {
+                if (!self.has-hover) {
+                    root.left();
+                }
+            }
+            clicked => {
+                graph-focus.focus();
+                root.clicked(self.mouse-x / 1px, self.mouse-y / 1px);
+            }
+            double-clicked => { root.double-clicked(self.mouse-x / 1px, self.mouse-y / 1px); }
+        }
+    }
+    // Above the graph's touch area, so a click on an expander does not select the band.
+    for e in root.expanders : Rectangle {
+        x: e.x * root.fx;
+        y: (e.y + e.size / 2) * root.fy - e.size / 2;
+        width: e.size;
+        height: e.size;
+        border-radius: self.width / 2;
+        background: expander-touch.has-hover ? Glass.fill-hover : Palette.background;
+        border-width: 1px;
+        border-color: Glass.border;
+        accessible-role: button;
+        accessible-label: (e.expanded ? "Collapse " : "Expand ") + e.name;
+        accessible-enabled: root.interactive;
+        accessible-action-default => {
+            if (root.interactive) {
+                root.expand(e.band);
+            }
+        }
+        Text {
+            text: e.expanded ? "−" : "+";
+            font-size: 12px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            accessible-role: none;
+        }
+        expander-touch := TouchArea {
+            enabled: root.interactive;
+            mouse-cursor: pointer;
+            clicked => {
+                graph-focus.focus();
+                root.expand(e.band);
+            }
+        }
+    }
+    if root.tip-visible && root.hover.visible : TipBox {
+        title: root.hover.title;
+        detail: root.hover.detail;
+        pointer-x: root.tip-x;
+        pointer-y: root.tip-y;
+        area-width: root.width;
+        area-height: root.height;
+        tip-position(pointer, size, extent, gap) => { return root.tip-position(pointer, size, extent, gap); }
+        break-points(path) => { return root.break-points(path); }
+    }
+    Rectangle {
+        border-width: graph-focus.has-focus ? 2px : 0px;
+        border-color: Palette.accent-background;
+    }
+}

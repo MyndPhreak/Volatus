@@ -5,9 +5,9 @@ use treemap::{Chrome, Rect, Theme, layout_framed, render_framed};
 
 /// Files `(name, size)` directly under a root folder.
 fn files(list: &[(&str, u64)]) -> Tree {
-    let mut entries = vec![RawEntry { id: 0, parent: 0, name: "root".into(), size: 0, allocated: 0, is_dir: true }];
+    let mut entries = vec![RawEntry { id: 0, parent: 0, name: "root".into(), size: 0, allocated: 0, is_dir: true, modified: scan::time::UNKNOWN }];
     for (i, &(name, size)) in list.iter().enumerate() {
-        entries.push(RawEntry { id: i as u64 + 1, parent: 0, name: name.into(), size, allocated: size, is_dir: false });
+        entries.push(RawEntry { id: i as u64 + 1, parent: 0, name: name.into(), size, allocated: size, is_dir: false, modified: scan::time::UNKNOWN });
     }
     rollup(0, entries).unwrap().tree
 }
@@ -279,6 +279,7 @@ fn with_dotted_folders() -> Tree {
         size,
         allocated: size,
         is_dir,
+        modified: scan::time::UNKNOWN,
     };
     let entries = vec![
         e(0, 0, "root", 0, true),
@@ -324,15 +325,15 @@ fn type_totals_folder_with_no_files_is_empty() {
 /// 6,000 folders x 1,000 files = 6,000,000 files over 2,000 extensions ("e0" to "e1999").
 fn six_million_files() -> Tree {
     let mut entries = Vec::with_capacity(6_006_001);
-    entries.push(RawEntry { id: 0, parent: 0, name: "root".into(), size: 0, allocated: 0, is_dir: true });
+    entries.push(RawEntry { id: 0, parent: 0, name: "root".into(), size: 0, allocated: 0, is_dir: true, modified: scan::time::UNKNOWN });
     let mut id = 1u64;
     for _ in 0..6_000 {
         let folder = id;
-        entries.push(RawEntry { id, parent: 0, name: format!("folder{id}"), size: 0, allocated: 0, is_dir: true });
+        entries.push(RawEntry { id, parent: 0, name: format!("folder{id}"), size: 0, allocated: 0, is_dir: true, modified: scan::time::UNKNOWN });
         id += 1;
         for _ in 0..1_000 {
             let name = format!("file{id}.E{}", id % 2_000);
-            entries.push(RawEntry { id, parent: folder, name, size: id % 4_096, allocated: 0, is_dir: false });
+            entries.push(RawEntry { id, parent: folder, name, size: id % 4_096, allocated: 0, is_dir: false, modified: scan::time::UNKNOWN });
             id += 1;
         }
     }

@@ -9,6 +9,7 @@
 //! same). A file with several hard links is one entry, under its first non-DOS name.
 
 use crate::rollup::{IdMap, RawEntry, Rolled, rollup};
+use crate::time::{UNKNOWN, from_filetime};
 use crate::{DEFAULT_CHUNK, Method, NodeId, Phases, Progress, ScanError, ScanStats, Tree};
 use rayon::prelude::*;
 use std::io::{self, Read, Seek, SeekFrom};
@@ -52,6 +53,8 @@ pub struct Record {
     pub data: Option<DataSize>,
     /// Holds a name-surrogate reparse point (junction, symlink): never followed.
     pub surrogate: bool,
+    /// `$STANDARD_INFORMATION` last write (`time` encoding); `UNKNOWN` when unreadable.
+    pub modified: u32,
 }
 
 /// Low 48 bits of a file reference are the record number; the high 16 are a sequence number.
@@ -61,6 +64,7 @@ const STRIDE: usize = 512;
 const IN_USE: u16 = 0x01;
 const IS_DIR: u16 = 0x02;
 const END: u32 = 0xFFFF_FFFF;
+const STANDARD_INFORMATION: u32 = 0x10;
 const FILE_NAME: u32 = 0x30;
 const DATA: u32 = 0x80;
 const REPARSE_POINT: u32 = 0xC0;
@@ -201,9 +205,17 @@ pub fn parse_record(buf: &mut [u8], number: u64) -> Result<Option<Record>, Malfo
         names: Vec::new(),
         data: None,
         surrogate: false,
+        modified: UNKNOWN,
     };
     for a in attributes(buf)? {
         match a.ty {
+            // Last write at value offset 0x08. A missing, non-resident or short value leaves the
+            // time unknown, never `Malformed`: the sizes stay exact when a time is unreadable.
+            STANDARD_INFORMATION if !a.non_resident() => {
+                if let Some(t) = a.value().and_then(|v| u64_at(v, 0x08)) {
+                    rec.modified = from_filetime(t as i64);
+                }
+            }
             FILE_NAME => rec.names.extend(file_name(&a).ok_or(Malformed)?),
             DATA if a.unnamed() => {
                 if let Some(d) = data_size(&a).ok_or(Malformed)? {
@@ -245,14 +257,18 @@ pub fn entries(mut records: Vec<Record>) -> (Vec<RawEntry>, u64) {
     for (base, list) in ext.values() {
         let Some(base) = *base else { continue };
         for &e in list {
-            let (names, data, surrogate) = {
+            let (names, data, surrogate, modified) = {
                 let e = &mut records[e];
-                (std::mem::take(&mut e.names), e.data, e.surrogate)
+                (std::mem::take(&mut e.names), e.data, e.surrogate, e.modified)
             };
             let b = &mut records[base];
             b.names.extend(names);
             b.data = b.data.or(data);
             b.surrogate |= surrogate;
+            // An extension's time only fills an unknown one: the base's own time wins.
+            if b.modified == UNKNOWN {
+                b.modified = modified;
+            }
         }
     }
     let mut skipped = 0;
@@ -269,7 +285,7 @@ pub fn entries(mut records: Vec<Record>) -> (Vec<RawEntry>, u64) {
         // A junction or directory symlink is a zero-size file entry, as in the walker.
         let is_dir = r.is_dir && !r.surrogate;
         let (size, allocated) = if is_dir { (0, 0) } else { (data.size, data.allocated) };
-        out.push(RawEntry { id: r.number, parent: first.parent, name: first.name, size, allocated, is_dir });
+        out.push(RawEntry { id: r.number, parent: first.parent, name: first.name, size, allocated, is_dir, modified: r.modified });
     }
     (out, skipped)
 }
@@ -561,6 +577,7 @@ fn subtree(tree: &Tree, node: NodeId, name: &str) -> Vec<RawEntry> {
                 size: nd.size,
                 allocated: nd.allocated,
                 is_dir: nd.is_dir,
+                modified: nd.modified,
             }
         })
         .collect()

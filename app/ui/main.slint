@@ -4,7 +4,9 @@ import { Glass, GlassPanel } from "theme.slint";
 import { DriveButton, StartScreen } from "start.slint";
 import { SettingsButton, SettingsFlyout } from "settings.slint";
 import { DeleteDialog, DeleteInfo, DeleteStep } from "delete.slint";
+import { GraphBar, GraphExpander, GraphLabel, GraphView, LegendEntry, ViewSwitch } from "graph.slint";
 export { Crumb, FileLabel, FrameLabel, Hover, DriveButton, LabelKind, Placed, ZoomFrame, ZoomMove, DeleteInfo, DeleteStep }
+export { GraphExpander, GraphLabel, LegendEntry }
 // The host writes `Palette.color-scheme` to apply the theme setting.
 export { Palette }
 
@@ -177,6 +179,44 @@ export component MainWindow inherits Window {
     /// The host is still counting the file types of the shown scan.
     in property <bool> types-counting;
 
+    // Folder graph
+    /// The graph shows in place of the treemap (the host's `graph_view::shown_view`).
+    in property <bool> graph-shown;
+    /// The view switch and the colour toggle work: a finished scan shows.
+    in property <bool> views-enabled;
+    /// The chosen colours of the graph: 0 age, 1 file type.
+    in property <int> colour-choice;
+    /// The legend of the age colours, in the colours of the current theme.
+    in property <[LegendEntry]> graph-legend;
+    /// The graph picture, in physical pixels, and the graph size it was made for, in logical pixels.
+    in property <image> graph-picture;
+    in property <length> graph-layout-width;
+    in property <length> graph-layout-height;
+    in property <[GraphLabel]> graph-labels;
+    in property <[GraphExpander]> graph-expanders;
+    /// Text over the graph when it shows nothing, or "".
+    in property <string> graph-note;
+    /// What a screen reader says for the graph.
+    in property <string> graph-value;
+    /// A view was chosen in the top bar: 0 treemap, 1 graph.
+    callback view-chosen(int);
+    /// Colours were chosen in the graph bar: 0 age, 1 file type.
+    callback colour-chosen(int);
+    /// The graph changed size, in logical pixels.
+    callback graph-resized(float, float);
+    /// The graph's input, as the treemap's: points in logical pixels of the graph, window points
+    /// and boxes in logical pixels of the window, key names as `map-key`, a band index, and the
+    /// columns to scroll (-1 left, 1 right).
+    callback graph-click(float, float);
+    callback graph-open(float, float);
+    callback graph-menu(float, float, float, float);
+    callback graph-menu-key(float, float, float, float);
+    callback graph-key(string);
+    callback graph-expand(int);
+    callback graph-hover(float, float);
+    callback graph-leave();
+    callback graph-scroll(int);
+
     // Elevation
     in property <bool> show-elevate;
     in property <string> elevate-note;
@@ -224,7 +264,7 @@ export component MainWindow inherits Window {
         if (self.modal) {
             root.settings-open = false;
         } else if (root.delete-from-map) {
-            map.focus-map();
+            root.focus-map();
         } else {
             tree-focus.focus();
         }
@@ -300,10 +340,16 @@ export component MainWindow inherits Window {
         map.start-zoom();
     }
 
-    /// Gives the map the keyboard focus.
+    /// Gives the map the keyboard focus: the graph while it shows, else the treemap.
     public function focus-map() {
-        map.focus-map();
+        if (root.graph-shown) {
+            root.graph-focus-ticket += 1;
+        } else {
+            map.focus-map();
+        }
     }
+    /// A new value gives the graph the keyboard focus (`GraphView.focus-ticket`).
+    private property <int> graph-focus-ticket;
 
     /// Scrolls the file tree so row `i` is inside the view.
     public function show-row(i: int) {
@@ -377,6 +423,11 @@ export component MainWindow inherits Window {
                             text: "Restart as administrator";
                             enabled: !root.scanning && !root.modal;
                             clicked => { root.restart-admin(); }
+                        }
+                        ViewSwitch {
+                            graph: root.graph-shown;
+                            enabled: root.views-enabled && !root.modal;
+                            chosen-view(i) => { root.view-chosen(i); }
                         }
                         if root.outdated : Text {
                             text: "Files changed after this scan.";
@@ -599,13 +650,21 @@ export component MainWindow inherits Window {
                             // map, which shows that folder.
                             open(i) => {
                                 root.crumb-open(i);
-                                map.focus-map();
+                                root.focus-map();
                             }
                             menu(i, x, y) => { root.crumb-menu(i, x, y); }
                             menu-key(i, x, y, w, h) => { root.crumb-menu-key(i, x, y, w, h); }
                         }
+                        if root.graph-shown : GraphBar {
+                            colour: root.colour-choice;
+                            legend: root.graph-legend;
+                            enabled: root.views-enabled && !root.modal;
+                            colour-chosen(i) => { root.colour-chosen(i); }
+                        }
                         map := TreemapView {
                             vertical-stretch: 1;
+                            // The graph takes its place; it stays in the layout, so its size goes on.
+                            visible: !root.graph-shown;
                             source: root.treemap;
                             note: root.map-note;
                             value: root.map-value;
@@ -647,6 +706,49 @@ export component MainWindow inherits Window {
                             interactive: !root.modal;
                             resized(w, h) => { root.treemap-resized(w, h); }
                         }
+                    }
+                    // The graph, over the treemap's place.
+                    if root.graph-shown : GraphView {
+                        x: map.x;
+                        y: map.y;
+                        width: map.width;
+                        height: map.height;
+                        source: root.graph-picture;
+                        layout-width: root.graph-layout-width;
+                        layout-height: root.graph-layout-height;
+                        // "Tile labels" hides the band labels too.
+                        labels: root.show-labels ? root.graph-labels : [];
+                        expanders: root.graph-expanders;
+                        note: root.graph-note;
+                        value: root.graph-value;
+                        // The outline, the hover and the tooltip of the treemap's place: the host
+                        // sets them for the view that shows.
+                        has-selection: root.has-selection;
+                        selection-x: root.selection-x;
+                        selection-y: root.selection-y;
+                        selection-width: root.selection-width;
+                        selection-height: root.selection-height;
+                        hover: root.hover;
+                        tip-visible: root.tip-visible;
+                        tip-x: root.tip-x;
+                        tip-y: root.tip-y;
+                        focus-ticket: root.graph-focus-ticket;
+                        interactive: !root.modal;
+                        tip-position(pointer, size, extent, gap) => { return root.tip-position(pointer, size, extent, gap); }
+                        break-points(path) => { return root.tip-break-points(path); }
+                        resized(w, h) => { root.graph-resized(w, h); }
+                        clicked(x, y) => { root.graph-click(x, y); }
+                        double-clicked(x, y) => { root.graph-open(x, y); }
+                        menu(x, y, wx, wy) => { root.graph-menu(x, y, wx, wy); }
+                        menu-key(x, y, w, h) => { root.graph-menu-key(x, y, w, h); }
+                        key(k) => {
+                            root.delete-from-map = true;
+                            root.graph-key(k);
+                        }
+                        expand(i) => { root.graph-expand(i); }
+                        hovered(x, y) => { root.graph-hover(x, y); }
+                        left => { root.graph-leave(); }
+                        scroll(n) => { root.graph-scroll(n); }
                     }
                 }
             }

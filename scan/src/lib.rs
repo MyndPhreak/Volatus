@@ -2,6 +2,7 @@
 
 pub mod mft;
 pub mod rollup;
+pub mod time;
 pub mod walk;
 
 use std::path::{Path, PathBuf};
@@ -29,6 +30,8 @@ pub struct Node {
     pub is_dir: bool,
     pub first_child: Option<NodeId>,
     pub next_sibling: Option<NodeId>,
+    /// Last write time (`time` encoding): a file's own, a folder's newest inside.
+    pub modified: u32,
 }
 
 /// What `Tree::detach` removed: the node's rolled-up sizes and the files and folders under it
@@ -80,7 +83,9 @@ impl Tree {
 
     /// Unlinks `n` from its parent and subtracts its sizes from every ancestor. `None`, and nothing
     /// changes, for the root, a node already detached, and a node under a detached one. The arena
-    /// slots stay in place and are not reused.
+    /// slots stay in place and are not reused. Ancestors keep their scanned `modified`: it may
+    /// still count the removed item, and only a rescan corrects it (recomputing needs a subtree
+    /// walk per ancestor).
     pub fn detach(&mut self, n: NodeId) -> Option<Detached> {
         // The root has no parent, and a detached node has its parent cleared below.
         let parent = self.node(n).parent?;
