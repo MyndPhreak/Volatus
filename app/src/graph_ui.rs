@@ -796,6 +796,128 @@ mod tests {
         assert!(SESSION.with_borrow(|s| s.loaded.as_ref().unwrap().graph.shown.is_none()));
     }
 
+    // ---- the treemap's motion state while the graph shows ----
+
+    fn child(name: &str) -> NodeId {
+        SESSION.with_borrow(|s| {
+            let tree = &s.loaded.as_ref().unwrap().data.tree;
+            tree.children(tree.root()).find(|&n| tree.name(n) == name).unwrap()
+        })
+    }
+
+    /// A treemap of `shown` as if it had landed at 400 x 300 before the graph showed: the rects a
+    /// zoom is computed against.
+    fn stale_treemap_of(shown: NodeId) {
+        SESSION.with_borrow_mut(|s| {
+            s.map_size = (400.0, 300.0);
+            let l = s.loaded.as_mut().unwrap();
+            l.rects = treemap::layout_framed(&l.data.tree, shown, 400, 300, treemap::Chrome::scaled(1.0));
+            l.shown_root = Some(shown);
+            l.view_root = shown;
+        });
+    }
+
+    /// No treemap move shows or waits, and no zoom out waits for the next treemap.
+    fn assert_no_treemap_motion(ui: &MainWindow, at: &str) {
+        let (moving, out_from) = SESSION.with_borrow(|s| (s.moving.map(|m| m.kind), s.out_from));
+        assert_eq!((moving, out_from, ui.get_zoom_shown()), (None, None, false), "{at}");
+    }
+
+    #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
+    fn show_folder_while_the_graph_shows_starts_no_treemap_zoom() {
+        let ui = window(View::Graph);
+        let root = SESSION.with_borrow(|s| s.loaded.as_ref().unwrap().data.tree.root());
+        stale_treemap_of(root);
+
+        crate::show_folder(&ui, child("a"));
+
+        assert_eq!(SESSION.with_borrow(|s| s.loaded.as_ref().unwrap().view_root), child("a"));
+        assert_no_treemap_motion(&ui, "into a child folder");
+    }
+
+    #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
+    fn crumb_up_while_the_graph_shows_leaves_no_zoom_out_waiting() {
+        let ui = window(View::Graph);
+        let root = SESSION.with_borrow(|s| s.loaded.as_ref().unwrap().data.tree.root());
+        stale_treemap_of(child("a"));
+
+        ui.invoke_crumb_open(root.0 as i32);
+
+        assert_eq!(SESSION.with_borrow(|s| s.loaded.as_ref().unwrap().view_root), root);
+        assert_no_treemap_motion(&ui, "up to the root");
+    }
+
+    #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
+    fn graph_chosen_stops_a_treemap_move_and_drops_a_waiting_zoom_out() {
+        let ui = window(View::Treemap);
+        crate::start_move(&ui, crate::motion::Kind::In, Image::default(), (0.0, 0.0, 400.0, 300.0), (0.0, 0.0, 800.0, 600.0), (1.0, 1.0));
+        let a = child("a");
+        SESSION.with_borrow_mut(|s| s.out_from = Some(a));
+
+        click(&ui, "Graph");
+
+        assert_eq!(chosen_view(), View::Graph);
+        assert_no_treemap_motion(&ui, "graph chosen");
+    }
+
+    #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
+    fn treemap_chosen_after_folder_changes_in_the_graph_shows_no_zoom() {
+        let ui = window(View::Graph);
+        let root = SESSION.with_borrow(|s| s.loaded.as_ref().unwrap().data.tree.root());
+        // The last treemap showed `a`; in the graph the view goes up to the root.
+        stale_treemap_of(child("a"));
+        ui.invoke_crumb_open(root.0 as i32);
+
+        click(&ui, "Treemap");
+
+        assert_eq!(chosen_view(), View::Treemap);
+        assert_no_treemap_motion(&ui, "treemap chosen");
+    }
+
+    #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
+    fn view_chosen_while_scanning_changes_nothing_in_rust() {
+        let ui = window(View::Treemap);
+        SESSION.with_borrow_mut(|s| {
+            let _ = s.scan.start().expect("no scan runs");
+        });
+
+        // Past the markup's guard: the Rust handler itself, and the callback.
+        view_chosen(&ui, 1);
+        ui.invoke_view_chosen(1);
+
+        assert_eq!(chosen_view(), View::Treemap);
+        assert!(!ui.get_graph_shown());
+    }
+
+    #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
+    fn graph_chosen_in_the_settings_shows_after_the_first_scan() {
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = MainWindow::new().unwrap();
+        crate::wire_tree_and_treemap(&ui);
+        wire(&ui);
+        // As read from settings.json at startup, before any scan.
+        SESSION.with_borrow_mut(|s| s.settings.view = View::Graph);
+        crate::show_state(&ui);
+        assert!(!ui.get_graph_shown(), "no scan: the graph does not show");
+        SESSION.with_borrow_mut(|s| {
+            let (generation, _) = s.scan.start().expect("no scan runs");
+            assert!(s.scan.apply(generation, Event::Finished(summary())));
+        });
+
+        // As `post_done`: install, then the state.
+        crate::install(&ui, data());
+        crate::show_state(&ui);
+
+        assert!(ui.get_graph_shown());
+        assert!(graph_shows(&ui));
+    }
+
     // ---- build: the worker's pure part ----
     #[test]
     fn build_labels_expanders_and_size_are_in_logical_pixels() {
