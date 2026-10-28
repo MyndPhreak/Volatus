@@ -832,15 +832,37 @@ mod tests {
 
     #[test]
     #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
-    fn show_folder_while_the_graph_shows_starts_no_treemap_zoom() {
+    fn show_folder_while_the_graph_shows_starts_no_treemap_zoom_with_animations_on() {
+        show_folder_in_the_graph_with(Some(true));
+    }
+
+    #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
+    fn show_folder_while_the_graph_shows_starts_no_treemap_zoom_with_animations_off() {
+        show_folder_in_the_graph_with(Some(false));
+    }
+
+    /// The graph shows over a stale treemap of the root, with the animation setting forced to
+    /// `animation`; `show_folder(a)` changes the folder and leaves no treemap motion.
+    fn show_folder_in_the_graph_with(animation: Option<bool>) {
+        let _forced = crate::motion::set_test_animation(animation);
         let ui = window(View::Graph);
         let root = SESSION.with_borrow(|s| s.loaded.as_ref().unwrap().data.tree.root());
         stale_treemap_of(root);
+        let a = child("a");
+        // Precondition, so the test cannot pass by chance: without the graph check,
+        // `move_to_folder` would start a zoom in here exactly when motion is on.
+        let way = SESSION.with_borrow(|s| {
+            let l = s.loaded.as_ref().unwrap();
+            crate::tree_view::zoom_way(&l.data.tree, l.shown_root, &l.rects, a)
+        });
+        assert!(matches!(way, crate::tree_view::ZoomWay::In(_)), "{way:?}");
+        assert_eq!(crate::motion_on(), animation == Some(true), "the forced setting is read");
 
-        crate::show_folder(&ui, child("a"));
+        crate::show_folder(&ui, a);
 
-        assert_eq!(SESSION.with_borrow(|s| s.loaded.as_ref().unwrap().view_root), child("a"));
-        assert_no_treemap_motion(&ui, "into a child folder");
+        assert_eq!(SESSION.with_borrow(|s| s.loaded.as_ref().unwrap().view_root), a);
+        assert_no_treemap_motion(&ui, &format!("into a child folder, animation {animation:?}"));
     }
 
     #[test]

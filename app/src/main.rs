@@ -1070,7 +1070,7 @@ fn land(ui: &MainWindow, layout: Layout) {
 
 /// Motion is on now (`motion::allowed`). Read for each move, so a change of the setting counts at once.
 fn motion_on() -> bool {
-    motion::allowed(motion::client_area_animation())
+    motion::allowed(motion::animation_setting())
 }
 
 /// The treemap view in physical pixels.

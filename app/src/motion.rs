@@ -53,6 +53,40 @@ pub fn landing(allowed: bool, first: bool, out_from: Option<NodeId>, old_root: O
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// The setting a `TestAnimation` guard forces on this test thread, if any.
+    static TEST_ANIMATION: std::cell::Cell<Option<Option<bool>>> = const { std::cell::Cell::new(None) };
+}
+
+/// The animation setting motion follows: `client_area_animation`. In test builds only, a
+/// `TestAnimation` guard can force it on the test's thread, so a test does not depend on the
+/// machine's setting.
+pub fn animation_setting() -> Option<bool> {
+    #[cfg(test)]
+    if let Some(forced) = TEST_ANIMATION.get() {
+        return forced;
+    }
+    client_area_animation()
+}
+
+/// Forces `animation_setting` to `setting` on this thread until the guard drops, which restores
+/// the value before it.
+#[cfg(test)]
+pub struct TestAnimation(Option<Option<bool>>);
+
+#[cfg(test)]
+pub fn set_test_animation(setting: Option<bool>) -> TestAnimation {
+    TestAnimation(TEST_ANIMATION.replace(Some(setting)))
+}
+
+#[cfg(test)]
+impl Drop for TestAnimation {
+    fn drop(&mut self) {
+        TEST_ANIMATION.set(self.0);
+    }
+}
+
 /// The Windows setting "Animation effects" (Settings > Accessibility > Visual effects). `None`
 /// when it cannot be read.
 #[cfg(windows)]
