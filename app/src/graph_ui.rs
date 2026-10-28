@@ -2077,4 +2077,226 @@ mod tests {
 
         assert_eq!(*keys.borrow(), vec!["down".to_string()], "the graph has the focus");
     }
+
+    // ---- TP4.4: the graph after a delete, a rescan and a new scan (headless) ----
+
+    fn in_tree(n: NodeId) -> bool {
+        SESSION.with_borrow(|s| {
+            let tree = &s.loaded.as_ref().unwrap().data.tree;
+            scan_apply::in_subtree(tree, n, tree.root())
+        })
+    }
+
+    /// Folder `name` leaves the disk; a Delete on it finds it gone, so it leaves the tree by the
+    /// pending removal (`scan_apply::step_pending`, `refresh_after_remove`). The workers the window
+    /// started let go of the data on their own; until then each release is tried again, as
+    /// `data_released` does in the app. The dialog closes.
+    fn remove_gone(ui: &MainWindow, dir: &TempDir, name: &str) {
+        let n = node(name);
+        std::fs::remove_dir_all(dir.0.join(name)).unwrap();
+        scan_apply::request_delete_of(ui, Some(n), false);
+        let deadline = Instant::now() + std::time::Duration::from_secs(10);
+        while in_tree(n) {
+            assert!(Instant::now() < deadline, "the removal of {name} never applied");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            scan_apply::data_released(ui);
+        }
+        ui.invoke_close_delete();
+        assert_eq!(ui.get_delete().step, DeleteStep::Closed);
+    }
+
+    #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
+    fn a_click_on_a_removed_band_does_nothing() {
+        let (ui, dir) = graph_window();
+        let (a, s, b) = (node("a"), node("s"), node("b"));
+        set_graph_state(|g| {
+            g.expanded.insert(a);
+        });
+        land_now(&ui);
+        let (a_band, s_band) = (band(Part::Folder(a)), band(Part::Folder(s)));
+        crate::select(&ui, b);
+
+        remove_gone(&ui, &dir, "a");
+
+        // Until the next landing nothing is hit-tested on the graph of the old tree.
+        assert!(graph_state(|g| g.shown.is_none()), "no graph of the old tree is kept");
+        assert!(graph_state(|g| !g.expanded.contains(&a)));
+        let before = (selected(), view_root());
+        // Delete right after the removal: b is drawn in the old graph, but nothing opens.
+        ui.invoke_graph_key("delete".into());
+        assert_eq!(ui.get_delete().step, DeleteStep::Closed, "no dialog from the old graph");
+        for band in [a_band, s_band] {
+            let (x, y) = centre(&ui, &band);
+            ui.invoke_graph_click(x, y);
+            ui.invoke_graph_open(x, y);
+            press_at(&ui, in_window(&ui, (x, y)), PointerEventButton::Left);
+            ui.invoke_graph_key("right".into());
+        }
+        assert_eq!((selected(), view_root()), before, "the removed bands do nothing");
+        assert!(graph_state(|g| g.expanded.is_empty() && g.open_other.is_empty()));
+        assert_eq!(ui.get_delete().step, DeleteStep::Closed);
+
+        // The next landing is of the new tree: a is not in it.
+        land_now(&ui);
+        assert!(!shown_graph().bands.iter().any(|band| matches!(band.part, Part::Folder(n) if n == a || n == s)));
+    }
+
+    #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
+    fn install_after_expand_starts_with_an_empty_expanded_set() {
+        let (ui, _dir) = graph_window();
+        let (a, s) = (node("a"), node("s"));
+        let r = root();
+        set_graph_state(|g| {
+            g.expanded.extend([a, s]);
+            g.open_other.insert(r);
+            g.first_column = 1;
+            g.types.insert(Part::Files(r), Some(Category::Video));
+        });
+        land_now(&ui);
+        assert!(graph_state(|g| g.shown.is_some()), "precondition");
+        let empty = || graph_state(|g| (g.expanded.is_empty(), g.open_other.is_empty(), g.first_column, g.shown.is_none(), g.types.is_empty()));
+
+        // A new scan over the shown one.
+        crate::install(&ui, disk_fixture().1);
+        assert_eq!(empty(), (true, true, 0, true, true), "a new scan");
+
+        // A rescan: `start_scan` clears the window, then the finished scan installs.
+        let r = root();
+        set_graph_state(|g| {
+            g.expanded.insert(r);
+            g.first_column = 2;
+        });
+        land_now(&ui);
+        crate::clear(&ui);
+        crate::install(&ui, disk_fixture().1);
+        assert_eq!(empty(), (true, true, 0, true, true), "a rescan");
+    }
+
+    #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
+    fn the_colour_mode_survives_a_rescan_and_a_new_scan() {
+        let (ui, _dir) = graph_window();
+        click(&ui, "File type");
+        assert_eq!(colour(), ColourMode::FileType);
+
+        // A new scan installed over the shown one.
+        crate::install(&ui, disk_fixture().1);
+        assert_eq!(colour(), ColourMode::FileType, "a new scan");
+
+        // A rescan or "New scan": the window is cleared, then the finished scan installs.
+        crate::clear(&ui);
+        crate::install(&ui, disk_fixture().1);
+        crate::show_state(&ui);
+        assert_eq!(colour(), ColourMode::FileType, "a rescan");
+        assert_eq!(button(&ui, "File type").accessible_checked(), Some(true));
+
+        // Only the colour is kept.
+        assert!(graph_state(|g| g.expanded.is_empty() && g.shown.is_none()));
+    }
+
+    #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
+    fn two_rights_before_a_landing_leave_the_folder_expanded_and_two_lefts_collapsed() {
+        let (ui, _dir) = graph_window();
+        let a = node("a");
+        crate::select(&ui, a);
+
+        ui.invoke_graph_key("right".into());
+        ui.invoke_graph_key("right".into());
+
+        assert!(graph_state(|g| g.expanded.contains(&a)), "a second Right does not undo the first");
+        land_now(&ui);
+        assert_eq!(band(Part::Folder(a)).expander, Expander::Expanded);
+
+        ui.invoke_graph_key("left".into());
+        ui.invoke_graph_key("left".into());
+
+        assert!(graph_state(|g| !g.expanded.contains(&a)), "a second Left does not undo the first");
+    }
+
+    #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
+    fn a_wheel_turn_after_an_expander_and_before_the_landing_keeps_the_new_column() {
+        let (ui, _dir) = graph_window();
+        let chain = [node("a"), node("s"), node("t")];
+        set_graph_state(|g| g.expanded.extend(chain));
+        land_now(&ui);
+        set_graph_state(|g| g.first_column = 1);
+        land_now(&ui);
+        assert_eq!((shown_graph().columns, shown_graph().first_column), (5, 1), "precondition");
+        graph_button(&ui, "Expand u").invoke_accessible_default_action();
+        assert_eq!(graph_state(|g| g.first_column), 2, "the expander scrolled to the new column");
+
+        // The shown graph still has 5 columns: the wheel must not scroll the new column away.
+        ui.invoke_graph_scroll(1);
+        assert_eq!(graph_state(|g| g.first_column), 2, "at the last full view already");
+        ui.invoke_graph_scroll(-1);
+        assert_eq!(graph_state(|g| g.first_column), 1);
+        ui.invoke_graph_scroll(1);
+        assert_eq!(graph_state(|g| g.first_column), 2);
+    }
+
+    #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
+    fn a_click_at_a_scale_of_2_and_of_1_25_selects_the_band_under_the_pointer() {
+        let (ui, _dir) = graph_window();
+        for (factor, name) in [(2.0, "b"), (1.25, "a"), (2.0, "a")] {
+            ui.window().dispatch_event(WindowEvent::ScaleFactorChanged { scale_factor: factor });
+            assert_eq!(ui.window().scale_factor(), factor, "the testing backend takes the scale");
+            land_now(&ui);
+            crate::select(&ui, root());
+            let n = node(name);
+            let b = band(Part::Folder(n));
+
+            press_at(&ui, in_window(&ui, centre(&ui, &b)), PointerEventButton::Left);
+
+            assert_eq!(selected(), Some(n), "{name} at scale {factor}");
+            assert_eq!(outline(&ui), Some(logical_box(&ui, &b)), "the outline at scale {factor}");
+        }
+    }
+
+    /// The keys that reach the hidden treemap (`map-key`), in place of its handler.
+    fn record_map_keys(ui: &MainWindow) -> Rc<RefCell<Vec<String>>> {
+        let keys = Rc::new(RefCell::new(Vec::new()));
+        let log = keys.clone();
+        ui.on_map_key(move |k| log.borrow_mut().push(k.to_string()));
+        keys
+    }
+
+    #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
+    fn the_hidden_treemap_never_takes_the_focus_or_a_key_while_the_graph_shows() {
+        let (ui, _dir) = graph_window();
+        crate::select(&ui, node("a"));
+        let map_keys = record_map_keys(&ui);
+        let graph_keys = record_graph_keys(&ui);
+
+        // The treemap had the focus when the graph came (a scan ends with Graph chosen).
+        ui.set_graph_shown(false);
+        ui.invoke_focus_map();
+        run_change_handlers();
+        ui.set_graph_shown(true);
+        run_change_handlers();
+        press(&ui, Key::Delete);
+        assert!(map_keys.borrow().is_empty(), "Delete reached the hidden treemap: {:?}", map_keys.borrow());
+
+        // Tab goes round the window and never stops on the hidden treemap.
+        for _ in 0..40 {
+            press(&ui, Key::Tab);
+            press(&ui, Key::DownArrow);
+        }
+        assert!(map_keys.borrow().is_empty(), "a key reached the hidden treemap: {:?}", map_keys.borrow());
+        assert!(graph_keys.borrow().iter().any(|k| k == "down"), "Tab reaches the graph");
+
+        // With the graph focused, Delete goes to the graph's handler only.
+        graph_keys.borrow_mut().clear();
+        ui.invoke_focus_map();
+        run_change_handlers();
+        press(&ui, Key::Delete);
+        assert_eq!(*graph_keys.borrow(), vec!["delete".to_string()]);
+        assert!(map_keys.borrow().is_empty());
+        assert_eq!(ui.get_delete().step, DeleteStep::Closed, "the recorder took the key");
+    }
 }

@@ -741,6 +741,93 @@ mod tests {
         assert!(l.model.data.borrow().upgrade().is_some());
     }
 
+    // ---- the graph state after a removal (TP4.4) ----
+
+    use std::collections::HashSet;
+
+    /// A graph state as after a few layouts: these folders expanded and these "other" bands open,
+    /// a shown graph, a scroll and a file-type cache.
+    fn graph_state(l: &mut Loaded, expanded: &[NodeId], open_other: &[NodeId]) {
+        l.graph.expanded.extend(expanded);
+        l.graph.open_other.extend(open_other);
+        l.graph.first_column = 1;
+        l.graph.shown = Some(flow::Graph::default());
+        l.graph.types.insert(flow::Part::Files(l.data.tree.root()), Some(treemap::filetype::Category::Video));
+    }
+
+    #[test]
+    fn remove_from_expanded_folder_drops_it_and_its_descendants_from_the_graph_state() {
+        let d = data();
+        let (root, a, a2, c) = (d.tree.root(), find(&d.tree, "a"), find(&d.tree, "a2"), find(&d.tree, "c"));
+        let mut l = loaded(d);
+        graph_state(&mut l, &[a, a2, c], &[root, a, a2]);
+
+        assert!(matches!(remove_from(&mut l, a), Ok(Some(_))));
+
+        assert_eq!(l.graph.expanded, HashSet::from([c]));
+        assert_eq!(l.graph.open_other, HashSet::from([root]));
+        // The shown graph names removed folders, and the cache counts the old tree.
+        assert!(l.graph.shown.is_none(), "no graph of the old tree is hit-tested");
+        assert!(l.graph.types.is_empty());
+    }
+
+    #[test]
+    fn remove_from_an_unrelated_folder_keeps_the_expanded_set() {
+        let d = data();
+        let (root, a, a2, c) = (d.tree.root(), find(&d.tree, "a"), find(&d.tree, "a2"), find(&d.tree, "c"));
+        let mut l = loaded(d);
+        graph_state(&mut l, &[a, a2], &[root, a]);
+
+        assert!(matches!(remove_from(&mut l, c), Ok(Some(_))));
+
+        assert_eq!(l.graph.expanded, HashSet::from([a, a2]));
+        assert_eq!(l.graph.open_other, HashSet::from([root, a]));
+        assert_eq!(l.graph.first_column, 1);
+        // After any applied removal: no shown graph, no file-type cache.
+        assert!(l.graph.shown.is_none());
+        assert!(l.graph.types.is_empty());
+    }
+
+    #[test]
+    fn remove_from_shared_data_keeps_the_graph_state() {
+        let d = data();
+        let a = find(&d.tree, "a");
+        let mut l = loaded(d.clone());
+        graph_state(&mut l, &[a], &[a]);
+
+        assert_eq!(remove_from(&mut l, a), Err(Busy));
+
+        assert_eq!((l.graph.expanded.len(), l.graph.open_other.len(), l.graph.types.len()), (1, 1, 1));
+        assert!(l.graph.shown.is_some());
+    }
+
+    #[test]
+    fn graph_and_type_results_begun_before_an_applied_removal_are_dropped() {
+        let g = running();
+        let worker = SESSION.with_borrow(|s| s.loaded.as_ref().unwrap().data.clone());
+        assert!(finished(g, true, removed()));
+        SESSION.with_borrow_mut(|s| s.settings.view = crate::settings::View::Graph);
+        let job = SESSION.with_borrow_mut(crate::begin_layout).unwrap();
+        assert_eq!(job.view, crate::settings::View::Graph);
+        let (generation, seq) = (job.generation, job.seq);
+        let edits = SESSION.with_borrow(|s| s.loaded.as_ref().unwrap().edits);
+        // The graph worker let go of its clone; the type worker (`worker`) still holds one.
+        drop(job);
+        assert_eq!(SESSION.with_borrow_mut(|s| step_pending(s, false)), PendingStep::Busy);
+        drop(worker);
+
+        assert_eq!(SESSION.with_borrow_mut(|s| step_pending(s, false)), PendingStep::Applied);
+
+        assert!(!SESSION.with_borrow(|s| crate::is_current(s, generation, seq)), "the graph is of the old tree");
+        let (data, root) = SESSION.with_borrow(|s| {
+            let l = s.loaded.as_ref().unwrap();
+            (l.data.clone(), l.data.tree.root())
+        });
+        let found = vec![(flow::Part::Folder(root), Some(treemap::filetype::Category::Video))];
+        assert_eq!(crate::graph_ui::store_types(generation, &data, edits, found), crate::Stored::Recount);
+        assert!(SESSION.with_borrow(|s| s.loaded.as_ref().unwrap().graph.types.is_empty()));
+    }
+
     #[test]
     fn row_model_after_release_has_no_data_and_attach_gives_it_back() {
         let d = data();

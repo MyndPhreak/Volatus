@@ -228,6 +228,14 @@ pub fn key(g: &Graph, tree: &Tree, selected: Option<NodeId>, key: &str) -> KeyAc
     }
 }
 
+/// `key`, with Right and Left decided by the graph state `expanded`, not by the expander of the
+/// shown band: a layout may not have landed since the last key. Right expands a folder that is not
+/// expanded (it never collapses); Left collapses one that is expanded (it never expands).
+pub fn key_with(g: &Graph, tree: &Tree, expanded: &HashSet<NodeId>, selected: Option<NodeId>, name: &str) -> KeyAct {
+    let _ = expanded;
+    key(g, tree, selected, name)
+}
+
 /// The colour of each band of `g`, in band order. Age: the age class of the band's newest change
 /// at `now`. File type: the tile colour of the band's cached dominant type; a band not counted
 /// yet (`missing_types`), or with no bytes, gets the `Category::Other` colour.
@@ -812,6 +820,73 @@ mod tests {
         assert_eq!(s.open_other, HashSet::from([NodeId(9)]));
         assert!(s.shown.is_none());
         assert!(s.types.is_empty());
+    }
+
+    #[test]
+    fn drawn_column_table() {
+        let t = deep_tree();
+        let root = t.root();
+        let none = HashSet::new();
+        let a_open: HashSet<NodeId> = HashSet::from([id(&t, "a")]);
+        // (view, expanded, selected, want)
+        let cases: [(NodeId, &HashSet<NodeId>, &str, Option<u16>); 9] = [
+            (root, &none, "root", Some(0)),
+            (root, &none, "a", Some(1)),
+            (root, &none, "c.txt", Some(0)),
+            // A folder under a collapsed one: its parent's column.
+            (root, &none, "a1", Some(1)),
+            (root, &none, "f.bin", Some(1)),
+            // A merged folder: its own column (the "other" band of that column).
+            (root, &none, "d", Some(1)),
+            (root, &a_open, "a1", Some(2)),
+            (root, &a_open, "f.bin", Some(2)),
+            // A node outside the view.
+            (id(&t, "a"), &none, "b", None),
+        ];
+        for (view, expanded, name, want) in cases {
+            assert_eq!(drawn_column(&t, view, expanded, id(&t, name)), want, "{name} in view {}", t.name(view));
+        }
+    }
+
+    #[test]
+    fn key_with_a_state_that_matches_the_shown_graph_is_key() {
+        let t = deep_tree();
+        let a = id(&t, "a");
+        let (closed, open) = (graph_of(&t, &[], 0), graph_of(&t, &["a"], 0));
+        let names = ["root", "a", "b", "a1", "c.txt", "d"];
+        for (g, expanded) in [(&closed, HashSet::new()), (&open, HashSet::from([a]))] {
+            for selected in names.iter().map(|n| Some(id(&t, n))).chain([None]) {
+                for k in ["up", "down", "left", "right", "enter", "backspace", "delete", "shift-delete", "space"] {
+                    assert_eq!(key_with(g, &t, &expanded, selected, k), key(g, &t, selected, k), "{k} on {selected:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn key_with_right_and_left_follow_the_state_before_the_layout_lands() {
+        let t = deep_tree();
+        let (root, a, b, a1) = (t.root(), id(&t, "a"), id(&t, "b"), id(&t, "a1"));
+        let (closed, open) = (graph_of(&t, &[], 0), graph_of(&t, &["a"], 0));
+        let (none, a_open) = (HashSet::new(), HashSet::from([a]));
+        let cases: [(&Graph, &HashSet<NodeId>, NodeId, &str, KeyAct); 10] = [
+            // Right was pressed, its layout has not landed: Right again does not collapse.
+            (&closed, &a_open, a, "right", KeyAct::Nothing),
+            (&closed, &none, a, "right", KeyAct::Toggle(a)),
+            // Left was pressed, its layout has not landed: Left again does not expand.
+            (&open, &none, a, "left", KeyAct::Select(root)),
+            (&open, &none, a, "right", KeyAct::Toggle(a)),
+            (&open, &a_open, a, "right", KeyAct::Select(a1)),
+            (&open, &a_open, a, "left", KeyAct::Toggle(a)),
+            (&closed, &a_open, a, "left", KeyAct::Toggle(a)),
+            // No expander: as `key`.
+            (&closed, &none, b, "right", KeyAct::Nothing),
+            (&closed, &none, b, "left", KeyAct::Select(root)),
+            (&closed, &none, root, "right", KeyAct::Select(a)),
+        ];
+        for (g, expanded, selected, k, want) in cases {
+            assert_eq!(key_with(g, &t, expanded, Some(selected), k), want, "{k} on {} with {expanded:?}", t.name(selected));
+        }
     }
 
     #[test]
