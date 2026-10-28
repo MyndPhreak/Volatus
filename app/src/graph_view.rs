@@ -170,10 +170,13 @@ pub fn key(g: &Graph, tree: &Tree, selected: Option<NodeId>, key: &str) -> KeyAc
                 return first_folder(&|_| true);
             };
             if key == "right" {
+                // The view band (column 0) has no expander but is always open.
                 match band.expander {
                     Expander::Collapsed => KeyAct::Toggle(n),
-                    Expander::Expanded => first_folder(&|c| tree.node(c).parent == Some(n)),
-                    Expander::None => KeyAct::Nothing,
+                    _ if band.column == 0 || band.expander == Expander::Expanded => {
+                        first_folder(&|c| tree.node(c).parent == Some(n))
+                    }
+                    _ => KeyAct::Nothing,
                 }
             } else if band.expander == Expander::Expanded {
                 KeyAct::Toggle(n)
