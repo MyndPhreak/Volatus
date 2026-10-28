@@ -640,17 +640,21 @@ fn sync_rows(ui: &MainWindow) {
     ui.set_sort_descending(descending);
 }
 
-/// Moves the selection outline to the selected node's area in the shown treemap, or to its
-/// nearest drawn folder when the node itself is too small to draw (`tree_view::outline_node`).
+/// Moves the selection outline to the selected node's area in the shown treemap (or folder band of
+/// the shown graph), or to its nearest drawn folder when the node itself is not drawn
+/// (`tree_view::outline_node`).
 /// The treemap value for a screen reader names the selected node.
 fn sync_selection(ui: &MainWindow) {
     let scale = ui.window().scale_factor() as f64;
     let unit = current_unit();
     let value = with_loaded(|l| l.selected.map(|n| tree_view::map_value(&l.data.tree, n, unit))).flatten();
     ui.set_map_value(value.unwrap_or_default().into());
+    // While the graph shows, the outline is on its folder bands.
+    let graph = SESSION.with_borrow(graph_ui::outline_rects);
     let bounds = with_loaded(|l| {
-        let shown = tree_view::outline_node(&l.data.tree, &l.rects, l.selected?)?;
-        tree_view::selection_bounds(&l.rects, shown)
+        let rects = graph.as_ref().unwrap_or(&l.rects);
+        let shown = tree_view::outline_node(&l.data.tree, rects, l.selected?)?;
+        tree_view::selection_bounds(rects, shown)
     })
     .flatten();
     ui.set_has_selection(bounds.is_some());
@@ -908,6 +912,7 @@ fn leave(ui: &MainWindow) {
 /// under a pointer that has not moved is not looked up; the next pointer move finds it.
 fn drop_hover(ui: &MainWindow) {
     gate_hover(None, |n| show_hover(ui, n));
+    graph_ui::forget_hover(ui);
     tip_event(ui, tip::TipEvent::Layout);
 }
 
@@ -1192,6 +1197,7 @@ fn select(ui: &MainWindow, node: NodeId) {
     if let Some(folder) = view {
         show_folder(ui, folder);
     }
+    graph_ui::scroll_to_selection(ui);
     sync_rows(ui);
     sync_selection(ui);
     let row = ui.get_selected_row();
@@ -1757,6 +1763,8 @@ fn toggle_row(ui: &MainWindow, i: i32) {
 /// Shows `folder` in the treemap. Lays it out again only if it is not the shown folder.
 fn show_folder(ui: &MainWindow, folder: NodeId) {
     if with_loaded(|l| std::mem::replace(&mut l.view_root, folder) != folder) == Some(true) {
+        // A new view folder for the graph too: nothing expanded, no scroll.
+        with_loaded(|l| l.graph.reroot());
         drop_hover(ui);
         move_to_folder(ui, folder);
         relayout(ui);

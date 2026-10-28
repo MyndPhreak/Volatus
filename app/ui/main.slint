@@ -264,7 +264,7 @@ export component MainWindow inherits Window {
         if (self.modal) {
             root.settings-open = false;
         } else if (root.delete-from-map) {
-            map.focus-map();
+            root.focus-map();
         } else {
             tree-focus.focus();
         }
@@ -340,10 +340,16 @@ export component MainWindow inherits Window {
         map.start-zoom();
     }
 
-    /// Gives the map the keyboard focus.
+    /// Gives the map the keyboard focus: the graph while it shows, else the treemap.
     public function focus-map() {
-        map.focus-map();
+        if (root.graph-shown) {
+            root.graph-focus-ticket += 1;
+        } else {
+            map.focus-map();
+        }
     }
+    /// A new value gives the graph the keyboard focus (`GraphView.focus-ticket`).
+    private property <int> graph-focus-ticket;
 
     /// Scrolls the file tree so row `i` is inside the view.
     public function show-row(i: int) {
@@ -644,7 +650,7 @@ export component MainWindow inherits Window {
                             // map, which shows that folder.
                             open(i) => {
                                 root.crumb-open(i);
-                                map.focus-map();
+                                root.focus-map();
                             }
                             menu(i, x, y) => { root.crumb-menu(i, x, y); }
                             menu-key(i, x, y, w, h) => { root.crumb-menu-key(i, x, y, w, h); }
@@ -715,6 +721,18 @@ export component MainWindow inherits Window {
                         expanders: root.graph-expanders;
                         note: root.graph-note;
                         value: root.graph-value;
+                        // The outline, the hover and the tooltip of the treemap's place: the host
+                        // sets them for the view that shows.
+                        has-selection: root.has-selection;
+                        selection-x: root.selection-x;
+                        selection-y: root.selection-y;
+                        selection-width: root.selection-width;
+                        selection-height: root.selection-height;
+                        hover: root.hover;
+                        tip-visible: root.tip-visible;
+                        tip-x: root.tip-x;
+                        tip-y: root.tip-y;
+                        focus-ticket: root.graph-focus-ticket;
                         interactive: !root.modal;
                         tip-position(pointer, size, extent, gap) => { return root.tip-position(pointer, size, extent, gap); }
                         break-points(path) => { return root.tip-break-points(path); }
@@ -723,7 +741,10 @@ export component MainWindow inherits Window {
                         double-clicked(x, y) => { root.graph-open(x, y); }
                         menu(x, y, wx, wy) => { root.graph-menu(x, y, wx, wy); }
                         menu-key(x, y, w, h) => { root.graph-menu-key(x, y, w, h); }
-                        key(k) => { root.graph-key(k); }
+                        key(k) => {
+                            root.delete-from-map = true;
+                            root.graph-key(k);
+                        }
                         expand(i) => { root.graph-expand(i); }
                         hovered(x, y) => { root.graph-hover(x, y); }
                         left => { root.graph-leave(); }

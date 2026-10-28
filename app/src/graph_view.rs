@@ -97,6 +97,37 @@ pub enum Act {
     Nothing,
 }
 
+/// The column of the band that shows `selected` in the graph of folder `view` with `expanded` open:
+/// its own folder band, or the band of the nearest folder above it that has one (a file's folder, a
+/// folder under a collapsed one). `None` when `selected` is not in `view`. Merges are not known
+/// here; a merged folder is in the "other" band of the same column.
+pub fn drawn_column(tree: &Tree, view: NodeId, expanded: &HashSet<NodeId>, selected: NodeId) -> Option<u16> {
+    // From `selected` up to `view`.
+    let mut chain = Vec::new();
+    let mut n = Some(selected);
+    while let Some(c) = n {
+        chain.push(c);
+        if c == view {
+            break;
+        }
+        n = tree.node(c).parent;
+    }
+    if chain.last() != Some(&view) {
+        return None;
+    }
+    chain.reverse();
+    // Column 0 is the view band, always open; a deeper folder shows when its parent is expanded.
+    let mut column = 0;
+    for (i, pair) in chain.windows(2).enumerate() {
+        let (parent, c) = (pair[0], pair[1]);
+        if !tree.node(c).is_dir || (i > 0 && !expanded.contains(&parent)) {
+            break;
+        }
+        column = i + 1;
+    }
+    u16::try_from(column).ok()
+}
+
 /// What a key in the graph does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyAct {
@@ -283,20 +314,12 @@ fn last_change(t: u32) -> String {
 }
 
 /// What a screen reader says of graph `g` of folder `view`: the view folder, the bands drawn after
-/// it and the largest of them.
+/// it and the largest of them. The view folder is given: a scrolled graph does not draw it.
 pub fn summary(tree: &Tree, g: &Graph, view: NodeId, unit: Unit) -> String {
-    let _ = view;
-    let Some(first) = g.bands.first() else { return "Folder graph: 0 bands.".into() };
-    let view = match first.part {
-        Part::Folder(n) if first.column == 0 => Some(n),
-        Part::Folder(n) => tree.node(n).parent,
-        Part::Files(f) => Some(f),
-        Part::Other { parent, .. } => Some(parent),
-    };
     let name = |n: NodeId| display_name(tree.name(n)).into_owned();
-    let of = view.map_or(String::new(), |v| format!(" of {}", name(v)));
+    let of = format!(" of {}", name(view));
     // The view band (column 0) is the graph's root, not one of its bands.
-    let mut bands = g.bands.iter().filter(|b| !(b.column == 0 && matches!(b.part, Part::Folder(_))));
+    let mut bands = g.bands.iter().filter(|b| b.part != Part::Folder(view));
     let Some(mut largest) = bands.next() else { return format!("Folder graph{of}: 0 bands.") };
     let mut count = 1;
     for b in bands {

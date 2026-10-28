@@ -203,6 +203,10 @@ export component GraphView inherits Rectangle {
     in property <length> tip-y;
     /// False while the delete dialog shows: the graph takes no focus and opens no menu.
     in property <bool> interactive: true;
+    /// Each new value gives the graph the keyboard focus (the window's `focus-map` while the graph
+    /// shows: the graph is made only then, so the window cannot call `focus-graph`).
+    in property <int> focus-ticket;
+    changed focus-ticket => { graph-focus.focus(); }
 
     /// The view changed size, in logical pixels.
     callback resized(float, float);

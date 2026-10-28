@@ -2,17 +2,21 @@
 //! file types of the bands on screen (`count_graph_types`). Both follow the treemap's rules: a
 //! late result is dropped (`is_current`, `store_types`), and every worker lets go of its
 //! `Arc<Data>` clone and then calls `scan_apply::data_released`, so a pending removal can apply.
-//! Also the window side of the view switch and the colour toggle (`wire`, `sync_view`).
+//! Also the window side of the view switch and the colour toggle (`wire`, `sync_view`), and the
+//! graph's input: every action reads `GraphState::shown` (`with_shown`) and ends in the treemap's
+//! own paths (`select`, `open_node`, `go_up`, `open_menu`, `scan_apply::request_delete_of`).
 
-use crate::graph_view::{self, AGE_LEGEND, ColourMode};
+use crate::graph_view::{self, AGE_LEGEND, Act, ColourMode, KeyAct};
+use crate::menu::At;
 use crate::model::{Unit, display_name};
 use crate::settings::View;
 use crate::{
-    Data, LABEL_CAP, LayoutJob, LegendEntry, MainWindow, SESSION, Session, Stored, current_unit, drop_hover, is_current, persist, relayout,
-    scan_apply, stop_move, with_loaded,
+    Data, Hover, LABEL_CAP, LayoutJob, LegendEntry, Loaded, MainWindow, SESSION, Session, Source, Stored, current_unit, delete_ui,
+    drop_hover, go_up, is_current, open_menu, open_node, persist, relayout, scan_apply, select, stop_move, sync_selection, tip,
+    tip_event, to_physical, with_loaded,
 };
 use flow::{Expander, Graph, Part, Theme};
-use slint::{ComponentHandle, Image, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel};
+use slint::{ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel};
 use scan::{NodeId, Tree};
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
@@ -226,17 +230,34 @@ fn graph_inputs() -> GraphInputs {
 /// the window, which takes the picture's buffer as it is. With `--timing`, prints how long the
 /// graph took from the job's start.
 fn land(ui: &MainWindow, Ready { graph, image, size, labels, expanders, note }: Ready, seq: u64, started: Instant) {
-    if with_loaded(|l| l.graph.shown = Some(graph)).is_none() {
+    let unit = current_unit();
+    let Some((value, crumbs)) = with_loaded(|l| {
+        let tree = &l.data.tree;
+        // A current graph is of the view folder (`show_folder` lays out again).
+        let value = graph_view::summary(tree, &graph, l.view_root, unit);
+        let crumbs: Vec<crate::Crumb> = crate::tree_view::crumbs(tree, l.view_root).into_iter().map(crate::crumb).collect();
+        l.graph.shown = Some(graph);
+        (value, crumbs)
+    }) else {
         return;
-    }
+    };
     ui.set_graph_picture(image.map(Image::from_rgba8).unwrap_or_default());
     ui.set_graph_layout_width(size.0);
     ui.set_graph_layout_height(size.1);
     ui.set_graph_labels(ModelRc::new(VecModel::from(labels)));
     ui.set_graph_expanders(ModelRc::new(VecModel::from(expanders)));
     ui.set_graph_note(note.into());
+    ui.set_graph_value(value.into());
+    // The crumbs are shared with the treemap, as its landing sets them (`show_layout`): a new model
+    // only for another folder, so a crumb keeps its focus.
+    if !ui.get_crumbs().iter().eq(crumbs.iter().cloned()) {
+        ui.set_crumbs(ModelRc::new(VecModel::from(crumbs)));
+    }
     // The legend in the colours of the theme the picture was drawn in.
     sync_view(ui);
+    // The outline on the new bands, and the old hover goes.
+    sync_selection(ui);
+    drop_hover(ui);
     if SESSION.with_borrow(|s| s.flags.timing) {
         eprintln!("Graph {seq}: {} ms.", started.elapsed().as_millis());
     }
@@ -247,6 +268,7 @@ fn land(ui: &MainWindow, Ready { graph, image, size, labels, expanders, note }: 
 /// leaves the graph.
 pub(crate) fn clear_picture(ui: &MainWindow) {
     with_loaded(|l| l.graph.shown = None);
+    forget_hover(ui);
     ui.set_graph_picture(Image::default());
     ui.set_graph_labels(ModelRc::default());
     ui.set_graph_expanders(ModelRc::default());
@@ -311,6 +333,8 @@ fn view_chosen(ui: &MainWindow, i: i32) {
         }
     }
     sync_view(ui);
+    // The outline of the view that shows now: the old view's box is not on its picture.
+    sync_selection(ui);
     relayout(ui);
 }
 
@@ -325,8 +349,8 @@ fn colour_chosen(ui: &MainWindow, i: i32) {
     relayout(ui);
 }
 
-/// Wires the view switch, the colour toggle and the graph's size. The graph's own input (click,
-/// keys, menu, expanders, hover, wheel) gets its handlers in P4.T3; until then it does nothing.
+/// Wires the view switch, the colour toggle, the graph's size and the graph's own input: click,
+/// double-click, menu (right-click, Menu key, Shift+F10), keys, expanders, hover and wheel.
 pub(crate) fn wire(ui: &MainWindow) {
     ui.on_view_chosen({
         let weak = ui.as_weak();
@@ -353,34 +377,269 @@ pub(crate) fn wire(ui: &MainWindow) {
             }
         }
     });
-    ui.on_graph_click(|_, _| {});
-    ui.on_graph_open(|_, _| {});
-    ui.on_graph_menu(|_, _, _, _| {});
-    ui.on_graph_menu_key(|_, _, _, _| {});
-    ui.on_graph_key(|_| {});
-    ui.on_graph_expand(|_| {});
-    ui.on_graph_hover(|_, _| {});
-    ui.on_graph_leave(|| {});
-    ui.on_graph_scroll(|_| {});
+    // Each handler runs with the window, when it still exists.
+    let weak = ui.as_weak();
+    let at = move |f: &dyn Fn(&MainWindow)| {
+        if let Some(ui) = weak.upgrade() {
+            f(&ui);
+        }
+    };
+    ui.on_graph_click({
+        let at = at.clone();
+        move |x, y| at(&|ui| clicked(ui, x, y))
+    });
+    ui.on_graph_open({
+        let at = at.clone();
+        move |x, y| at(&|ui| opened(ui, x, y))
+    });
+    ui.on_graph_menu({
+        let at = at.clone();
+        move |x, y, wx, wy| at(&|ui| menu_with(ui, x, y, At::Pointer(wx, wy), map_menu))
+    });
+    ui.on_graph_menu_key({
+        let at = at.clone();
+        move |x, y, w, h| at(&|ui| menu_key_with(ui, At::Box(x, y, w, h), map_menu))
+    });
+    ui.on_graph_key({
+        let at = at.clone();
+        move |k| at(&|ui| key_pressed(ui, &k))
+    });
+    ui.on_graph_expand({
+        let at = at.clone();
+        move |i| at(&|ui| expand(ui, i))
+    });
+    ui.on_graph_hover({
+        let at = at.clone();
+        move |x, y| at(&|ui| hovered(ui, x, y))
+    });
+    ui.on_graph_leave({
+        let at = at.clone();
+        move || at(&left)
+    });
+    ui.on_graph_scroll(move |n| at(&|ui| scrolled(ui, n)));
+}
+
+/// Runs `f` on the shown scan and the graph it shows (`GraphState::shown`), only while the graph
+/// view shows. No graph (none landed yet, or just dropped) or the treemap: `None`, and the caller
+/// does nothing. Every action of the graph reads the graph through here, never a copy.
+fn with_shown<R>(f: impl FnOnce(&Loaded, &Graph) -> R) -> Option<R> {
+    SESSION.with_borrow(|s| {
+        if graph_view::shown_view(s.scan.state(), s.loaded.is_some(), s.settings.view) != View::Graph {
+            return None;
+        }
+        let l = s.loaded.as_ref()?;
+        Some(f(l, l.graph.shown.as_ref()?))
+    })
+}
+
+/// The band of graph `g` under graph point (x, y) in physical pixels (`flow::hit`).
+fn band_at(g: &Graph, (x, y): (f64, f64)) -> Option<usize> {
+    flow::hit(g, x, y)
+}
+
+/// A click at graph point (x, y), in logical pixels: a folder band selects its folder, a files band
+/// the folder that holds the files (`graph_view::click`), an "other" band shows its members.
+fn clicked(ui: &MainWindow, x: f32, y: f32) {
+    tip_event(ui, tip::TipEvent::Click);
+    // The pointer comes in logical pixels, the graph is in physical pixels (as `node_at`).
+    let p = to_physical(ui, x, y);
+    match with_shown(|_, g| graph_view::click(g, band_at(g, p))) {
+        Some(Act::Select(n)) => select(ui, n),
+        Some(Act::ShowOther(parent)) => {
+            with_loaded(|l| l.graph.show_other(parent));
+            relayout(ui);
+        }
+        Some(Act::Nothing) | None => {}
+    }
+}
+
+/// A double-click at graph point (x, y): a folder band's folder becomes the view folder of both
+/// views (`open_node`, which re-roots the graph through `show_folder`).
+fn opened(ui: &MainWindow, x: f32, y: f32) {
+    let p = to_physical(ui, x, y);
+    if let Some(n) = with_shown(|_, g| graph_view::open_target(g, band_at(g, p))).flatten() {
+        open_node(ui, n);
+    }
 }
 
 /// The folder a right-click at graph point (x, y), in logical pixels, opens the menu for: only a
 /// drawn folder band of the shown graph (`graph_view::menu_target`).
-pub(crate) fn menu_hit(_ui: &MainWindow, _x: f32, _y: f32) -> Option<NodeId> {
-    None
+pub(crate) fn menu_hit(ui: &MainWindow, x: f32, y: f32) -> Option<NodeId> {
+    let p = to_physical(ui, x, y);
+    with_shown(|_, g| graph_view::menu_target(g, band_at(g, p))).flatten()
 }
 
 /// A right-click at graph point (x, y): `open` gets the folder band's folder and `at`. A files band,
 /// an "other" band, empty space or no shown graph: nothing (no menu, also not for the selection).
-pub(crate) fn menu_with(_ui: &MainWindow, _x: f32, _y: f32, _at: crate::menu::At, _open: impl FnOnce(&MainWindow, NodeId, crate::menu::At)) {}
+pub(crate) fn menu_with(ui: &MainWindow, x: f32, y: f32, at: At, open: impl FnOnce(&MainWindow, NodeId, At)) {
+    if let Some(n) = menu_hit(ui, x, y) {
+        open(ui, n, at);
+    }
+}
 
 /// The Menu key or Shift+F10 in the graph: `open` gets the selection only when it is drawn as its own
 /// folder band (`graph_view::key_target`), and `at`.
-pub(crate) fn menu_key_with(_ui: &MainWindow, _at: crate::menu::At, _open: impl FnOnce(&MainWindow, NodeId, crate::menu::At)) {}
+pub(crate) fn menu_key_with(ui: &MainWindow, at: At, open: impl FnOnce(&MainWindow, NodeId, At)) {
+    if let Some(n) = with_shown(|l, g| graph_view::key_target(g, l.selected)).flatten() {
+        open(ui, n, at);
+    }
+}
+
+/// The sink of both menu paths: the existing menu of the treemap's right-click, for folder `n`.
+fn map_menu(ui: &MainWindow, n: NodeId, at: At) {
+    open_menu(ui, Source::Map, Some(n), at);
+}
+
+/// A key in the graph (`graph_view::key`). Delete and Shift+Delete go to the delete flow of the
+/// treemap for the selected folder band (`scan_apply::request_delete_of`), which refuses on its own
+/// while a scan runs or a removal waits.
+fn key_pressed(ui: &MainWindow, key: &str) {
+    tip_event(ui, tip::TipEvent::Key);
+    let Some(act) = with_shown(|l, g| graph_view::key(g, &l.data.tree, l.selected, key)) else { return };
+    match act {
+        KeyAct::Select(n) => select(ui, n),
+        KeyAct::Toggle(n) => toggle(ui, n),
+        KeyAct::Open(n) => open_node(ui, n),
+        KeyAct::Up => go_up(ui),
+        KeyAct::Delete { node, shift } => {
+            scan_apply::request_delete_of(ui, Some(node), shift);
+            delete_ui::sync(ui);
+        }
+        KeyAct::Nothing => {}
+    }
+}
+
+/// The expander of band `i` of the shown graph was used.
+fn expand(ui: &MainWindow, i: i32) {
+    let folder = with_shown(|_, g| match g.bands.get(usize::try_from(i).ok()?)?.part {
+        Part::Folder(n) => Some(n),
+        _ => None,
+    });
+    if let Some(n) = folder.flatten() {
+        toggle(ui, n);
+    }
+}
+
+/// Expands or collapses folder `n`, drawn in the shown graph, and lays the graph out again. A folder
+/// that opens scrolls its new column (the next one) into view; that column may be new, so the graph
+/// has at least one more column than its band's.
+fn toggle(ui: &MainWindow, n: NodeId) {
+    let done = with_loaded(|l| {
+        let g = &mut l.graph;
+        let shown = g.shown.as_ref()?;
+        let column = shown.bands.iter().find(|b| b.part == Part::Folder(n))?.column;
+        let columns = shown.columns.max(column.saturating_add(2));
+        g.toggle(n);
+        if g.expanded.contains(&n) {
+            g.scroll_to(column.saturating_add(1), columns);
+        }
+        Some(())
+    });
+    if done.flatten().is_some() {
+        relayout(ui);
+    }
+}
+
+/// The wheel moved the columns by `delta` (-1 left, 1 right): the graph is laid out again when the
+/// first column changed.
+fn scrolled(ui: &MainWindow, delta: i32) {
+    tip_event(ui, tip::TipEvent::Scroll);
+    let Some(columns) = with_shown(|_, g| g.columns) else { return };
+    let moved = with_loaded(|l| {
+        let before = l.graph.first_column;
+        l.graph.scroll_by(delta, columns);
+        l.graph.first_column != before
+    });
+    if moved == Some(true) {
+        relayout(ui);
+    }
+}
+
+/// What the window shows for hovered band `b` of `data`, in logical pixels: a highlight of the band
+/// and its tooltip (`graph_view::tooltip`).
+fn hover_of(data: &Data, b: &flow::Band, scale: f64, unit: Unit) -> Hover {
+    let (title, detail) = graph_view::tooltip(&data.tree, &data.counts, b, unit);
+    let px = |v: f64| (v / scale) as f32;
+    Hover {
+        visible: true,
+        x: px(b.x),
+        y: px(b.y),
+        width: px(b.w),
+        height: px(b.h),
+        title: title.into(),
+        detail: detail.into(),
+        ..Hover::default()
+    }
+}
+
+/// The pointer moved over the graph to (x, y) in logical pixels: as the treemap's `hover`, the
+/// window gets a new hover box only when the band part under the pointer changes.
+fn hovered(ui: &MainWindow, x: f32, y: f32) {
+    SESSION.with_borrow_mut(|s| s.pointer = (x, y));
+    let p = to_physical(ui, x, y);
+    let scale = f64::from(ui.window().scale_factor());
+    let unit = current_unit();
+    let found = with_shown(|l, g| {
+        let b = g.bands.get(band_at(g, p)?)?;
+        Some((b.part, hover_of(&l.data, b, scale, unit)))
+    })
+    .flatten();
+    let part = found.as_ref().map(|(part, _)| *part);
+    let changed = note_graph_hover(part);
+    if changed {
+        ui.set_hover(found.map(|(_, h)| h).unwrap_or_default());
+    }
+    tip_event(ui, tip::TipEvent::Moved { over: part.is_some(), changed });
+}
+
+/// The pointer left the graph: nothing is hovered and the tooltip gets `Leave`.
+fn left(ui: &MainWindow) {
+    forget_hover(ui);
+    tip_event(ui, tip::TipEvent::Leave);
+}
+
+/// No band is hovered any more; the window's hover box goes when one was.
+pub(crate) fn forget_hover(ui: &MainWindow) {
+    if note_graph_hover(None) {
+        ui.set_hover(Hover::default());
+    }
+}
+
+/// While the graph shows: the boxes the selection outline is placed on, the shown graph's folder
+/// bands (`flow::folder_rects`, physical pixels; none before a graph landed). `None` while the
+/// treemap shows.
+pub(crate) fn outline_rects(s: &Session) -> Option<Vec<treemap::Rect>> {
+    if graph_view::shown_view(s.scan.state(), s.loaded.is_some(), s.settings.view) != View::Graph {
+        return None;
+    }
+    let l = s.loaded.as_ref()?;
+    Some(l.graph.shown.as_ref().map(flow::folder_rects).unwrap_or_default())
+}
+
+/// After a change of the selection (`select`, from any view): while the graph shows, its columns
+/// scroll the least that puts the selection's band in view (`graph_view::drawn_column`), and the
+/// graph is laid out again when they moved. Only for a selection change: a landing keeps the scroll
+/// of the wheel or of an expander.
+pub(crate) fn scroll_to_selection(ui: &MainWindow) {
+    let moved = SESSION.with_borrow_mut(|s| {
+        if graph_view::shown_view(s.scan.state(), s.loaded.is_some(), s.settings.view) != View::Graph {
+            return false;
+        }
+        let Some(l) = s.loaded.as_mut() else { return false };
+        let Some(columns) = l.graph.shown.as_ref().map(|g| g.columns) else { return false };
+        let before = l.graph.first_column;
+        if let Some(column) = l.selected.and_then(|n| graph_view::drawn_column(&l.data.tree, l.view_root, &l.graph.expanded, n)) {
+            l.graph.scroll_to(column, columns);
+        }
+        l.graph.first_column != before
+    });
+    if moved {
+        relayout(ui);
+    }
+}
 
 /// Keeps `part` as the hovered band part. `true` when it is not the part hovered before: only then
 /// does the window get a new hover box.
-#[cfg_attr(not(test), expect(dead_code, reason = "wired in P4.T3"))]
 pub(crate) fn note_graph_hover(part: Option<Part>) -> bool {
     SESSION.with_borrow_mut(|s| std::mem::replace(&mut s.graph_hovered, part) != part)
 }
@@ -471,7 +730,6 @@ mod tests {
     use crate::{Loaded, RowModel, SESSION, begin_layout, is_current};
     use i_slint_backend_testing::{AccessibleRole, ElementHandle};
     use scan::Method;
-    use slint::Model;
     use scan::rollup::{RawEntry, rollup};
     use std::rc::Rc;
 
@@ -1062,8 +1320,7 @@ mod tests {
 
     // ---- TP4.3: the graph's input, wired (headless) ----
 
-    use crate::menu::At;
-    use crate::{DeleteStep, Hover, Source};
+    use crate::DeleteStep;
     use flow::Band;
     use slint::LogicalPosition;
     use slint::platform::{Key, PointerEventButton, WindowEvent};
@@ -1294,11 +1551,14 @@ mod tests {
         crate::row_node(i)
     }
 
+    /// A menu sink in place of `map_menu`.
+    type MenuSink = Box<dyn FnOnce(&MainWindow, NodeId, At)>;
+
     /// The menus `menu_with` or `menu_key_with` asked for, through a sink that records them.
-    fn record_menus() -> (Rc<RefCell<Vec<NodeId>>>, impl Fn() -> Box<dyn FnOnce(&MainWindow, NodeId, At)>) {
+    fn record_menus() -> (Rc<RefCell<Vec<NodeId>>>, impl Fn() -> MenuSink) {
         let opened = Rc::new(RefCell::new(Vec::new()));
         let log = opened.clone();
-        let sink = move || -> Box<dyn FnOnce(&MainWindow, NodeId, At)> {
+        let sink = move || -> MenuSink {
             let log = log.clone();
             Box::new(move |_, n, _| log.borrow_mut().push(n))
         };
@@ -1374,6 +1634,8 @@ mod tests {
         assert_eq!(graph_state(|g| g.first_column), 2, "columns 2 to 5 show");
         land_now(&ui);
         assert_eq!((shown_graph().columns, shown_graph().first_column), (6, 2));
+        // The landing keeps the scroll (the selection, the root, is out of view now).
+        assert_eq!(graph_state(|g| g.first_column), 2, "kept after the landing");
         assert!(shown_graph().bands.iter().any(|b| b.part == Part::Folder(node("v"))), "v shows");
     }
 
@@ -1393,6 +1655,10 @@ mod tests {
         }
 
         assert_eq!(got, [1, 2, 2, 1, 0, 0]);
+        // A landing keeps the scroll of the wheel.
+        ui.invoke_graph_scroll(1);
+        land_now(&ui);
+        assert_eq!((graph_state(|g| g.first_column), shown_graph().first_column), (1, 1), "kept after the landing");
     }
 
     #[test]
