@@ -211,6 +211,8 @@ struct Session {
     hovered: Option<NodeId>,
     /// Times the hovered node changed (`note_hover`). With `--timing` it is printed at exit.
     hover_changes: u64,
+    /// The graph band part under the pointer (`graph_ui::note_graph_hover`).
+    graph_hovered: Option<flow::Part>,
     /// Latest pointer position over the treemap, in logical pixels.
     pointer: (f32, f32),
     /// Where the tooltip is in its life (see the tip module).
@@ -552,6 +554,7 @@ thread_local! {
         drives_seq: 0,
         hovered: None,
         hover_changes: 0,
+        graph_hovered: None,
         pointer: (0.0, 0.0),
         tip: tip::TipState::Idle,
         hover_slowest: Duration::ZERO,

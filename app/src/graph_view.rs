@@ -798,4 +798,190 @@ mod tests {
             }
         }
     }
+
+    // ---- texts (TP4.2) ----
+
+    const T: u32 = NOW;
+
+    /// root 1000 { a 600 { a1.bin 400 at T, s { x.mp4 200 at 1 } }, b 300 { y.zip 300 unknown },
+    /// c.txt 100 at T - 200 D }
+    fn text_tree() -> Tree {
+        let e = |id: u64, parent: u64, name: &str, size: u64, is_dir: bool, modified: u32| RawEntry {
+            id,
+            parent,
+            name: name.into(),
+            size,
+            allocated: size,
+            is_dir,
+            modified,
+        };
+        let entries = vec![
+            e(0, 0, "root", 0, true, 0),
+            e(1, 0, "a", 0, true, 0),
+            e(2, 0, "b", 0, true, 0),
+            e(3, 0, "c.txt", 100, false, T - 200 * D),
+            e(4, 1, "a1.bin", 400, false, T),
+            e(5, 1, "s", 0, true, 0),
+            e(6, 5, "x.mp4", 200, false, 1),
+            e(7, 2, "y.zip", 300, false, 0),
+        ];
+        rollup(0, entries).unwrap().tree
+    }
+
+    fn band_of(g: &Graph, part: Part) -> Band {
+        *g.bands.iter().find(|b| b.part == part).unwrap_or_else(|| panic!("no band {part:?} in {g:?}"))
+    }
+
+    fn counts_of(t: &Tree) -> Vec<u64> {
+        crate::tree_view::file_counts(t)
+    }
+
+    fn plain_band(part: Part, size: u64, newest: u32) -> Band {
+        Band { part, column: 1, x: 0.0, y: 0.0, w: 10.0, h: 10.0, size, newest, expander: Expander::None }
+    }
+
+    fn pair(a: &str, b: &str) -> (String, String) {
+        (a.to_string(), b.to_string())
+    }
+
+    #[test]
+    fn format_day_known_days() {
+        assert_eq!(format_day(1), "2000-01-01");
+        assert_eq!(format_day(5_097_600), "2000-02-29");
+        assert_eq!(format_day(3_160_857_600), "2100-03-01");
+        assert_eq!(format_day(3_160_857_600 - D), "2100-02-28");
+        assert_eq!(format_day(T), "2026-10-26");
+        assert_eq!(format_day(T - 200 * D), "2026-04-09");
+        assert_eq!(format_day(u32::MAX), "2136-02-07");
+    }
+
+    #[test]
+    fn tooltip_folder_with_two_files_and_a_known_time() {
+        let t = text_tree();
+        let g = layout_of(&t, t.root());
+        let a = Part::Folder(id(&t, "a"));
+        let got = tooltip(&t, &counts_of(&t), &band_of(&g, a), Unit::Dynamic);
+        assert_eq!(got, pair("root\\a", "600 B. 60.0% of root. 2 files. Last change: 2026-10-26."));
+    }
+
+    #[test]
+    fn tooltip_folder_with_one_file_and_an_unknown_time() {
+        let t = text_tree();
+        let g = layout_of(&t, t.root());
+        let b = Part::Folder(id(&t, "b"));
+        let got = tooltip(&t, &counts_of(&t), &band_of(&g, b), Unit::Dynamic);
+        assert_eq!(got, pair("root\\b", "300 B. 30.0% of root. 1 file. Last change: not known."));
+    }
+
+    #[test]
+    fn tooltip_view_folder_is_all_of_itself_and_uses_the_unit() {
+        let t = text_tree();
+        let g = layout_of(&t, t.root());
+        let got = tooltip(&t, &counts_of(&t), &band_of(&g, Part::Folder(t.root())), Unit::Byte);
+        assert_eq!(got, pair("root", "1,000 B. 100.0% of root. 4 files. Last change: 2026-10-26."));
+    }
+
+    #[test]
+    fn tooltip_files_band() {
+        let t = text_tree();
+        let g = layout_of(&t, t.root());
+        let got = tooltip(&t, &counts_of(&t), &band_of(&g, Part::Files(t.root())), Unit::Dynamic);
+        assert_eq!(got, pair("Files in root", "100 B. 10.0% of root. 1 file. Last change: 2026-04-09."));
+    }
+
+    #[test]
+    fn tooltip_other_band_with_folders_and_files() {
+        let t = text_tree();
+        let root = t.root();
+        let one = plain_band(Part::Other { parent: root, folders: 1, files: true }, 400, T - 200 * D);
+        assert_eq!(
+            tooltip(&t, &counts_of(&t), &one, Unit::Dynamic),
+            pair("Other folders in root", "400 B. 40.0% of root. 1 folder and files. Last change: 2026-04-09.")
+        );
+        let many = plain_band(Part::Other { parent: root, folders: 12, files: false }, 90, 0);
+        assert_eq!(
+            tooltip(&t, &counts_of(&t), &many, Unit::Dynamic),
+            pair("Other folders in root", "90 B. 9.0% of root. 12 folders. Last change: not known.")
+        );
+    }
+
+    #[test]
+    fn tooltip_other_band_of_files_only_counts_the_files() {
+        let t = text_tree();
+        let only_files = plain_band(Part::Other { parent: t.root(), folders: 0, files: true }, 100, T - 200 * D);
+        assert_eq!(
+            tooltip(&t, &counts_of(&t), &only_files, Unit::Dynamic),
+            pair("Other files in root", "100 B. 10.0% of root. 1 file. Last change: 2026-04-09.")
+        );
+        assert_eq!(band_label(&t, &only_files, Unit::Dynamic), pair("other files", "100 B"));
+    }
+
+    #[test]
+    fn band_label_folder_files_and_other() {
+        let t = text_tree();
+        let g = layout_of(&t, t.root());
+        let a = band_of(&g, Part::Folder(id(&t, "a")));
+        assert_eq!(band_label(&t, &a, Unit::Dynamic), crate::tree_view::frame_label(&t, id(&t, "a"), Unit::Dynamic));
+        assert_eq!(band_label(&t, &a, Unit::Dynamic), pair("a\\", "600 B"));
+        let files = band_of(&g, Part::Files(t.root()));
+        assert_eq!(band_label(&t, &files, Unit::Dynamic), pair("files", "100 B"));
+        let other = plain_band(Part::Other { parent: t.root(), folders: 7, files: true }, 1536, 0);
+        assert_eq!(band_label(&t, &other, Unit::Dynamic), pair("other (7)", "1.5 KB"));
+        assert_eq!(band_label(&t, &other, Unit::Byte), pair("other (7)", "1,536 B"));
+    }
+
+    #[test]
+    fn summary_names_the_view_folder_the_bands_and_the_largest() {
+        let t = text_tree();
+        let g = layout_of(&t, t.root());
+        assert_eq!(summary(&t, &g, Unit::Dynamic), "Folder graph of root: 3 bands, largest a, 600 B.");
+    }
+
+    #[test]
+    fn summary_one_band_is_singular_and_an_empty_graph_has_no_bands() {
+        let t = text_tree();
+        let g = layout_of(&t, id(&t, "b"));
+        assert_eq!(summary(&t, &g, Unit::Dynamic), "Folder graph of b: 1 band, largest files, 300 B.");
+        assert_eq!(summary(&t, &Graph::default(), Unit::Dynamic), "Folder graph: 0 bands.");
+    }
+
+    #[test]
+    fn graph_texts_spoofed_name_shows_a_placeholder() {
+        let e = |id: u64, parent: u64, name: &str, size: u64, is_dir: bool| RawEntry {
+            id,
+            parent,
+            name: name.into(),
+            size,
+            allocated: size,
+            is_dir,
+            modified: T,
+        };
+        let raw = "evil\u{202E}gnp.exe.";
+        let entries = vec![
+            e(0, 0, "root", 0, true),
+            e(1, 0, raw, 0, true),
+            e(2, 1, "f.bin", 900, false),
+            e(3, 0, "z.bin", 100, false),
+        ];
+        let t = rollup(0, entries).unwrap().tree;
+        let g = layout_of(&t, t.root());
+        let counts = counts_of(&t);
+        let evil = band_of(&g, Part::Folder(id(&t, raw)));
+        let shown = "evil\u{FFFD}gnp.exe.";
+
+        assert_eq!(band_label(&t, &evil, Unit::Dynamic), pair(&format!("{shown}\\"), "900 B"));
+        assert_eq!(
+            tooltip(&t, &counts, &evil, Unit::Dynamic),
+            pair(&format!("root\\{shown}"), "900 B. 90.0% of root. 1 file. Last change: 2026-10-26.")
+        );
+        assert_eq!(summary(&t, &g, Unit::Dynamic), format!("Folder graph of root: 2 bands, largest {shown}, 900 B."));
+        // The spoofed folder as the view folder, and as the folder of a files band.
+        let inner = layout_of(&t, id(&t, raw));
+        assert_eq!(summary(&t, &inner, Unit::Dynamic), format!("Folder graph of {shown}: 1 band, largest files, 900 B."));
+        let files = band_of(&inner, Part::Files(id(&t, raw)));
+        assert_eq!(tooltip(&t, &counts, &files, Unit::Dynamic).0, format!("Files in root\\{shown}"));
+        for text in [band_label(&t, &evil, Unit::Dynamic).0, tooltip(&t, &counts, &evil, Unit::Dynamic).0, summary(&t, &g, Unit::Dynamic)] {
+            assert!(!text.contains('\u{202E}'), "{text:?}");
+        }
+    }
 }

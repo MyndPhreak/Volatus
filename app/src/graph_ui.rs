@@ -359,6 +359,13 @@ pub(crate) fn wire(ui: &MainWindow) {
     ui.on_graph_scroll(|_| {});
 }
 
+/// Keeps `part` as the hovered band part. `true` when it is not the part hovered before: only then
+/// does the window get a new hover box.
+#[cfg_attr(not(test), expect(dead_code, reason = "wired in P4.T3"))]
+pub(crate) fn note_graph_hover(_part: Option<Part>) -> bool {
+    false
+}
+
 /// True when the graph shows in File type mode: its bands want their file types.
 fn wants_types(s: &Session) -> bool {
     s.loaded.as_ref().is_some_and(|l| {
@@ -963,6 +970,32 @@ mod tests {
 
         assert!(ui.get_graph_shown());
         assert!(graph_shows(&ui));
+    }
+
+    // ---- note_graph_hover (TP4.2) ----
+    #[test]
+    fn note_graph_hover_is_true_only_when_the_part_changes() {
+        let (a, b) = (NodeId(1), NodeId(2));
+        let parts = [
+            Some(Part::Folder(a)),
+            Some(Part::Folder(a)),
+            Some(Part::Files(a)),
+            Some(Part::Files(a)),
+            Some(Part::Other { parent: a, folders: 2, files: false }),
+            Some(Part::Other { parent: a, folders: 3, files: false }),
+            Some(Part::Folder(b)),
+            None,
+            None,
+            Some(Part::Folder(b)),
+        ];
+        let changed: Vec<bool> = parts.into_iter().map(note_graph_hover).collect();
+        assert_eq!(changed, [true, false, true, false, true, true, true, true, false, true]);
+        assert_eq!(SESSION.with_borrow(|s| s.graph_hovered), Some(Part::Folder(b)));
+    }
+
+    #[test]
+    fn note_graph_hover_leave_with_nothing_hovered_is_no_change() {
+        assert!(!note_graph_hover(None));
     }
 
     // ---- build: the worker's pure part ----
