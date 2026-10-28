@@ -180,7 +180,8 @@ pub fn build(
 /// Runs graph `job` (`begin_layout`) on a worker thread and lands it when it is still current
 /// (`is_current`, the treemap's rule). The worker drops its data before the UI thread runs, and
 /// the landing always calls `scan_apply::data_released`. In File type mode the landing then starts
-/// the file-type worker for the bands it has no type for.
+/// the file-type worker for the bands it has no type for. A layout that panics lands no picture
+/// (`guarded`, `finish_graph`): the old graph stays, and the landing still calls `data_released`.
 /// ponytail: one thread per request and no early stop, as `spawn_layout`.
 pub(crate) fn spawn_graph(ui: &MainWindow, job: LayoutJob) {
     let LayoutJob { data, root, generation, seq, size: (lw, lh), .. } = job;
@@ -194,39 +195,45 @@ pub(crate) fn spawn_graph(ui: &MainWindow, job: LayoutJob) {
     let weak = ui.as_weak();
     std::thread::spawn(move || {
         let now = scan::time::from_system_time(SystemTime::now());
-        let ready = Ready::of(build(&data.tree, root, &inputs, w, h, f64::from(scale), theme, now, unit));
+        // A layout or picture that panics lands as `None` (`guarded`).
+        let ready = guarded(|| Ready::of(build(&data.tree, root, &inputs, w, h, f64::from(scale), theme, now, unit)));
         // Let go of the data before the UI thread runs, so a delete waiting for it can apply.
         drop(data);
         // Err means the event loop has stopped: nothing left to update.
         let _ = slint::invoke_from_event_loop(move || {
             let Some(ui) = weak.upgrade() else { return };
-            let current = SESSION.with_borrow(|s| is_current(s, generation, seq));
-            if current {
-                land(&ui, ready, seq, started);
-            }
-            scan_apply::data_released(&ui);
-            // After the release: a removal it applied makes this graph late (`is_current`).
-            if current && SESSION.with_borrow(|s| is_current(s, generation, seq)) {
-                start_types(&ui);
-            }
+            finish_graph(&ui, ready, generation, seq, started);
         });
     });
 }
 
 /// Runs `f` and gives its value, or `None` when it panics: the panic stops here, so the caller
 /// still lets go of its data and calls `scan_apply::data_released`.
-#[allow(dead_code)] // RED stub: not yet used by `spawn_graph`.
 fn guarded<T>(f: impl FnOnce() -> T) -> Option<T> {
-    let _ = f;
-    None
+    catch_unwind(AssertUnwindSafe(f)).ok()
 }
 
 /// The landing of graph job `seq` of scan `generation` on the UI thread, for both outcomes of the
 /// worker: `Some` lands when it is still current (`is_current`), `None` (the layout panicked)
 /// lands no picture and the old one stays. Both always call `scan_apply::data_released`.
-#[allow(dead_code)] // RED stub: not yet used by `spawn_graph`.
 fn finish_graph(ui: &MainWindow, ready: Option<Ready>, generation: u64, seq: u64, started: Instant) {
-    let _ = (ui, ready, generation, seq, started);
+    let current = SESSION.with_borrow(|s| is_current(s, generation, seq));
+    let landed = match ready {
+        Some(ready) if current => {
+            land(ui, ready, seq, started);
+            true
+        }
+        Some(_) => false,
+        None => {
+            eprintln!("Graph {seq}: the graph layout failed.");
+            false
+        }
+    };
+    scan_apply::data_released(ui);
+    // After the release: a removal it applied makes this graph late (`is_current`).
+    if landed && SESSION.with_borrow(|s| is_current(s, generation, seq)) {
+        start_types(ui);
+    }
 }
 
 /// The graph state a layout reads now (`GraphInputs`), copied from `Loaded::graph`.
