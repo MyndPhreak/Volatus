@@ -282,10 +282,10 @@ fn last_change(t: u32) -> String {
     if t == scan::time::UNKNOWN { "not known".into() } else { format_day(t) }
 }
 
-/// What a screen reader says of graph `g`: the view folder, the bands drawn after it and the
-/// largest of them. The view folder is the one of the first band (its tree parent when the graph
-/// is scrolled, and the view band is out of view).
-pub fn summary(tree: &Tree, g: &Graph, unit: Unit) -> String {
+/// What a screen reader says of graph `g` of folder `view`: the view folder, the bands drawn after
+/// it and the largest of them.
+pub fn summary(tree: &Tree, g: &Graph, view: NodeId, unit: Unit) -> String {
+    let _ = view;
     let Some(first) = g.bands.first() else { return "Folder graph: 0 bands.".into() };
     let view = match first.part {
         Part::Folder(n) if first.column == 0 => Some(n),
@@ -1025,15 +1025,41 @@ mod tests {
     fn summary_names_the_view_folder_the_bands_and_the_largest() {
         let t = text_tree();
         let g = layout_of(&t, t.root());
-        assert_eq!(summary(&t, &g, Unit::Dynamic), "Folder graph of root: 3 bands, largest a, 600 B.");
+        assert_eq!(summary(&t, &g, t.root(), Unit::Dynamic), "Folder graph of root: 3 bands, largest a, 600 B.");
     }
 
     #[test]
     fn summary_one_band_is_singular_and_an_empty_graph_has_no_bands() {
         let t = text_tree();
         let g = layout_of(&t, id(&t, "b"));
-        assert_eq!(summary(&t, &g, Unit::Dynamic), "Folder graph of b: 1 band, largest files, 300 B.");
-        assert_eq!(summary(&t, &Graph::default(), Unit::Dynamic), "Folder graph: 0 bands.");
+        assert_eq!(summary(&t, &g, id(&t, "b"), Unit::Dynamic), "Folder graph of b: 1 band, largest files, 300 B.");
+        assert_eq!(summary(&t, &Graph::default(), t.root(), Unit::Dynamic), "Folder graph of root: 0 bands.");
+    }
+
+    #[test]
+    fn summary_of_a_scrolled_graph_names_the_view_folder() {
+        // root { l1 { l2 { l3 { l4 { l5 { f.bin 100 } } } } } }: six columns with l1 to l4 expanded.
+        let e = |id: u64, parent: u64, name: &str, size: u64, is_dir: bool| RawEntry {
+            id,
+            parent,
+            name: name.into(),
+            size,
+            allocated: size,
+            is_dir,
+            modified: T,
+        };
+        let mut entries = vec![e(0, 0, "root", 0, true)];
+        for i in 1..=5 {
+            entries.push(e(i, i - 1, &format!("l{i}"), 0, true));
+        }
+        entries.push(e(6, 5, "f.bin", 100, false));
+        let t = rollup(0, entries).unwrap().tree;
+
+        let g = graph_with(&t, t.root(), &["l1", "l2", "l3", "l4"], &[], 2);
+
+        assert_eq!((g.columns, g.first_column), (6, 2));
+        // The first drawn band is l2, whose parent is l1: the view folder is still the root.
+        assert_eq!(summary(&t, &g, t.root(), Unit::Dynamic), "Folder graph of root: 4 bands, largest l2, 100 B.");
     }
 
     #[test]
@@ -1065,13 +1091,13 @@ mod tests {
             tooltip(&t, &counts, &evil, Unit::Dynamic),
             pair(&format!("root\\{shown}"), "900 B. 90.0% of root. 1 file. Last change: 2026-10-26.")
         );
-        assert_eq!(summary(&t, &g, Unit::Dynamic), format!("Folder graph of root: 2 bands, largest {shown}, 900 B."));
+        assert_eq!(summary(&t, &g, t.root(), Unit::Dynamic), format!("Folder graph of root: 2 bands, largest {shown}, 900 B."));
         // The spoofed folder as the view folder, and as the folder of a files band.
         let inner = layout_of(&t, id(&t, raw));
-        assert_eq!(summary(&t, &inner, Unit::Dynamic), format!("Folder graph of {shown}: 1 band, largest files, 900 B."));
+        assert_eq!(summary(&t, &inner, id(&t, raw), Unit::Dynamic), format!("Folder graph of {shown}: 1 band, largest files, 900 B."));
         let files = band_of(&inner, Part::Files(id(&t, raw)));
         assert_eq!(tooltip(&t, &counts, &files, Unit::Dynamic).0, format!("Files in root\\{shown}"));
-        for text in [band_label(&t, &evil, Unit::Dynamic).0, tooltip(&t, &counts, &evil, Unit::Dynamic).0, summary(&t, &g, Unit::Dynamic)] {
+        for text in [band_label(&t, &evil, Unit::Dynamic).0, tooltip(&t, &counts, &evil, Unit::Dynamic).0, summary(&t, &g, t.root(), Unit::Dynamic)] {
             assert!(!text.contains('\u{202E}'), "{text:?}");
         }
     }

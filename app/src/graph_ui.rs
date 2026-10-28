@@ -186,15 +186,7 @@ pub(crate) fn spawn_graph(ui: &MainWindow, job: LayoutJob) {
     let (w, h) = ((lw * scale).round() as u32, (lh * scale).round() as u32);
     let theme = if ui.get_dark() { Theme::Dark } else { Theme::Light };
     let unit = current_unit();
-    let inputs = with_loaded(|l| GraphInputs {
-        expanded: l.graph.expanded.clone(),
-        open_other: l.graph.open_other.clone(),
-        first_column: l.graph.first_column,
-        colour: l.graph.colour,
-        // Only the file type colours read the cache.
-        types: if l.graph.colour == ColourMode::FileType { l.graph.types.clone() } else { HashMap::new() },
-    })
-    .unwrap_or_default();
+    let inputs = graph_inputs();
     let weak = ui.as_weak();
     std::thread::spawn(move || {
         let now = scan::time::from_system_time(SystemTime::now());
@@ -215,6 +207,19 @@ pub(crate) fn spawn_graph(ui: &MainWindow, job: LayoutJob) {
             }
         });
     });
+}
+
+/// The graph state a layout reads now (`GraphInputs`), copied from `Loaded::graph`.
+fn graph_inputs() -> GraphInputs {
+    with_loaded(|l| GraphInputs {
+        expanded: l.graph.expanded.clone(),
+        open_other: l.graph.open_other.clone(),
+        first_column: l.graph.first_column,
+        colour: l.graph.colour,
+        // Only the file type colours read the cache.
+        types: if l.graph.colour == ColourMode::FileType { l.graph.types.clone() } else { HashMap::new() },
+    })
+    .unwrap_or_default()
 }
 
 /// Shows a current graph: the graph goes to `Loaded::graph`, the picture, labels and expanders to
@@ -358,6 +363,20 @@ pub(crate) fn wire(ui: &MainWindow) {
     ui.on_graph_leave(|| {});
     ui.on_graph_scroll(|_| {});
 }
+
+/// The folder a right-click at graph point (x, y), in logical pixels, opens the menu for: only a
+/// drawn folder band of the shown graph (`graph_view::menu_target`).
+pub(crate) fn menu_hit(_ui: &MainWindow, _x: f32, _y: f32) -> Option<NodeId> {
+    None
+}
+
+/// A right-click at graph point (x, y): `open` gets the folder band's folder and `at`. A files band,
+/// an "other" band, empty space or no shown graph: nothing (no menu, also not for the selection).
+pub(crate) fn menu_with(_ui: &MainWindow, _x: f32, _y: f32, _at: crate::menu::At, _open: impl FnOnce(&MainWindow, NodeId, crate::menu::At)) {}
+
+/// The Menu key or Shift+F10 in the graph: `open` gets the selection only when it is drawn as its own
+/// folder band (`graph_view::key_target`), and `at`.
+pub(crate) fn menu_key_with(_ui: &MainWindow, _at: crate::menu::At, _open: impl FnOnce(&MainWindow, NodeId, crate::menu::At)) {}
 
 /// Keeps `part` as the hovered band part. `true` when it is not the part hovered before: only then
 /// does the window get a new hover box.
@@ -1039,5 +1058,757 @@ mod tests {
         let got = build(&d.tree, d.tree.root(), &GraphInputs::default(), 0, 0, 1.0, Theme::Dark, 0, Unit::Dynamic);
         assert!(got.picture.image.is_empty() && got.graph.bands.is_empty());
         assert_eq!(got.picture.note, "");
+    }
+
+    // ---- TP4.3: the graph's input, wired (headless) ----
+
+    use crate::menu::At;
+    use crate::{DeleteStep, Hover, Source};
+    use flow::Band;
+    use slint::LogicalPosition;
+    use slint::platform::{Key, PointerEventButton, WindowEvent};
+    use std::cell::RefCell;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// A folder the test made on the disk, removed at the end.
+    struct TempDir(std::path::PathBuf);
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// `<temp>` { a { a1.mp4 400, s { t { u { v { w.bin 200 } } } } }, b { b1.zip 300 }, c.txt 100,
+    /// d { d.bin 20 } } on the disk (the delete dialog checks it) and as a scan. `d` is under 3 % of
+    /// the root: it is in the root's "other (1)". With a, s, t and u expanded the graph has six
+    /// columns (root, a, s, t, u, v).
+    fn disk_fixture() -> (TempDir, Arc<Data>) {
+        static N: AtomicU64 = AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!("volatus-graph-{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
+        for (path, size) in [(r"a\a1.mp4", 400), (r"a\s\t\u\v\w.bin", 200), (r"b\b1.zip", 300), ("c.txt", 100), (r"d\d.bin", 20)] {
+            let p = root.join(path);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, vec![0u8; size]).unwrap();
+        }
+        let e = |id: u64, parent: u64, name: &str, size: u64, is_dir: bool| RawEntry {
+            id,
+            parent,
+            name: name.into(),
+            size,
+            allocated: size,
+            is_dir,
+            modified: scan::time::UNKNOWN,
+        };
+        let entries = vec![
+            e(0, 0, &root.to_string_lossy(), 0, true),
+            e(1, 0, "a", 0, true),
+            e(2, 1, "a1.mp4", 400, false),
+            e(3, 1, "s", 0, true),
+            e(4, 3, "t", 0, true),
+            e(5, 4, "u", 0, true),
+            e(6, 5, "v", 0, true),
+            e(7, 6, "w.bin", 200, false),
+            e(8, 0, "b", 0, true),
+            e(9, 8, "b1.zip", 300, false),
+            e(10, 0, "c.txt", 100, false),
+            e(11, 0, "d", 0, true),
+            e(12, 11, "d.bin", 20, false),
+        ];
+        let tree = rollup(0, entries).unwrap().tree;
+        (TempDir(root), Arc::new(Data { counts: crate::tree_view::file_counts(&tree), tree }))
+    }
+
+    /// Delete engines that are never asked for: no test here confirms a delete.
+    fn fake_deps() -> crate::delete_ui::Deps {
+        crate::delete_ui::Deps {
+            remover_for: Box::new(|_, _| -> Arc<dyn crate::delete::Remover> { unreachable!("no delete runs in these tests") }),
+            spawn: Box::new(|_, _, _, _, _| -> std::io::Result<()> { unreachable!("no delete runs in these tests") }),
+        }
+    }
+
+    /// A window on the testing backend (this thread only), wired as `main` wires it, showing the
+    /// graph of a finished scan of `disk_fixture`, with the first graph landed (`land_now`).
+    fn graph_window() -> (MainWindow, TempDir) {
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = MainWindow::new().unwrap();
+        crate::wire_tree_and_treemap(&ui);
+        wire(&ui);
+        crate::wire_settings(&ui);
+        crate::delete_ui::wire(&ui, fake_deps());
+        let (dir, data) = disk_fixture();
+        SESSION.with_borrow_mut(|s| {
+            let (generation, _) = s.scan.start().expect("no scan runs");
+            assert!(s.scan.apply(generation, Event::Finished(summary())));
+            s.scan_root = dir.0.clone();
+            s.settings.view = View::Graph;
+        });
+        crate::install(&ui, data);
+        crate::show_state(&ui);
+        ui.window().set_size(slint::LogicalSize::new(1000.0, 700.0));
+        ui.show().unwrap();
+        land_now(&ui);
+        (ui, dir)
+    }
+
+    /// The buttons labelled `label` inside the graph (the tree rows have "Expand <name>" too).
+    fn graph_buttons(ui: &MainWindow, label: &str) -> Vec<ElementHandle> {
+        let g = graph_element(ui);
+        let (p, s) = (g.absolute_position(), g.size());
+        buttons(ui, label)
+            .into_iter()
+            .filter(|e| {
+                let q = e.absolute_position();
+                q.x >= p.x && q.x < p.x + s.width && q.y >= p.y && q.y < p.y + s.height
+            })
+            .collect()
+    }
+
+    fn graph_button(ui: &MainWindow, label: &str) -> ElementHandle {
+        graph_buttons(ui, label).into_iter().next().unwrap_or_else(|| panic!("a {label:?} button in the graph"))
+    }
+
+    /// The graph's focus scope, which has the graph view's place and size.
+    fn graph_element(ui: &MainWindow) -> ElementHandle {
+        ElementHandle::find_by_accessible_label(ui, "Folder graph").next().expect("the folder graph shows")
+    }
+
+    /// Lays out the graph of the session now, on this thread, at the size of the graph view, and
+    /// lands it as `spawn_graph` does.
+    fn land_now(ui: &MainWindow) {
+        let size = graph_element(ui).size();
+        assert!(size.width > 0.0 && size.height > 0.0, "the graph view has an area: {size:?}");
+        let job = SESSION.with_borrow_mut(begin_layout).expect("a scan shows");
+        assert_eq!(job.view, View::Graph);
+        let scale = f64::from(ui.window().scale_factor());
+        let (w, h) = ((f64::from(size.width) * scale).round() as u32, (f64::from(size.height) * scale).round() as u32);
+        let landing = build(&job.data.tree, job.root, &graph_inputs(), w, h, scale, Theme::Light, 0, Unit::Dynamic);
+        land(ui, Ready::of(landing), job.seq, Instant::now());
+    }
+
+    /// The node named `name` (names are unique in the fixture; the root has the folder's path).
+    fn node(name: &str) -> NodeId {
+        SESSION.with_borrow(|s| {
+            let tree = &s.loaded.as_ref().unwrap().data.tree;
+            let mut stack = vec![tree.root()];
+            while let Some(n) = stack.pop() {
+                if tree.name(n) == name {
+                    return n;
+                }
+                stack.extend(tree.children(n));
+            }
+            panic!("no node {name}")
+        })
+    }
+
+    fn root() -> NodeId {
+        SESSION.with_borrow(|s| s.loaded.as_ref().unwrap().data.tree.root())
+    }
+
+    fn selected() -> Option<NodeId> {
+        SESSION.with_borrow(|s| s.loaded.as_ref().unwrap().selected)
+    }
+
+    fn view_root() -> NodeId {
+        SESSION.with_borrow(|s| s.loaded.as_ref().unwrap().view_root)
+    }
+
+    fn graph_state<R>(f: impl FnOnce(&graph_view::GraphState) -> R) -> R {
+        SESSION.with_borrow(|s| f(&s.loaded.as_ref().unwrap().graph))
+    }
+
+    fn set_graph_state(f: impl FnOnce(&mut graph_view::GraphState)) {
+        crate::with_loaded(|l| f(&mut l.graph)).unwrap();
+    }
+
+    fn shown_graph() -> Graph {
+        graph_state(|g| g.shown.clone()).expect("a graph landed")
+    }
+
+    fn band(part: Part) -> Band {
+        shown_graph().bands.into_iter().find(|b| b.part == part).unwrap_or_else(|| panic!("no band {part:?}"))
+    }
+
+    fn scale(ui: &MainWindow) -> f64 {
+        f64::from(ui.window().scale_factor())
+    }
+
+    /// The centre of band `b`, in logical pixels of the graph.
+    fn centre(ui: &MainWindow, b: &Band) -> (f32, f32) {
+        let s = scale(ui);
+        (((b.x + b.w / 2.0) / s) as f32, ((b.y + b.h / 2.0) / s) as f32)
+    }
+
+    /// The box of band `b` in logical pixels of the graph: (x, y, width, height).
+    fn logical_box(ui: &MainWindow, b: &Band) -> (f32, f32, f32, f32) {
+        let s = scale(ui);
+        ((b.x / s) as f32, (b.y / s) as f32, (b.w / s) as f32, (b.h / s) as f32)
+    }
+
+    /// The selection outline the window shows, in logical pixels, or `None`.
+    fn outline(ui: &MainWindow) -> Option<(f32, f32, f32, f32)> {
+        ui.get_has_selection().then(|| (ui.get_selection_x(), ui.get_selection_y(), ui.get_selection_width(), ui.get_selection_height()))
+    }
+
+    /// Graph point (x, y) as a window point.
+    fn in_window(ui: &MainWindow, (x, y): (f32, f32)) -> LogicalPosition {
+        let p = graph_element(ui).absolute_position();
+        LogicalPosition::new(p.x + x, p.y + y)
+    }
+
+    /// A press and release of `button` at a window point, through the testing backend.
+    fn press_at(ui: &MainWindow, position: LogicalPosition, button: PointerEventButton) {
+        ui.window().dispatch_event(WindowEvent::PointerMoved { position });
+        ui.window().dispatch_event(WindowEvent::PointerPressed { position, button });
+        ui.window().dispatch_event(WindowEvent::PointerReleased { position, button });
+    }
+
+    /// A key press and release, to the element with the focus, through the testing backend.
+    fn press(ui: &MainWindow, k: Key) {
+        ui.window().dispatch_event(WindowEvent::KeyPressed { text: k.into() });
+        ui.window().dispatch_event(WindowEvent::KeyReleased { text: k.into() });
+    }
+
+    /// The keys that reach the graph from now on (`graph-key`), in order, in place of their handler.
+    fn record_graph_keys(ui: &MainWindow) -> Rc<RefCell<Vec<String>>> {
+        let keys = Rc::new(RefCell::new(Vec::new()));
+        let log = keys.clone();
+        ui.on_graph_key(move |k| log.borrow_mut().push(k.to_string()));
+        keys
+    }
+
+    /// One turn of the event loop's own work: the change handlers of the markup run.
+    fn run_change_handlers() {
+        slint::platform::update_timers_and_animations();
+    }
+
+    /// The tree row of `n`, which must be shown.
+    fn row_of(n: NodeId) -> i32 {
+        SESSION.with_borrow(|s| {
+            let l = s.loaded.as_ref().unwrap();
+            l.model.rows.borrow().iter().position(|r| r.node == n).map(|i| i as i32).expect("the row shows")
+        })
+    }
+
+    fn row_node(i: i32) -> Option<NodeId> {
+        crate::row_node(i)
+    }
+
+    /// The menus `menu_with` or `menu_key_with` asked for, through a sink that records them.
+    fn record_menus() -> (Rc<RefCell<Vec<NodeId>>>, impl Fn() -> Box<dyn FnOnce(&MainWindow, NodeId, At)>) {
+        let opened = Rc::new(RefCell::new(Vec::new()));
+        let log = opened.clone();
+        let sink = move || -> Box<dyn FnOnce(&MainWindow, NodeId, At)> {
+            let log = log.clone();
+            Box::new(move |_, n, _| log.borrow_mut().push(n))
+        };
+        (opened, sink)
+    }
+
+    #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
+    fn click_at_a_folder_band_centre_selects_it_and_the_tree_follows() {
+        let (ui, _dir) = graph_window();
+        let a = node("a");
+        let b = band(Part::Folder(a));
+
+        press_at(&ui, in_window(&ui, centre(&ui, &b)), PointerEventButton::Left);
+
+        assert_eq!(selected(), Some(a));
+        assert_eq!(row_node(ui.get_selected_row()), Some(a), "the tree's selected row is a");
+        assert_eq!(outline(&ui), Some(logical_box(&ui, &b)), "the outline is on a's band");
+    }
+
+    #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
+    fn a_tree_selection_moves_the_outline_to_its_band_or_its_nearest_drawn_folder() {
+        let (ui, _dir) = graph_window();
+        let b = node("b");
+        ui.invoke_tree_select(row_of(b));
+        assert_eq!(outline(&ui), Some(logical_box(&ui, &band(Part::Folder(b)))), "b's own band");
+
+        // A file deep under the collapsed a: the outline is on a's band.
+        crate::select(&ui, node("w.bin"));
+        assert_eq!(outline(&ui), Some(logical_box(&ui, &band(Part::Folder(node("a"))))), "a file under a");
+
+        // d is merged into "other": the nearest drawn folder is the root.
+        crate::select(&ui, node("d"));
+        assert_eq!(outline(&ui), Some(logical_box(&ui, &band(Part::Folder(root())))), "a merged folder");
+    }
+
+    #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
+    fn the_expander_labelled_expand_a_opens_a_then_it_is_labelled_collapse_a() {
+        let (ui, _dir) = graph_window();
+        let a = node("a");
+        assert!(graph_buttons(&ui, "Collapse a").is_empty());
+
+        graph_button(&ui, "Expand a").invoke_accessible_default_action();
+
+        assert!(graph_state(|g| g.expanded.contains(&a)), "a is expanded");
+        land_now(&ui);
+        assert!(!graph_buttons(&ui, "Collapse a").is_empty(), "a \"Collapse a\" button");
+        assert!(graph_buttons(&ui, "Expand a").is_empty());
+        assert!(shown_graph().bands.iter().any(|b| b.part == Part::Folder(node("s"))), "a's subfolder shows");
+
+        graph_button(&ui, "Collapse a").invoke_accessible_default_action();
+
+        assert!(!graph_state(|g| g.expanded.contains(&a)), "a is collapsed");
+    }
+
+    #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
+    fn an_expander_scrolls_the_new_column_into_view() {
+        let (ui, _dir) = graph_window();
+        let chain = [node("a"), node("s"), node("t")];
+        set_graph_state(|g| g.expanded.extend(chain));
+        land_now(&ui);
+        assert_eq!((shown_graph().columns, shown_graph().first_column), (5, 0), "precondition");
+        // Columns 1 to 4 show: u, in column 4, and its expander are drawn.
+        set_graph_state(|g| g.first_column = 1);
+        land_now(&ui);
+
+        // u is in column 4: its subfolder v opens column 5.
+        graph_button(&ui, "Expand u").invoke_accessible_default_action();
+
+        assert_eq!(graph_state(|g| g.first_column), 2, "columns 2 to 5 show");
+        land_now(&ui);
+        assert_eq!((shown_graph().columns, shown_graph().first_column), (6, 2));
+        assert!(shown_graph().bands.iter().any(|b| b.part == Part::Folder(node("v"))), "v shows");
+    }
+
+    #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
+    fn the_wheel_scrolls_by_whole_columns_within_the_graph() {
+        let (ui, _dir) = graph_window();
+        let chain = [node("a"), node("s"), node("t"), node("u")];
+        set_graph_state(|g| g.expanded.extend(chain));
+        land_now(&ui);
+        assert_eq!(shown_graph().columns, 6, "precondition");
+
+        let mut got = Vec::new();
+        for delta in [1, 1, 1, -1, -1, -1] {
+            ui.invoke_graph_scroll(delta);
+            got.push(graph_state(|g| g.first_column));
+        }
+
+        assert_eq!(got, [1, 2, 2, 1, 0, 0]);
+    }
+
+    #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
+    fn a_selection_scrolls_its_folder_band_into_view() {
+        let (ui, _dir) = graph_window();
+        let chain = [node("a"), node("s"), node("t"), node("u")];
+        set_graph_state(|g| g.expanded.extend(chain));
+        land_now(&ui);
+        assert_eq!((shown_graph().columns, shown_graph().first_column), (6, 0), "precondition");
+
+        // v is in column 5, out of view: the graph scrolls to show it.
+        crate::select(&ui, node("v"));
+        assert_eq!(graph_state(|g| g.first_column), 2, "v's column comes into view");
+        land_now(&ui);
+        assert_eq!(outline(&ui), Some(logical_box(&ui, &band(Part::Folder(node("v"))))), "the outline is on v");
+
+        // a file in v: the outline goes to v, which shows.
+        crate::select(&ui, node("w.bin"));
+        assert_eq!(graph_state(|g| g.first_column), 2);
+
+        // a is in column 1, out of view now: back to it.
+        crate::select(&ui, node("a"));
+        assert_eq!(graph_state(|g| g.first_column), 1, "a's column comes into view");
+        land_now(&ui);
+        crate::select(&ui, root());
+        assert_eq!(graph_state(|g| g.first_column), 0, "the view band's column");
+    }
+
+    #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
+    fn delete_with_a_drawn_folder_opens_its_confirm_and_with_a_file_selected_stays_closed() {
+        let (ui, _dir) = graph_window();
+        let a = node("a");
+        crate::select(&ui, a);
+
+        ui.invoke_graph_key("delete".into());
+
+        let d = ui.get_delete();
+        assert_eq!((d.step, d.name.as_str(), d.permanent), (DeleteStep::Confirm, "a", false));
+        ui.invoke_close_delete();
+        ui.invoke_graph_key("shift-delete".into());
+        let d = ui.get_delete();
+        assert_eq!((d.step, d.name.as_str(), d.permanent), (DeleteStep::Confirm, "a", true));
+        ui.invoke_close_delete();
+        assert_eq!(ui.get_delete().step, DeleteStep::Closed);
+
+        // A file, selected from the tree, has no band: Delete does nothing in the graph.
+        ui.invoke_tree_select(row_of(node("c.txt")));
+        assert_eq!(selected(), Some(node("c.txt")));
+        ui.invoke_graph_key("delete".into());
+        ui.invoke_graph_key("shift-delete".into());
+        assert_eq!(ui.get_delete().step, DeleteStep::Closed);
+    }
+
+    /// A known surprise (PR notes): a click on a "files" band selects its folder, so Delete then
+    /// deletes the whole folder. The outline is therefore on the folder's own band.
+    #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
+    fn a_click_on_a_files_band_outlines_its_folder_band_and_delete_names_the_folder() {
+        let (ui, _dir) = graph_window();
+        let a = node("a");
+        crate::open_node(&ui, a);
+        land_now(&ui);
+        let files = band(Part::Files(a));
+
+        press_at(&ui, in_window(&ui, centre(&ui, &files)), PointerEventButton::Left);
+
+        assert_eq!(selected(), Some(a));
+        let folder = logical_box(&ui, &band(Part::Folder(a)));
+        assert_eq!(outline(&ui), Some(folder), "the outline is on a's own band");
+        assert_ne!(outline(&ui), Some(logical_box(&ui, &files)), "not on the files band");
+        // The click gave the graph the focus: Delete goes to it.
+        press(&ui, Key::Delete);
+        let d = ui.get_delete();
+        assert_eq!((d.step, d.name.as_str()), (DeleteStep::Confirm, "a"), "the dialog names the folder, not \"files\"");
+    }
+
+    #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
+    fn graph_and_treemap_menu_requests_are_equal() {
+        let (ui, _dir) = graph_window();
+        let a = node("a");
+        set_graph_state(|g| {
+            g.expanded.insert(a);
+        });
+        land_now(&ui);
+        let disk = |_: &std::path::Path| crate::menu::Disk::Dir;
+        let folders: Vec<(NodeId, Band)> =
+            shown_graph().bands.into_iter().filter_map(|b| if let Part::Folder(n) = b.part { Some((n, b)) } else { None }).collect();
+        assert!(folders.len() >= 4, "{folders:?}");
+
+        for (n, b) in folders {
+            let (x, y) = centre(&ui, &b);
+            let graph = crate::menu_request(Source::Map, menu_hit(&ui, x, y), disk);
+            // The treemap's right-click asks for the tile under the pointer: `Some(n)`.
+            let treemap = crate::menu_request(Source::Map, Some(n), disk);
+            assert!(treemap.is_some());
+            assert_eq!(graph, treemap, "band of {n:?}");
+        }
+    }
+
+    #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
+    fn a_right_click_on_a_files_band_an_other_band_or_empty_space_opens_no_menu() {
+        let (ui, _dir) = graph_window();
+        let r = root();
+        let a = node("a");
+        let (opened, sink) = record_menus();
+        let view = band(Part::Folder(r));
+        // Right of the view band, in the flows: no band there.
+        let s = scale(&ui);
+        let empty = (((view.x + view.w + 30.0) / s) as f32, ((view.y + view.h / 2.0) / s) as f32);
+        assert_eq!(flow::hit(&shown_graph(), f64::from(empty.0) * s, f64::from(empty.1) * s), None, "precondition: empty space");
+        let other = shown_graph().bands.into_iter().find(|b| matches!(b.part, Part::Other { .. })).expect("an other band");
+        let before = selected();
+
+        for (what, point) in [("files", centre(&ui, &band(Part::Files(r)))), ("other", centre(&ui, &other)), ("empty", empty)] {
+            assert_eq!(menu_hit(&ui, point.0, point.1), None, "{what}");
+            menu_with(&ui, point.0, point.1, At::Pointer(0.0, 0.0), sink());
+        }
+        assert_eq!(*opened.borrow(), Vec::<NodeId>::new(), "no menu");
+        assert_eq!(selected(), before, "the selection stays");
+
+        // A folder band: the menu of that folder.
+        let (x, y) = centre(&ui, &band(Part::Folder(a)));
+        menu_with(&ui, x, y, At::Pointer(0.0, 0.0), sink());
+        assert_eq!(*opened.borrow(), vec![a]);
+
+        // The markup gives a right-click on empty space to `graph-menu` at that graph point.
+        let asked = Rc::new(RefCell::new(Vec::new()));
+        let log = asked.clone();
+        ui.on_graph_menu(move |x, y, _, _| log.borrow_mut().push((x, y)));
+        press_at(&ui, in_window(&ui, empty), PointerEventButton::Right);
+        assert_eq!(*asked.borrow(), vec![empty]);
+    }
+
+    #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
+    fn the_menu_key_opens_the_menu_only_for_a_selection_drawn_as_its_own_folder_band() {
+        let (ui, _dir) = graph_window();
+        let a = node("a");
+        let (opened, sink) = record_menus();
+
+        crate::select(&ui, a);
+        menu_key_with(&ui, At::Box(0.0, 0.0, 1.0, 1.0), sink());
+        assert_eq!(*opened.borrow(), vec![a], "a drawn folder");
+
+        for name in ["w.bin", "d", "c.txt"] {
+            crate::select(&ui, node(name));
+            menu_key_with(&ui, At::Box(0.0, 0.0, 1.0, 1.0), sink());
+        }
+        assert_eq!(*opened.borrow(), vec![a], "a file, a merged folder: no menu");
+    }
+
+    #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
+    fn enter_on_a_folder_band_makes_it_the_view_folder_for_both_views_and_empties_the_expanded_set() {
+        let (ui, _dir) = graph_window();
+        let (a, s) = (node("a"), node("s"));
+        let r = root();
+        set_graph_state(|g| {
+            g.expanded.insert(a);
+            g.open_other.insert(r);
+        });
+        land_now(&ui);
+        crate::select(&ui, s);
+
+        ui.invoke_graph_key("enter".into());
+
+        assert_eq!(view_root(), s);
+        assert!(graph_state(|g| g.expanded.is_empty() && g.open_other.is_empty() && g.first_column == 0), "nothing expanded");
+        // The treemap's next layout is of the same folder.
+        click(&ui, "Treemap");
+        assert_eq!(view_root(), s);
+        assert_eq!(SESSION.with_borrow_mut(begin_layout).map(|j| (j.root, j.view)), Some((s, View::Treemap)));
+    }
+
+    #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
+    fn a_double_click_on_a_folder_band_opens_it_and_on_a_files_band_does_nothing() {
+        let (ui, _dir) = graph_window();
+        let (r, b) = (root(), node("b"));
+        let (x, y) = centre(&ui, &band(Part::Files(r)));
+        ui.invoke_graph_open(x, y);
+        assert_eq!(view_root(), r);
+
+        let (x, y) = centre(&ui, &band(Part::Folder(b)));
+        ui.invoke_graph_open(x, y);
+
+        assert_eq!(view_root(), b);
+        assert_eq!(selected(), Some(b));
+    }
+
+    #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
+    fn backspace_goes_up_and_selects_the_folder_it_left() {
+        let (ui, _dir) = graph_window();
+        let a = node("a");
+        crate::open_node(&ui, a);
+        land_now(&ui);
+
+        ui.invoke_graph_key("backspace".into());
+
+        assert_eq!((view_root(), selected()), (root(), Some(a)));
+    }
+
+    #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
+    fn arrows_move_the_selection_between_folder_bands_and_right_expands() {
+        let (ui, _dir) = graph_window();
+        let (a, b) = (node("a"), node("b"));
+        crate::select(&ui, a);
+
+        ui.invoke_graph_key("down".into());
+        assert_eq!(selected(), Some(b));
+        ui.invoke_graph_key("up".into());
+        assert_eq!(selected(), Some(a));
+        ui.invoke_graph_key("right".into());
+        assert!(graph_state(|g| g.expanded.contains(&a)), "Right expands a");
+    }
+
+    #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
+    fn a_click_on_the_other_band_shows_its_members() {
+        let (ui, _dir) = graph_window();
+        let other = shown_graph().bands.into_iter().find(|b| matches!(b.part, Part::Other { .. })).expect("an other band");
+        let before = selected();
+        let (x, y) = centre(&ui, &other);
+
+        ui.invoke_graph_click(x, y);
+
+        assert!(graph_state(|g| g.open_other.contains(&root())), "the root's other band is open");
+        assert_eq!(selected(), before);
+        land_now(&ui);
+        assert!(shown_graph().bands.iter().any(|b| b.part == Part::Folder(node("d"))), "d shows as its own band");
+    }
+
+    #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
+    fn with_no_shown_graph_every_action_does_nothing() {
+        let (ui, _dir) = graph_window();
+        let a = node("a");
+        let (x, y) = centre(&ui, &band(Part::Folder(a)));
+        let expander = ui.get_graph_expanders().iter().next().expect("an expander").band;
+        crate::select(&ui, a);
+        clear_picture(&ui);
+        let (opened, sink) = record_menus();
+
+        ui.invoke_graph_click(x, y);
+        ui.invoke_graph_open(x, y);
+        ui.invoke_graph_expand(expander);
+        ui.invoke_graph_key("delete".into());
+        ui.invoke_graph_key("down".into());
+        ui.invoke_graph_scroll(1);
+        menu_with(&ui, x, y, At::Pointer(0.0, 0.0), sink());
+        menu_key_with(&ui, At::Box(0.0, 0.0, 1.0, 1.0), sink());
+
+        assert_eq!((selected(), view_root()), (Some(a), root()));
+        assert_eq!(ui.get_delete().step, DeleteStep::Closed);
+        assert!(graph_state(|g| g.expanded.is_empty() && g.first_column == 0));
+        assert!(opened.borrow().is_empty());
+    }
+
+    fn hovered() -> Option<Part> {
+        SESSION.with_borrow(|s| s.graph_hovered)
+    }
+
+    /// Hovers the centre of a's band; checks that it shows.
+    fn hover_a(ui: &MainWindow) {
+        let a = node("a");
+        let (x, y) = centre(ui, &band(Part::Folder(a)));
+        ui.invoke_graph_hover(x, y);
+        assert_eq!(hovered(), Some(Part::Folder(a)), "a is hovered");
+        assert!(ui.get_hover().visible);
+    }
+
+    #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
+    fn graph_hover_shows_the_band_and_its_tooltip_and_leave_clears_them() {
+        let (ui, _dir) = graph_window();
+        let a = node("a");
+        let b = band(Part::Folder(a));
+
+        hover_a(&ui);
+
+        let h: Hover = ui.get_hover();
+        let want = SESSION.with_borrow(|s| {
+            let d = &s.loaded.as_ref().unwrap().data;
+            graph_view::tooltip(&d.tree, &d.counts, &b, Unit::Dynamic)
+        });
+        assert_eq!((h.title.to_string(), h.detail.to_string()), want);
+        assert_eq!((h.x, h.y, h.width, h.height), logical_box(&ui, &b));
+
+        ui.invoke_graph_leave();
+
+        assert_eq!(hovered(), None);
+        assert!(!ui.get_hover().visible);
+        assert!(!ui.get_tip_visible());
+    }
+
+    #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
+    fn graph_hover_is_reset_by_a_landing_a_menu_a_view_switch_and_a_new_scan() {
+        let (ui, _dir) = graph_window();
+        hover_a(&ui);
+        land_now(&ui);
+        assert_eq!((hovered(), ui.get_hover().visible), (None, false), "a landing");
+
+        hover_a(&ui);
+        // What `open_menu` does before the menu shows.
+        crate::drop_hover(&ui);
+        assert_eq!((hovered(), ui.get_hover().visible), (None, false), "a menu");
+
+        hover_a(&ui);
+        click(&ui, "Treemap");
+        assert_eq!((hovered(), ui.get_hover().visible), (None, false), "a view switch");
+        click(&ui, "Graph");
+        land_now(&ui);
+
+        hover_a(&ui);
+        crate::install(&ui, disk_fixture().1);
+        assert_eq!((hovered(), ui.get_hover().visible), (None, false), "a new scan");
+    }
+
+    #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
+    fn a_landing_gives_the_accessible_summary_of_the_view_folder_and_the_crumbs() {
+        let (ui, _dir) = graph_window();
+        let a = node("a");
+        crate::open_node(&ui, a);
+        land_now(&ui);
+
+        let want = SESSION.with_borrow(|s| {
+            let d = &s.loaded.as_ref().unwrap().data;
+            graph_view::summary(&d.tree, &shown_graph(), a, Unit::Dynamic)
+        });
+        assert_eq!(ui.get_graph_value().as_str(), want);
+        assert_eq!(graph_element(&ui).accessible_value().map(|v| v.to_string()), Some(want));
+        let crumbs: Vec<String> = ui.get_crumbs().iter().map(|c| c.text.to_string()).collect();
+        assert_eq!(crumbs.last().map(String::as_str), Some("a"), "{crumbs:?}");
+    }
+
+    // ---- the keyboard focus goes to the graph, not to the hidden treemap ----
+
+    /// The first element with `role` whose label starts with `start`.
+    fn element_starting(ui: &MainWindow, role: AccessibleRole, start: &str) -> ElementHandle {
+        i_slint_backend_testing::ElementQuery::from_root(ui)
+            .match_descendants()
+            .match_accessible_role(role)
+            .find_all()
+            .into_iter()
+            .find(|e| e.accessible_label().is_some_and(|l| l.starts_with(start)))
+            .unwrap_or_else(|| panic!("an element {start:?}"))
+    }
+
+    /// The crumbs of the view folder, as a treemap landing sets them.
+    fn set_crumbs(ui: &MainWindow) {
+        let crumbs = SESSION.with_borrow(|s| {
+            let l = s.loaded.as_ref().unwrap();
+            crate::tree_view::crumbs(&l.data.tree, l.view_root).into_iter().map(crate::crumb).collect::<Vec<_>>()
+        });
+        ui.set_crumbs(ModelRc::new(VecModel::from(crumbs)));
+    }
+
+    #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
+    fn a_crumb_opened_gives_the_focus_to_the_graph() {
+        let (ui, _dir) = graph_window();
+        crate::open_node(&ui, node("a"));
+        set_crumbs(&ui);
+        let keys = record_graph_keys(&ui);
+        let root_crumb = element_starting(&ui, AccessibleRole::Button, "Open ");
+
+        root_crumb.invoke_accessible_default_action();
+        run_change_handlers();
+        press(&ui, Key::DownArrow);
+
+        assert_eq!(view_root(), root());
+        assert_eq!(*keys.borrow(), vec!["down".to_string()], "the graph has the focus");
+    }
+
+    #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
+    fn closing_a_delete_dialog_asked_for_in_the_graph_gives_the_focus_back_to_the_graph() {
+        let (ui, _dir) = graph_window();
+        let a = node("a");
+        // A click on a's band selects it and gives the graph the focus; Delete opens the dialog.
+        press_at(&ui, in_window(&ui, centre(&ui, &band(Part::Folder(a)))), PointerEventButton::Left);
+        press(&ui, Key::Delete);
+        assert_eq!(ui.get_delete().step, DeleteStep::Confirm, "precondition: the dialog shows");
+        let keys = record_graph_keys(&ui);
+
+        press(&ui, Key::Escape);
+        run_change_handlers();
+        assert_eq!(ui.get_delete().step, DeleteStep::Closed);
+        press(&ui, Key::DownArrow);
+
+        assert_eq!(*keys.borrow(), vec!["down".to_string()], "the graph has the focus");
+    }
+
+    #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
+    fn hiding_the_tree_while_it_has_the_focus_gives_the_focus_to_the_graph() {
+        let (ui, _dir) = graph_window();
+        let row = element_starting(&ui, AccessibleRole::ListItem, "b,");
+        let (p, s) = (row.absolute_position(), row.size());
+        press_at(&ui, LogicalPosition::new(p.x + s.width / 2.0, p.y + s.height / 2.0), PointerEventButton::Left);
+        assert!(ui.get_tree_has_focus(), "precondition: the tree has the focus");
+        let keys = record_graph_keys(&ui);
+
+        // Folder tree: part 1.
+        ui.invoke_part_toggled(1, false);
+        run_change_handlers();
+        press(&ui, Key::DownArrow);
+
+        assert_eq!(*keys.borrow(), vec!["down".to_string()], "the graph has the focus");
     }
 }
