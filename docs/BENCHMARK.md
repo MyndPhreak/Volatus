@@ -358,6 +358,30 @@ exists. Pass 2 alone is 5.94 % over; the walker has no 5 % gate, and this is noi
 machine. The registry passes are short (about 0.12 s). The MFT path is not covered by any of
 these numbers.
 
+## Flow graph timing
+
+The graph is laid out and drawn on a worker thread. The budget is 100 ms for a layout and a picture.
+
+- With `--timing`, every graph that lands writes one line to stderr: `Graph <seq>: <ms> ms.` `<seq>` is the number of the layout. `<ms>` is whole milliseconds from the start of the job to the landing.
+- Release budget test (ignored by default):
+
+  ```powershell
+  cargo test -p flow --release --test budget -j 1 -- --ignored
+  ```
+
+Measured by the builder on a synthetic tree of 5,000,000 nodes, layout and render, release build, final code. The picture has the physical size. The limit is 100 ms for the median.
+
+| Picture | Scale | Median |
+|---|---|---|
+| 1920 x 1080 | 1 | 32.0 ms |
+| 3840 x 2160 | 2 | 47.0 ms |
+
+The real-drive numbers are **not yet measured**. The table has one empty row for them.
+
+| Date | Drive | Check | `Graph <seq>` lines | Result |
+|---|---|---|---|---|
+| | **owner: M8, elevated, whole `C:\`, ten open/close/switch rounds** | | | |
+
 ## Deviations
 
 - The overlapped `$MFT` read replaced the old read loop with no feature flag (user approved).

@@ -19,6 +19,55 @@ Volatus shows which folders and files use the space on a drive.
 - The crumbs above the treemap show the folders from the scan root to the open folder. Click a crumb to open that folder.
 - The footer shows the file types that use the most space, with their percent of the scan. The tree and the treemap always show the same selection.
 
+## Graph
+The graph is a second view of the same scan. It shows where the data of a folder goes.
+
+### Switch the view
+- The results top bar has a switch: **Treemap | Graph**. Treemap is the default.
+- Volatus remembers your choice and uses it at the next start. It saves the choice as the `view` key in the settings file.
+- The switch is not available while a scan runs. The treemap shows until the scan ends.
+- Both views use the same scan, the same selection and the same open folder.
+
+### Layout
+- The open folder is the band on the left. Its folders are bands to the right of it. A ribbon joins each folder to its parent.
+- The height of a band is the size of the folder. The height is exactly proportional to the size. Volatus never makes a small band taller to show it.
+- A folder is merged into one band named "other (N)" when it is under 3 % of its parent folder, or when its band would be under 6 pixels tall. N is the number of merged folders. A band named "other files" holds files that are too small to draw on their own.
+- A band named "files" holds the files that are directly in a folder. The graph never draws a single file.
+- Click "other (N)" to show its folders as their own bands. A folder that is still under 6 pixels tall stays in "other (N)".
+- The name and the size of a band show to the right of it.
+
+### Open and close folders
+- A folder that has subfolders shows an expander on its band: **+** to expand and **-** to collapse. The subfolders then show in a new column to the right, in the same view. Click the expander again to close them.
+- You can also press **Right** to expand the selected folder and **Left** to collapse it.
+- Press **Enter** or double-click a folder band to make that folder the open folder. This changes the treemap too.
+- The crumbs above the graph are the same as the crumbs of the treemap. Click a crumb to open that folder. Press **Backspace** to go up one folder.
+- Up to four columns fit in the window. If you open deeper levels, the graph scrolls by whole columns. Use the horizontal mouse wheel, or hold **Shift** and turn the wheel. The graph also scrolls by itself to show a new column or the selected band.
+
+### Colors
+- The bar above the graph has a **Color** switch: **Age** (the default) or **File type**. The choice lasts until you close Volatus.
+- **Age** colors a band by the date of the newest change anywhere inside the folder. The legend in the bar has four entries:
+  - "Changed in the last 6 months"
+  - "Changed 6 to 24 months ago"
+  - "Changed more than 24 months ago"
+  - "Date not known"
+- **File type** colors a band by the file type that uses the most space in it. The chips in the footer are the legend. If you hide the chips in the settings, the graph has no file type legend.
+- The colors for file types can fill in a moment after the graph shows. The window stays usable.
+- A folder gets its date from the newest file or folder inside it. The date of the folder itself is not used.
+- After a delete, the sizes are exact at once. The dates of the parent folders stay as they were at the scan, until you scan again. A date can look older than it is.
+- Volatus reads the dates while it scans. A scan that reads the folders one by one takes them from the directory listing. A scan of the NTFS file table takes them from the file records. Neither needs more rights than the scan itself. On a drive that is in use, the two sources can give a different date for a file that is open.
+
+### Select, menu and delete
+- The tree, the treemap and the graph always show the same selection. Click a band to select it. The tree and the treemap select the same folder.
+- A click on a "files" band selects the folder that holds the files, not the files.
+- Right-click a folder band to open the same menu as in the treemap. It has the Volatus items, with **Delete**, and then the items of Windows. You can also select a folder band and press the Menu key or Shift+F10. The menu opens under the band.
+- "files", "other (N)" and empty space have no menu.
+- Press **Delete** or **Shift+Delete** to delete the selected folder band. The dialog and all rules of the [Delete](#delete) section apply. Delete works only when the selection is a folder band that shows in the graph.
+- Be careful: a click on a "files" band selects its folder. Delete then deletes the whole folder, not only the files. The dialog shows the name of the folder.
+
+### Tooltip
+- Put the pointer on a band to see its tooltip. It shows the path, the size, the share of the parent folder, the number of files and the date of the last change. The date is "not known" when Volatus could not read it.
+- The tooltip hides when you click, press a key or scroll.
+
 ## Delete
 
 Volatus can delete the file or folder that you select. Delete works on one item at a time.
@@ -101,12 +150,17 @@ Press Tab to move to the next control, and Shift+Tab to move back.
 | Treemap | Arrow keys | Select the next tile or frame in that direction |
 | Treemap | Enter | Open the selected folder, or the folder of the selected file |
 | Treemap | Backspace | Go up one folder |
-| File tree, treemap, crumbs | Menu key or Shift+F10 | Open the context menu of the selected item |
+| Graph | Up, Down | Select the next folder band above or below |
+| Graph | Right | Expand the selected folder. If it is open, select its first subfolder. With no folder band selected, select the first one |
+| Graph | Left | Collapse the selected folder, or select its parent folder |
+| Graph | Enter | Make the selected folder the open folder |
+| Graph | Backspace | Go up one folder |
+| File tree, treemap, graph, crumbs | Menu key or Shift+F10 | Open the context menu of the selected item |
 | Settings gear | Enter or Space | Open or close the settings flyout |
 | Settings flyout | Esc | Close the flyout |
 | Settings flyout | Enter or Space | Choose the item, or turn the switch on or off |
-| File tree, treemap | Delete | Delete the selected item to the Recycle Bin, after you confirm |
-| File tree, treemap | Shift+Delete | Delete the selected item permanently, after you confirm |
+| File tree, treemap, graph | Delete | Delete the selected item to the Recycle Bin, after you confirm |
+| File tree, treemap, graph | Shift+Delete | Delete the selected item permanently, after you confirm |
 | Delete dialog | Enter | Use the default button |
 | Delete dialog | Esc | Cancel or close the dialog. It does not stop a delete that runs |
 
@@ -142,10 +196,11 @@ Press Tab to move to the next control, and Shift+Tab to move back.
   - "File type chips": the file type chips in the footer. The footer does not show when both the
     strip and the chips are hidden.
   - "Tile labels": the names on the tiles and the folder frames. The name of the tile under the
-    pointer still shows. The tooltips stay.
+    pointer still shows. The tooltips stay. The graph hides the names of its bands too.
 - **Startup**: "Always start as administrator". When turned on, Volatus checks whether it has
   administrator rights each time it starts. If not, it requests elevation through Windows UAC and
   restarts. If elevation is declined, Volatus continues running as a standard user.
+- **View** is not in the flyout. The **Treemap | Graph** switch in the results top bar sets it. Volatus saves it as the `view` key (`"treemap"` or `"graph"`) in the same file.
 - A choice takes effect at once. Volatus saves each change in `%APPDATA%\Volatus\settings.json`
   and reads this file at start.
 - If Volatus finds a wrong or damaged field in the file, it keeps the file as `settings.json.bad`
