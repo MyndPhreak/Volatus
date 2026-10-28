@@ -62,7 +62,7 @@ Result:
 1. Make a temporary folder with files in it. Scan it. Choose a folder band in the graph.
 2. Press Delete. The usual dialog shows. Cancel it.
 3. Press Shift+Delete. The dialog for the permanent delete shows. Confirm.
-4. After the delete, the band is gone. The parent bands are smaller. Folders you expanded before are still expanded.
+4. After the delete, the band is gone. The parent bands are smaller. Folders you expanded before are still expanded. This is true only for folders that were not in the deleted folder: the deleted folder and all folders in it are not expanded.
 
 Result:
 

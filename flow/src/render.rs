@@ -68,6 +68,9 @@ impl Canvas<'_> {
     }
 
     /// Blends `src` over pixel byte offset `i`, never to full opacity: only bands are opaque.
+    /// The cap keeps a ribbon pixel different from an opaque band pixel (alpha 254, not 255). It
+    /// caps all four packed channels at 254, so the colour of a heavily overlapped ribbon can shift
+    /// by one step: that small tint change is accepted.
     fn blend(&mut self, i: usize, src: u32) {
         let p = over(self.get(i), src);
         self.set(i, if p >> 24 == 255 { u32::from_le_bytes(p.to_le_bytes().map(|v| v.min(254))) } else { p });

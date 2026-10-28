@@ -612,5 +612,7 @@ fn rollup_orphan_node_gets_the_orphans_max_and_the_root_includes_it() {
 
 #[test]
 fn node_size_stays_within_the_8_byte_budget() {
-    assert!(std::mem::size_of::<scan::Node>() <= 64, "node grew past the 8-byte budget");
+    // The design limit is +8 bytes per node (to 64). The value is 56 because the new `modified`
+    // u32 fits the padding that was already there: pin it, so a new field shows here at once.
+    assert_eq!(std::mem::size_of::<scan::Node>(), 56, "node size changed: the budget is +8 bytes per node, and `modified` fits the old padding");
 }
