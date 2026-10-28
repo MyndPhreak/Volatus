@@ -213,6 +213,8 @@ struct Session {
     hover_changes: u64,
     /// The graph band part under the pointer (`graph_ui::note_graph_hover`).
     graph_hovered: Option<flow::Part>,
+    /// The graph's colour mode of the last scan dropped (`forget_scan`): the next scan keeps it.
+    kept_colour: graph_view::ColourMode,
     /// Latest pointer position over the treemap, in logical pixels.
     pointer: (f32, f32),
     /// Where the tooltip is in its life (see the tip module).
@@ -555,6 +557,7 @@ thread_local! {
         hovered: None,
         hover_changes: 0,
         graph_hovered: None,
+        kept_colour: graph_view::ColourMode::Age,
         pointer: (0.0, 0.0),
         tip: tip::TipState::Idle,
         hover_slowest: Duration::ZERO,
@@ -883,7 +886,9 @@ fn left_map(show: impl FnOnce(Option<NodeId>) -> bool) -> tip::TipAction {
 /// hover (`left_map`). Returns what the tooltip does next.
 fn forget_scan(show: impl FnOnce(Option<NodeId>) -> bool) -> tip::TipAction {
     SESSION.with_borrow_mut(|s| {
-        s.loaded = None;
+        if let Some(l) = s.loaded.take() {
+            s.kept_colour = l.graph.colour;
+        }
         s.held = None;
         s.out_from = None;
         s.fade_next = false;
@@ -1455,6 +1460,8 @@ fn install(ui: &MainWindow, data: Arc<Data>) {
     model.unit.set(current_unit());
     ui.set_rows(ModelRc::from(model.clone()));
     SESSION.with_borrow_mut(|s| {
+        // A new scan starts with an empty graph state; only the colour mode stays (session only).
+        let colour = s.loaded.as_ref().map_or(s.kept_colour, |l| l.graph.colour);
         s.loaded = Some(Loaded {
             data: data.clone(),
             serial: next_serial(),
@@ -1466,7 +1473,7 @@ fn install(ui: &MainWindow, data: Arc<Data>) {
             shown_root: None,
             totals: None,
             edits: 0,
-            graph: graph_view::GraphState::default(),
+            graph: graph_view::GraphState { colour, ..graph_view::GraphState::default() },
         });
         s.fade_next = true;
     });

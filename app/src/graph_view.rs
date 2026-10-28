@@ -1,8 +1,5 @@
 //! The folder flow graph's window-free logic: its state, clicks and keys, colours, texts and
 //! the choice of the view to show. Pure; the window code lives elsewhere.
-// Most of this is wired in later tasks (P3.T3, P4.T1, P4.T2).
-#![cfg_attr(not(test), expect(dead_code, reason = "wired in a later task"))]
-#![cfg_attr(test, allow(dead_code))]
 
 use crate::model::{ScanState, Unit, display_name, format_size, group_digits};
 use crate::tree_view::{format_percent, frame_label};
@@ -232,8 +229,24 @@ pub fn key(g: &Graph, tree: &Tree, selected: Option<NodeId>, key: &str) -> KeyAc
 /// shown band: a layout may not have landed since the last key. Right expands a folder that is not
 /// expanded (it never collapses); Left collapses one that is expanded (it never expands).
 pub fn key_with(g: &Graph, tree: &Tree, expanded: &HashSet<NodeId>, selected: Option<NodeId>, name: &str) -> KeyAct {
-    let _ = expanded;
-    key(g, tree, selected, name)
+    let act = key(g, tree, selected, name);
+    if name != "right" && name != "left" {
+        return act;
+    }
+    // Only a drawn folder band with an expander can be expanded or collapsed.
+    let Some((n, band)) = key_target(g, selected).and_then(|n| folder_band(g, n).map(|b| (n, b))) else { return act };
+    if band.expander == Expander::None {
+        return act;
+    }
+    match (name, expanded.contains(&n)) {
+        ("right", false) | ("left", true) => KeyAct::Toggle(n),
+        // Expanded and drawn so: Right goes to the first child band.
+        ("right", true) if band.expander == Expander::Expanded => act,
+        // Expanded, but its children are not drawn yet.
+        ("right", true) => KeyAct::Nothing,
+        // Collapsed (drawn so or not yet): Left goes to the parent band.
+        _ => tree.node(n).parent.map_or(KeyAct::Nothing, KeyAct::Select),
+    }
 }
 
 /// The colour of each band of `g`, in band order. Age: the age class of the band's newest change

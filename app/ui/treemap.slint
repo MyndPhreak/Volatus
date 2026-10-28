@@ -556,7 +556,8 @@ export component TreemapView inherits Rectangle {
         break-points(path) => { return root.break-points(path); }
     }
     map-focus := FocusScope {
-        enabled: root.interactive;
+        // Hidden behind the graph, the map takes no focus (Tab, a click, `focus-map`).
+        enabled: root.interactive && root.visible;
         accessible-role: image;
         accessible-label: "Treemap";
         accessible-value: root.value;

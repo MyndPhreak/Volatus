@@ -505,12 +505,12 @@ pub(crate) fn remove_from(l: &mut Loaded, node: NodeId) -> Result<Option<Detache
     let tree = &l.data.tree;
     let removable = (node.0 as usize) < l.data.counts.len() && node != tree.root() && in_subtree(tree, node, tree.root());
     let gone = if removable && l.totals.is_some() { treemap::filetype::type_totals(&l.data.tree, node) } else { Vec::new() };
-    let Loaded { data, model, view, selected, view_root, rects, shown_root, .. } = l;
+    let Loaded { data, model, view, selected, view_root, rects, shown_root, graph, .. } = l;
     // The model's weak link goes first, so `get_mut` can see the data is not shared.
     model.release();
     let result = match Arc::get_mut(data) {
         None => Err(Busy),
-        Some(d) => Ok(remove_node(d, node, view, selected, view_root, rects, shown_root)),
+        Some(d) => Ok(remove_node(d, node, view, selected, view_root, rects, shown_root, graph)),
     };
     model.attach(data);
     if let Ok(Some(_)) = result {
@@ -522,7 +522,10 @@ pub(crate) fn remove_from(l: &mut Loaded, node: NodeId) -> Result<Option<Detache
 }
 
 /// `remove_from` on data the caller owns alone. Every id is read BEFORE `Tree::detach`, which
-/// clears the links `selection_after` and `view_for_deleted` walk.
+/// clears the links `selection_after` and `view_for_deleted` walk. The graph loses every id inside
+/// the subtree, its shown graph (so nothing is hit-tested on the old tree until the next landing)
+/// and its file-type cache (`GraphState::after_detach`).
+#[expect(clippy::too_many_arguments, reason = "the disjoint fields of `Loaded` that a removal changes")]
 fn remove_node(
     d: &mut Data,
     node: NodeId,
@@ -531,6 +534,7 @@ fn remove_node(
     view_root: &mut NodeId,
     rects: &mut Vec<treemap::Rect>,
     shown_root: &mut Option<NodeId>,
+    graph: &mut crate::graph_view::GraphState,
 ) -> Option<Detached> {
     // The root, an id outside the tree, and a node already removed (or under a removed folder)
     // stay as they are; nothing below changes for them.
@@ -545,6 +549,7 @@ fn remove_node(
     view.expanded.retain(|&n| !inside(n));
     rects.retain(|r| !inside(r.node));
     *shown_root = shown_root.filter(|&n| !inside(n));
+    graph.after_detach(inside);
     let detached = d.tree.detach(node)?;
     tree_view::counts_after_detach(&mut d.counts, &d.tree, Some(parent), &detached);
     *selected = next_selected;

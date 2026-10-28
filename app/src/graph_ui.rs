@@ -15,7 +15,7 @@ use crate::{
     drop_hover, go_up, is_current, open_menu, open_node, persist, relayout, scan_apply, select, stop_move, sync_selection, tip,
     tip_event, to_physical, with_loaded,
 };
-use flow::{Expander, Graph, Part, Theme};
+use flow::{Expander, Graph, Part, Theme, VISIBLE_COLUMNS};
 use slint::{ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel};
 use scan::{NodeId, Tree};
 use std::cell::Cell;
@@ -495,7 +495,8 @@ fn map_menu(ui: &MainWindow, n: NodeId, at: At) {
 /// while a scan runs or a removal waits.
 fn key_pressed(ui: &MainWindow, key: &str) {
     tip_event(ui, tip::TipEvent::Key);
-    let Some(act) = with_shown(|l, g| graph_view::key(g, &l.data.tree, l.selected, key)) else { return };
+    // Right and Left read the graph state: two presses before a landing do not undo each other.
+    let Some(act) = with_shown(|l, g| graph_view::key_with(g, &l.data.tree, &l.graph.expanded, l.selected, key)) else { return };
     match act {
         KeyAct::Select(n) => select(ui, n),
         KeyAct::Toggle(n) => toggle(ui, n),
@@ -541,12 +542,15 @@ fn toggle(ui: &MainWindow, n: NodeId) {
 }
 
 /// The wheel moved the columns by `delta` (-1 left, 1 right): the graph is laid out again when the
-/// first column changed.
+/// first column changed. An expander may have scrolled to a column the shown graph does not have
+/// yet (`toggle`): the graph has at least the columns up to the last one in view, so the wheel
+/// never scrolls that column away before its layout lands.
 fn scrolled(ui: &MainWindow, delta: i32) {
     tip_event(ui, tip::TipEvent::Scroll);
-    let Some(columns) = with_shown(|_, g| g.columns) else { return };
+    let Some(shown) = with_shown(|_, g| g.columns) else { return };
     let moved = with_loaded(|l| {
         let before = l.graph.first_column;
+        let columns = shown.max(before.saturating_add(VISIBLE_COLUMNS));
         l.graph.scroll_by(delta, columns);
         l.graph.first_column != before
     });
@@ -2234,6 +2238,9 @@ mod tests {
         assert_eq!(graph_state(|g| g.first_column), 2, "at the last full view already");
         ui.invoke_graph_scroll(-1);
         assert_eq!(graph_state(|g| g.first_column), 1);
+        // Back to the new column once its layout landed (before it, the shown graph's 5 columns
+        // are all that is known after a scroll left).
+        land_now(&ui);
         ui.invoke_graph_scroll(1);
         assert_eq!(graph_state(|g| g.first_column), 2);
     }
