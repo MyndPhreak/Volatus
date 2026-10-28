@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/MyndPhreak/Volatus/compare/v0.3.0...v0.4.0) (2026-10-28)
+
+
+### Features
+
+* add the flow graph view with entry times from both scanners ([#12](https://github.com/MyndPhreak/Volatus/issues/12)) ([3b229aa](https://github.com/MyndPhreak/Volatus/commit/3b229aa1277a8f341ca9a9362110f9c19fd5cd20))
+
 ## [0.3.0](https://github.com/MyndPhreak/Volatus/compare/v0.2.0...v0.3.0) (2026-10-27)
 
 
