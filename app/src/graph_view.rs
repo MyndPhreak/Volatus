@@ -5,9 +5,10 @@
 #![cfg_attr(test, allow(dead_code))]
 
 use crate::model::{ScanState, Unit};
+use crate::nav::{Dir, neighbour_rect};
 use crate::settings::View;
 use flow::age::{Age, age_colour, age_of};
-use flow::{Band, Graph, Part, Theme};
+use flow::{Band, Expander, Graph, Part, Theme, VISIBLE_COLUMNS, folder_rects};
 use scan::{NodeId, Tree};
 use std::collections::{HashMap, HashSet};
 use treemap::filetype::Category;
@@ -32,12 +33,59 @@ pub struct GraphState {
 }
 
 impl GraphState {
-    pub fn toggle(&mut self, _n: NodeId) {}
-    pub fn show_other(&mut self, _parent: NodeId) {}
-    pub fn reroot(&mut self) {}
-    pub fn after_detach(&mut self, _inside: impl Fn(NodeId) -> bool) {}
-    pub fn scroll_to(&mut self, _column: u16, _columns: u16) {}
-    pub fn scroll_by(&mut self, _delta: i32, _columns: u16) {}
+    /// Expands `n`, or collapses it when it is expanded.
+    pub fn toggle(&mut self, n: NodeId) {
+        if !self.expanded.remove(&n) {
+            self.expanded.insert(n);
+        }
+    }
+
+    /// Shows the members of `parent`'s "other" band as their own bands.
+    pub fn show_other(&mut self, parent: NodeId) {
+        self.open_other.insert(parent);
+    }
+
+    /// A new view folder: nothing expanded or opened, no scroll.
+    pub fn reroot(&mut self) {
+        self.expanded.clear();
+        self.open_other.clear();
+        self.first_column = 0;
+    }
+
+    /// After a removal: drops every id the removed subtree holds (`inside`), the shown graph
+    /// (its bands may name removed folders) and the file-type cache (its `Other` keys count
+    /// members of the old tree).
+    pub fn after_detach(&mut self, inside: impl Fn(NodeId) -> bool) {
+        self.expanded.retain(|&n| !inside(n));
+        self.open_other.retain(|&n| !inside(n));
+        self.shown = None;
+        self.types.clear();
+    }
+
+    /// Scrolls the least that puts `column` in view, within the `columns` the graph has.
+    pub fn scroll_to(&mut self, column: u16, columns: u16) {
+        let last = VISIBLE_COLUMNS - 1;
+        let first = if column < self.first_column {
+            column
+        } else if column - self.first_column > last {
+            column - last
+        } else {
+            self.first_column
+        };
+        self.first_column = first.min(last_first_column(columns));
+    }
+
+    /// Scrolls by `delta` whole columns, stopped at the first column and the last full view.
+    pub fn scroll_by(&mut self, delta: i32, columns: u16) {
+        let max = last_first_column(columns);
+        let first = (i64::from(self.first_column) + i64::from(delta)).clamp(0, i64::from(max));
+        self.first_column = u16::try_from(first).unwrap_or(max);
+    }
+}
+
+/// The largest `first_column` that still fills the view, as `flow::layout` clamps it.
+fn last_first_column(columns: u16) -> u16 {
+    columns.saturating_sub(VISIBLE_COLUMNS)
 }
 
 /// What a click on the graph does.
@@ -59,24 +107,90 @@ pub enum KeyAct {
     Nothing,
 }
 
-pub fn click(_g: &Graph, _hit: Option<usize>) -> Act {
-    Act::Nothing
+/// The part of band `hit` (an index from `flow::hit`), if there is such a band.
+fn part_at(g: &Graph, hit: Option<usize>) -> Option<Part> {
+    hit.and_then(|i| g.bands.get(i)).map(|b| b.part)
 }
 
-pub fn menu_target(_g: &Graph, _hit: Option<usize>) -> Option<NodeId> {
-    None
+/// The drawn band of folder `n`.
+fn folder_band(g: &Graph, n: NodeId) -> Option<&Band> {
+    g.bands.iter().find(|b| b.part == Part::Folder(n))
 }
 
-pub fn open_target(_g: &Graph, _hit: Option<usize>) -> Option<NodeId> {
-    None
+/// A click on band `hit`: a folder band selects its folder, a "files" band selects the folder
+/// that holds the files, an "other" band shows its members.
+pub fn click(g: &Graph, hit: Option<usize>) -> Act {
+    match part_at(g, hit) {
+        Some(Part::Folder(n) | Part::Files(n)) => Act::Select(n),
+        Some(Part::Other { parent, .. }) => Act::ShowOther(parent),
+        None => Act::Nothing,
+    }
 }
 
-pub fn key_target(_g: &Graph, _selected: Option<NodeId>) -> Option<NodeId> {
-    None
+/// The folder a right-click on band `hit` opens the menu for: only a folder band has one.
+pub fn menu_target(g: &Graph, hit: Option<usize>) -> Option<NodeId> {
+    match part_at(g, hit) {
+        Some(Part::Folder(n)) => Some(n),
+        _ => None,
+    }
 }
 
-pub fn key(_g: &Graph, _tree: &Tree, _selected: Option<NodeId>, _key: &str) -> KeyAct {
-    KeyAct::Nothing
+/// The folder a double-click on band `hit` makes the view folder: only a folder band.
+pub fn open_target(g: &Graph, hit: Option<usize>) -> Option<NodeId> {
+    menu_target(g, hit)
+}
+
+/// The folder the Menu key, Shift+F10, Enter, Delete and Shift+Delete act on: the selection,
+/// only when it is drawn as its own folder band. A file, a merged folder, a folder under a
+/// collapsed one or in a scrolled-out column, or no selection: `None`.
+pub fn key_target(g: &Graph, selected: Option<NodeId>) -> Option<NodeId> {
+    selected.filter(|&n| folder_band(g, n).is_some())
+}
+
+/// What key `key` (as the markup names it) does with `selected` in graph `g` of `tree`.
+pub fn key(g: &Graph, tree: &Tree, selected: Option<NodeId>, key: &str) -> KeyAct {
+    let select = |n: Option<NodeId>| n.map_or(KeyAct::Nothing, KeyAct::Select);
+    let target = key_target(g, selected);
+    match key {
+        "up" | "down" => {
+            let dir = if key == "up" { Dir::Up } else { Dir::Down };
+            select(neighbour_rect(&folder_rects(g), selected, dir))
+        }
+        "left" | "right" => {
+            // The first folder band whose folder passes `keep`; bands come column by column,
+            // each group largest first.
+            let first_folder = |keep: &dyn Fn(NodeId) -> bool| {
+                select(g.bands.iter().find_map(|b| match b.part {
+                    Part::Folder(c) if keep(c) => Some(c),
+                    _ => None,
+                }))
+            };
+            // No selection, or one not drawn as a folder band: the first folder band.
+            let Some((n, band)) = target.and_then(|n| folder_band(g, n).map(|b| (n, b))) else {
+                return first_folder(&|_| true);
+            };
+            if key == "right" {
+                match band.expander {
+                    Expander::Collapsed => KeyAct::Toggle(n),
+                    Expander::Expanded => first_folder(&|c| tree.node(c).parent == Some(n)),
+                    Expander::None => KeyAct::Nothing,
+                }
+            } else if band.expander == Expander::Expanded {
+                KeyAct::Toggle(n)
+            } else if band.column == 0 {
+                KeyAct::Nothing
+            } else {
+                // A band of column `c + 1` is in the group of its tree parent in column `c`.
+                select(tree.node(n).parent)
+            }
+        }
+        "enter" => target.map_or(KeyAct::Nothing, KeyAct::Open),
+        "backspace" => KeyAct::Up,
+        "delete" | "shift-delete" => {
+            target.map_or(KeyAct::Nothing, |node| KeyAct::Delete { node, shift: key == "shift-delete" })
+        }
+        _ => KeyAct::Nothing,
+    }
 }
 
 /// The colour of each band of `g`, in band order. Age: the age class of the band's newest change
