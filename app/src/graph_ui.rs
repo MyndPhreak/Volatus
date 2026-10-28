@@ -213,6 +213,22 @@ pub(crate) fn spawn_graph(ui: &MainWindow, job: LayoutJob) {
     });
 }
 
+/// Runs `f` and gives its value, or `None` when it panics: the panic stops here, so the caller
+/// still lets go of its data and calls `scan_apply::data_released`.
+#[allow(dead_code)] // RED stub: not yet used by `spawn_graph`.
+fn guarded<T>(f: impl FnOnce() -> T) -> Option<T> {
+    let _ = f;
+    None
+}
+
+/// The landing of graph job `seq` of scan `generation` on the UI thread, for both outcomes of the
+/// worker: `Some` lands when it is still current (`is_current`), `None` (the layout panicked)
+/// lands no picture and the old one stays. Both always call `scan_apply::data_released`.
+#[allow(dead_code)] // RED stub: not yet used by `spawn_graph`.
+fn finish_graph(ui: &MainWindow, ready: Option<Ready>, generation: u64, seq: u64, started: Instant) {
+    let _ = (ui, ready, generation, seq, started);
+}
+
 /// The graph state a layout reads now (`GraphInputs`), copied from `Loaded::graph`.
 fn graph_inputs() -> GraphInputs {
     with_loaded(|l| GraphInputs {
@@ -845,6 +861,19 @@ mod tests {
         });
         let job = SESSION.with_borrow_mut(begin_layout).unwrap();
         assert_eq!(job.view, View::Treemap);
+    }
+
+    // ---- guarded: a layout that panics stops at the worker ----
+    #[test]
+    fn guarded_gives_the_value_of_a_closure_that_returns() {
+        assert_eq!(guarded(|| 42), Some(42));
+    }
+
+    #[test]
+    fn guarded_gives_none_for_a_closure_that_panics() {
+        assert_eq!(guarded::<u32>(|| panic!("a layout bug")), None);
+        // The test thread goes on after the panic.
+        assert_eq!(guarded(|| "after"), Some("after"));
     }
 
     // ---- is_current: the one landing rule of both views ----
@@ -2305,5 +2334,53 @@ mod tests {
         assert_eq!(*graph_keys.borrow(), vec!["delete".to_string()]);
         assert!(map_keys.borrow().is_empty());
         assert_eq!(ui.get_delete().step, DeleteStep::Closed, "the recorder took the key");
+    }
+
+    // ---- a graph layout that panics (`guarded`, `finish_graph`) ----
+
+    /// How many hold the session's data now.
+    fn data_holders() -> usize {
+        SESSION.with_borrow(|s| Arc::strong_count(&s.loaded.as_ref().unwrap().data))
+    }
+
+    #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
+    fn a_graph_layout_that_panics_still_lets_a_pending_removal_apply() {
+        let (ui, dir) = graph_window();
+        let a = node("a");
+        // The job a graph worker takes: it holds a clone of the data.
+        let LayoutJob { data, generation, seq, .. } = SESSION.with_borrow_mut(begin_layout).expect("a scan shows");
+        // The other workers the window started let go of their clones on their own.
+        let deadline = Instant::now() + std::time::Duration::from_secs(10);
+        while data_holders() > 2 {
+            assert!(Instant::now() < deadline, "the other workers never let go of the data");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        std::fs::remove_dir_all(dir.0.join("a")).unwrap();
+        scan_apply::request_delete_of(&ui, Some(a), false);
+        assert!(in_tree(a), "precondition: the removal waits for the graph worker");
+
+        // The worker's layout panics: it lets go of the data, and the landing has no graph.
+        let ready = guarded::<Ready>(|| panic!("a layout bug"));
+        assert!(ready.is_none());
+        drop(data);
+        finish_graph(&ui, ready, generation, seq, Instant::now());
+
+        assert!(!in_tree(a), "the landing of a failed layout calls data_released");
+        ui.invoke_close_delete();
+    }
+
+    #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
+    fn a_graph_layout_that_panics_keeps_the_shown_graph() {
+        let (ui, _dir) = graph_window();
+        let shown = || (shown_graph(), ui.get_graph_picture().size(), ui.get_graph_labels().row_count(), ui.get_graph_note());
+        let before = shown();
+        let LayoutJob { data, generation, seq, .. } = SESSION.with_borrow_mut(begin_layout).expect("a scan shows");
+        drop(data);
+
+        finish_graph(&ui, None, generation, seq, Instant::now());
+
+        assert_eq!(shown(), before, "the old graph and picture stay");
     }
 }
