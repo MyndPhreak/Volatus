@@ -145,7 +145,7 @@ pub fn build(
         scale,
         first_column: inputs.first_column,
     });
-    let colours = graph_view::colours(&graph, inputs.colour, now, theme, &inputs.types);
+    let colours = graph_view::colours(&graph, inputs.colour, now, theme, &inputs.types, tree, view);
     let image = flow::render(&graph, &colours, w, h, theme);
     let px = |v: f64| (v / scale) as f32;
     let labels = flow::label_spots(&graph, FILE_LABEL_MIN_HEIGHT * scale, LABEL_CAP)
@@ -326,6 +326,7 @@ pub(crate) fn sync_view(ui: &MainWindow) {
     ui.set_colour_choice(match colour {
         ColourMode::Age => 0,
         ColourMode::FileType => 1,
+        ColourMode::Folder => 2,
     });
     ui.set_graph_legend(ModelRc::new(VecModel::from(age_legend(theme))));
 }

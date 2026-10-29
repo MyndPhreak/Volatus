@@ -1,6 +1,7 @@
 //! Folder flow graph: pure layout and drawing, no window code.
 
 pub mod age;
+pub mod folder;
 mod layout;
 mod render;
 mod split;
