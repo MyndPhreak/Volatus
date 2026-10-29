@@ -169,4 +169,12 @@ foreach ($table in 'InstallUISequence', 'InstallExecuteSequence') {
 Check ((Property 'EXPLORERMENU') -eq '1') 'EXPLORERMENU = 1 (menu checkbox ticked by default)'
 Check ((Property 'SecureCustomProperties') -split ';' -contains 'EXPLORERMENU') 'EXPLORERMENU is a secure property'
 
+# The PATH option: one machine-wide entry in an optional feature that is off by default (Level 2).
+$environment = Rows 'SELECT `Name`, `Value`, `Component_` FROM `Environment`'
+Check ($environment.Count -eq 1 -and $environment[0][0] -match 'PATH$' -and $environment[0][1] -like '*[[]INSTALLFOLDER]*' -and $environment[0][2] -eq 'PathEntry') "Environment: one PATH entry naming INSTALLFOLDER, in PathEntry (found $($environment[0][0]) = $($environment[0][1]))"
+$pathFeature = Rows "SELECT ``Feature_Parent``, ``Level`` FROM ``Feature`` WHERE ``Feature`` = 'AddToPath'"
+Check ($pathFeature.Count -eq 1 -and $pathFeature[0][0] -eq 'Main' -and $pathFeature[0][1] -eq '2') 'Feature AddToPath: child of Main, Level 2 (off by default)'
+Check ($null -eq (Property 'ADDTOPATH')) 'ADDTOPATH has no default (PATH checkbox unticked)'
+Check ((Property 'SecureCustomProperties') -split ';' -contains 'ADDTOPATH') 'ADDTOPATH is a secure property'
+
 Write-Host "check-msi: $Msi passed."

@@ -115,6 +115,14 @@
               </RegistryKey>
             </RegistryKey>
           </Component>
+
+          <!-- The install folder at the end of the system PATH, so `volatus` starts from a terminal.
+               Removed on uninstall. CreateFolder gives the component its key path. New terminals
+               see the change; open ones keep the old PATH. -->
+          <Component Id="PathEntry" Guid="6B0E5C2A-9F47-4D1B-8A63-2C7E91D4F5A8" Win64="yes">
+            <CreateFolder/>
+            <Environment Id="VolatusPath" Name="PATH" Action="set" Part="last" System="yes" Value="[INSTALLFOLDER]"/>
+          </Component>
         </Directory>
       </Directory>
       <Directory Id="ProgramMenuFolder"/>
@@ -130,10 +138,17 @@
         <ComponentRef Id="MenuBackground"/>
         <ComponentRef Id="MenuDrive"/>
       </Feature>
+      <!-- Off by default (Level 2 is above the install level of 1): the options page or
+           ADDLOCAL=Main,AddToPath turns it on. Its state is kept across major upgrades. -->
+      <Feature Id="AddToPath" Title="Add to PATH" Level="2" AllowAdvertise="no">
+        <ComponentRef Id="PathEntry"/>
+      </Feature>
     </Feature>
     <!-- The options page's checkbox: ticked unless the user clears it. Secure, so what the dialog
          sets reaches the elevated part of the install. -->
     <Property Id="EXPLORERMENU" Value="1" Secure="yes"/>
+    <!-- The PATH checkbox: unticked, so the property has no value until the user ticks it. -->
+    <Property Id="ADDTOPATH" Secure="yes"/>
     <!-- EXPLORERMENU=0 on the command line (also with /qn) leaves the menu out: on a first install
          with no feature list of its own, it installs Main only. The menu feature is then
          registered as absent, so upgrades and repairs keep it off. A feature condition (level 0)
@@ -190,7 +205,7 @@
       <DialogRef Id="VerifyReadyDlg"/>
       <DialogRef Id="ExitDialog"/>
 
-      <!-- The Explorer menu choice, first install only (an upgrade keeps the feature as it is). -->
+      <!-- The Explorer menu and PATH choices, first install only (an upgrade keeps the features as they are). -->
       <Dialog Id="OptionsDlg" Width="370" Height="270" Title="[ProductName] Setup">
         <Control Id="BannerBitmap" Type="Bitmap" X="0" Y="0" Width="370" Height="44" TabSkip="no" Text="!(loc.InstallDirDlgBannerBitmap)"/>
         <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="370" Height="0"/>
@@ -203,6 +218,11 @@
             Text="Add Scan with Volatus to the Explorer menu"/>
         <Control Id="ExplorerMenuNote" Type="Text" X="36" Y="71" Width="320" Height="30" NoPrefix="yes"
             Text="Right-click a folder, the background of a folder or a drive in File Explorer to scan it. On Windows 11, the entry is in Show more options."/>
+
+        <Control Id="AddToPath" Type="CheckBox" X="20" Y="110" Width="330" Height="17" Property="ADDTOPATH" CheckBoxValue="1"
+            Text="Add Volatus to the PATH, to start it from a terminal"/>
+        <Control Id="AddToPathNote" Type="Text" X="36" Y="127" Width="320" Height="30" NoPrefix="yes"
+            Text="Terminals that are already open do not change. Open a new terminal after setup."/>
 
         <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0"/>
         <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="!(loc.WixUIBack)"/>
@@ -222,7 +242,9 @@
       <!-- The checkbox sets the feature's request state before the page changes. -->
       <Publish Dialog="OptionsDlg" Control="Next" Event="AddLocal" Value="ExplorerMenu" Order="1">EXPLORERMENU</Publish>
       <Publish Dialog="OptionsDlg" Control="Next" Event="Remove" Value="ExplorerMenu" Order="2">NOT EXPLORERMENU</Publish>
-      <Publish Dialog="OptionsDlg" Control="Next" Event="NewDialog" Value="VerifyReadyDlg" Order="3">1</Publish>
+      <Publish Dialog="OptionsDlg" Control="Next" Event="AddLocal" Value="AddToPath" Order="3">ADDTOPATH</Publish>
+      <Publish Dialog="OptionsDlg" Control="Next" Event="Remove" Value="AddToPath" Order="4">NOT ADDTOPATH</Publish>
+      <Publish Dialog="OptionsDlg" Control="Next" Event="NewDialog" Value="VerifyReadyDlg" Order="5">1</Publish>
 
       <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="OptionsDlg" Order="1">NOT Installed AND NOT WIX_UPGRADE_DETECTED</Publish>
       <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg" Order="2">(NOT Installed AND WIX_UPGRADE_DETECTED) OR (Installed AND PATCH)</Publish>
