@@ -118,7 +118,7 @@ export component ViewSwitch inherits Segments {
 /// For the file type colours the footer chips are the legend.
 /// Its width never pushes on the window layout (as the crumbs): what does not fit is cut.
 export component GraphBar inherits Rectangle {
-    /// The chosen colours: 0 age, 1 file type.
+    /// The chosen colours: 0 age, 1 file type, 2 folder.
     in property <int> colour;
     /// The legend of the age colours, from the host.
     in property <[LegendEntry]> legend;
@@ -137,7 +137,7 @@ export component GraphBar inherits Rectangle {
             accessible-role: text;
         }
         Segments {
-            names: ["Age", "File type"];
+            names: ["Age", "File type", "Folder"];
             chosen: root.colour;
             enabled: root.enabled;
             picked(i) => { root.colour-chosen(i); }

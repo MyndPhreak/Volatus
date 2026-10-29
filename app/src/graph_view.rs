@@ -6,6 +6,7 @@ use crate::tree_view::{format_percent, frame_label};
 use crate::nav::{Dir, neighbour_rect};
 use crate::settings::View;
 use flow::age::{Age, age_colour, age_of};
+use flow::folder::folder_colour;
 use flow::{Band, Expander, Graph, Part, Theme, VISIBLE_COLUMNS, folder_rects};
 use scan::{NodeId, Tree};
 use std::collections::{HashMap, HashSet};
@@ -17,6 +18,8 @@ pub enum ColourMode {
     #[default]
     Age,
     FileType,
+    /// One hue per top-level folder of the view, a shade per depth.
+    Folder,
 }
 
 /// The graph's state in one session.
@@ -251,14 +254,20 @@ pub fn key_with(g: &Graph, tree: &Tree, expanded: &HashSet<NodeId>, selected: Op
 
 /// The colour of each band of `g`, in band order. Age: the age class of the band's newest change
 /// at `now`. File type: the tile colour of the band's cached dominant type; a band not counted
-/// yet (`missing_types`), or with no bytes, gets the `Category::Other` colour.
+/// yet (`missing_types`), or with no bytes, gets the `Category::Other` colour. Folder: a folder
+/// band takes the colour of its top-level folder of `view` (`flow::folder::folder_colour`) at its
+/// depth; the view's own band, "files" and "other" get the `Category::Other` colour.
 pub fn colours(
     g: &Graph,
     mode: ColourMode,
     now: u32,
     theme: Theme,
     types: &HashMap<Part, Option<Category>>,
+    tree: &Tree,
+    view: NodeId,
 ) -> Vec<[u8; 3]> {
+    let ranks = if mode == ColourMode::Folder { top_level_ranks(tree, view) } else { HashMap::new() };
+    let other = treemap::filetype::colour(Category::Other, theme);
     g.bands
         .iter()
         .map(|b| match mode {
@@ -267,8 +276,36 @@ pub fn colours(
                 let c = types.get(&b.part).copied().flatten().unwrap_or(Category::Other);
                 treemap::filetype::colour(c, theme)
             }
+            ColourMode::Folder => match b.part {
+                Part::Folder(n) => top_level_of(tree, view, n)
+                    .and_then(|(top, depth)| Some(folder_colour(*ranks.get(&top)?, depth, theme)))
+                    .unwrap_or(other),
+                Part::Files(_) | Part::Other { .. } => other,
+            },
         })
         .collect()
+}
+
+/// The subfolders of `view` by name (case-insensitive, then id): the position of each is its hue.
+/// Counts every subfolder, shown or merged, so a hue never moves when bands merge or split.
+fn top_level_ranks(tree: &Tree, view: NodeId) -> HashMap<NodeId, usize> {
+    let mut dirs: Vec<NodeId> = tree.children(view).filter(|&c| tree.node(c).is_dir).collect();
+    dirs.sort_by_key(|&c| (tree.name(c).to_lowercase(), c.0));
+    dirs.into_iter().enumerate().map(|(i, c)| (c, i)).collect()
+}
+
+/// The subfolder of `view` that holds folder `n` (`n` itself for one) and how deep `n` is below it
+/// (0 for a subfolder of `view`). `None` for `view` itself and for a folder outside `view`.
+fn top_level_of(tree: &Tree, view: NodeId, n: NodeId) -> Option<(NodeId, u16)> {
+    let (mut top, mut depth) = (n, 0);
+    while top != view {
+        let parent = tree.node(top).parent?;
+        if parent == view {
+            return Some((top, depth));
+        }
+        (top, depth) = (parent, depth + 1);
+    }
+    None
 }
 
 /// The parts of `g`'s bands whose file type is not in the cache `types`, in band order.
@@ -450,7 +487,7 @@ mod tests {
         assert!(g.bands.len() >= 3, "{g:?}");
         for theme in [Theme::Light, Theme::Dark] {
             let want: Vec<[u8; 3]> = g.bands.iter().map(|b| age_colour(age_of(b.newest, NOW), theme)).collect();
-            assert_eq!(colours(&g, ColourMode::Age, NOW, theme, &HashMap::new()), want, "{theme:?}");
+            assert_eq!(colours(&g, ColourMode::Age, NOW, theme, &HashMap::new(), &t, t.root()), want, "{theme:?}");
         }
     }
 
@@ -462,7 +499,7 @@ mod tests {
         let types = HashMap::from([(first, Some(Category::Video))]);
         let theme = Theme::Dark;
 
-        let got = colours(&g, ColourMode::FileType, NOW, theme, &types);
+        let got = colours(&g, ColourMode::FileType, NOW, theme, &types, &t, t.root());
 
         let mut want = vec![filetype::colour(Category::Other, theme); g.bands.len()];
         want[0] = filetype::colour(Category::Video, theme);
@@ -476,9 +513,103 @@ mod tests {
         let t = tree();
         let g = layout_of(&t, t.root());
         let types: HashMap<Part, Option<Category>> = g.bands.iter().map(|b| (b.part, None)).collect();
-        let got = colours(&g, ColourMode::FileType, NOW, Theme::Light, &types);
+        let got = colours(&g, ColourMode::FileType, NOW, Theme::Light, &types, &t, t.root());
         assert_eq!(got, vec![filetype::colour(Category::Other, Theme::Light); g.bands.len()]);
         assert!(missing_types(&g, &types).is_empty());
+    }
+
+    /// root { b { b1.zip 300 }, a { a1 { x.bin 500 }, a2.txt 100 }, c.txt 100 }: "a" sorts before
+    /// "b" although "b" comes first in the tree.
+    fn folders_tree() -> Tree {
+        let e = |id: u64, parent: u64, name: &str, size: u64, is_dir: bool| RawEntry {
+            id,
+            parent,
+            name: name.into(),
+            size,
+            allocated: size,
+            is_dir,
+            modified: NOW,
+        };
+        let entries = vec![
+            e(0, 0, "root", 0, true),
+            e(1, 0, "b", 0, true),
+            e(2, 0, "a", 0, true),
+            e(3, 0, "c.txt", 100, false),
+            e(4, 1, "b1.zip", 300, false),
+            e(5, 2, "a1", 0, true),
+            e(6, 2, "a2.txt", 100, false),
+            e(7, 5, "x.bin", 500, false),
+        ];
+        rollup(0, entries).unwrap().tree
+    }
+
+    fn folder_named(t: &Tree, name: &str) -> NodeId {
+        let mut todo = vec![t.root()];
+        while let Some(n) = todo.pop() {
+            if t.name(n) == name {
+                return n;
+            }
+            todo.extend(t.children(n));
+        }
+        panic!("no node named {name}");
+    }
+
+    fn expanded_layout(t: &Tree, open: &[NodeId]) -> Graph {
+        let (expanded, open_other) = (open.iter().copied().collect::<HashSet<_>>(), HashSet::new());
+        flow::layout(&flow::Input {
+            tree: t,
+            view: t.root(),
+            expanded: &expanded,
+            open_other: &open_other,
+            w: 1200.0,
+            h: 800.0,
+            scale: 1.0,
+            first_column: 0,
+        })
+    }
+
+    fn folder_colour_of(t: &Tree, g: &Graph, theme: Theme, part: Part) -> [u8; 3] {
+        let i = g.bands.iter().position(|b| b.part == part).unwrap_or_else(|| panic!("no band for {part:?}"));
+        colours(g, ColourMode::Folder, NOW, theme, &HashMap::new(), t, t.root())[i]
+    }
+
+    #[test]
+    fn colours_folder_mode_gives_each_top_level_folder_its_hue_in_name_order() {
+        let t = folders_tree();
+        let g = expanded_layout(&t, &[]);
+        for theme in [Theme::Light, Theme::Dark] {
+            let a = folder_colour_of(&t, &g, theme, Part::Folder(folder_named(&t, "a")));
+            let b = folder_colour_of(&t, &g, theme, Part::Folder(folder_named(&t, "b")));
+            assert_eq!(a, flow::folder::folder_colour(0, 0, theme), "{theme:?} a");
+            assert_eq!(b, flow::folder::folder_colour(1, 0, theme), "{theme:?} b");
+            assert_ne!(a, b, "{theme:?}: two top-level folders share a colour");
+        }
+    }
+
+    #[test]
+    fn colours_folder_mode_shades_a_subfolder_by_depth_in_its_top_level_hue() {
+        let t = folders_tree();
+        let a = folder_named(&t, "a");
+        let g = expanded_layout(&t, &[a]);
+        for theme in [Theme::Light, Theme::Dark] {
+            let a1 = folder_colour_of(&t, &g, theme, Part::Folder(folder_named(&t, "a1")));
+            assert_eq!(a1, flow::folder::folder_colour(0, 1, theme), "{theme:?}");
+            let top = folder_colour_of(&t, &g, theme, Part::Folder(a));
+            assert_ne!(a1, top, "{theme:?}: a subfolder has the shade of its top-level folder");
+        }
+    }
+
+    #[test]
+    fn colours_folder_mode_view_files_and_other_bands_are_the_other_gray() {
+        let t = folders_tree();
+        let a = folder_named(&t, "a");
+        let g = expanded_layout(&t, &[a]);
+        for theme in [Theme::Light, Theme::Dark] {
+            let gray = treemap::filetype::colour(Category::Other, theme);
+            assert_eq!(folder_colour_of(&t, &g, theme, Part::Folder(t.root())), gray, "{theme:?} view");
+            assert_eq!(folder_colour_of(&t, &g, theme, Part::Files(t.root())), gray, "{theme:?} root files");
+            assert_eq!(folder_colour_of(&t, &g, theme, Part::Files(a)), gray, "{theme:?} files in a");
+        }
     }
 
     #[test]

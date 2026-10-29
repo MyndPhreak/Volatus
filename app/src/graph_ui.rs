@@ -145,7 +145,7 @@ pub fn build(
         scale,
         first_column: inputs.first_column,
     });
-    let colours = graph_view::colours(&graph, inputs.colour, now, theme, &inputs.types);
+    let colours = graph_view::colours(&graph, inputs.colour, now, theme, &inputs.types, tree, view);
     let image = flow::render(&graph, &colours, w, h, theme);
     let px = |v: f64| (v / scale) as f32;
     let labels = flow::label_spots(&graph, FILE_LABEL_MIN_HEIGHT * scale, LABEL_CAP)
@@ -326,6 +326,7 @@ pub(crate) fn sync_view(ui: &MainWindow) {
     ui.set_colour_choice(match colour {
         ColourMode::Age => 0,
         ColourMode::FileType => 1,
+        ColourMode::Folder => 2,
     });
     ui.set_graph_legend(ModelRc::new(VecModel::from(age_legend(theme))));
 }
@@ -361,10 +362,14 @@ fn view_chosen(ui: &MainWindow, i: i32) {
     relayout(ui);
 }
 
-/// Colours were chosen in the graph bar (0 age, 1 file type): the graph is drawn again in them.
-/// The choice lasts for the session only.
+/// Colours were chosen in the graph bar (0 age, 1 file type, 2 folder): the graph is drawn again in
+/// them. The choice lasts for the session only.
 fn colour_chosen(ui: &MainWindow, i: i32) {
-    let mode = if i == 1 { ColourMode::FileType } else { ColourMode::Age };
+    let mode = match i {
+        1 => ColourMode::FileType,
+        2 => ColourMode::Folder,
+        _ => ColourMode::Age,
+    };
     if with_loaded(|l| std::mem::replace(&mut l.graph.colour, mode) != mode) != Some(true) {
         return;
     }
@@ -1055,6 +1060,21 @@ mod tests {
 
         assert_eq!(colour(), ColourMode::Age);
         assert!(ElementHandle::find_by_accessible_label(&ui, LEGEND[0]).next().is_some());
+    }
+
+    #[test]
+    #[cfg_attr(not(slint_debug_info), ignore = "needs the Slint debug info: a debug build, or SLINT_EMIT_DEBUG_INFO=1")]
+    fn graph_bar_folder_colours_are_chosen_with_no_age_legend() {
+        let ui = window(View::Graph);
+        assert_eq!(button(&ui, "Folder").accessible_checked(), Some(false));
+
+        click(&ui, "Folder");
+
+        assert_eq!(colour(), ColourMode::Folder);
+        assert_eq!(button(&ui, "Folder").accessible_checked(), Some(true));
+        for text in LEGEND {
+            assert!(ElementHandle::find_by_accessible_label(&ui, text).next().is_none(), "no legend {text:?}");
+        }
     }
 
     #[test]

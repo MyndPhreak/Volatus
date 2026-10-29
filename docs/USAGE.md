@@ -44,13 +44,14 @@ The graph is a second view of the same scan. It shows where the data of a folder
 - Up to four columns fit in the window. If you open deeper levels, the graph scrolls by whole columns. Use the horizontal mouse wheel, or hold **Shift** and turn the wheel. The graph also scrolls by itself to show a new column or the selected band.
 
 ### Colors
-- The bar above the graph has a **Color** switch: **Age** (the default) or **File type**. The choice lasts until you close Volatus.
+- The bar above the graph has a **Color** switch: **Age** (the default), **File type** or **Folder**. The choice lasts until you close Volatus.
 - **Age** colors a band by the date of the newest change anywhere inside the folder. The legend in the bar has four entries:
   - "Changed in the last 6 months"
   - "Changed 6 to 24 months ago"
   - "Changed more than 24 months ago"
   - "Date not known"
 - **File type** colors a band by the file type that uses the most space in it. The chips in the footer are the legend. If you hide the chips in the settings, the graph has no file type legend.
+- **Folder** gives each folder in the first column its own color. All bands inside that folder use the same color. A band is a little lighter or darker for each level of depth, down to the fourth level. The first band, the "files" bands and the "other" bands are gray. The folder names on the bands are the legend. The folders get their colors in the order of their names, so a color does not change when you open or close a band.
 - The colors for file types can fill in a moment after the graph shows. The window stays usable.
 - A folder gets its date from the newest file or folder inside it. The date of the folder itself is not used.
 - After a delete, the sizes are exact at once. The dates of the parent folders stay as they were at the scan, until you scan again. A date can look older than it is.
