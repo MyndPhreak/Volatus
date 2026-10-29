@@ -6,6 +6,7 @@ use crate::tree_view::{format_percent, frame_label};
 use crate::nav::{Dir, neighbour_rect};
 use crate::settings::View;
 use flow::age::{Age, age_colour, age_of};
+use flow::folder::folder_colour;
 use flow::{Band, Expander, Graph, Part, Theme, VISIBLE_COLUMNS, folder_rects};
 use scan::{NodeId, Tree};
 use std::collections::{HashMap, HashSet};
@@ -265,7 +266,8 @@ pub fn colours(
     tree: &Tree,
     view: NodeId,
 ) -> Vec<[u8; 3]> {
-    let _ = (tree, view);
+    let ranks = if mode == ColourMode::Folder { top_level_ranks(tree, view) } else { HashMap::new() };
+    let other = treemap::filetype::colour(Category::Other, theme);
     g.bands
         .iter()
         .map(|b| match mode {
@@ -274,9 +276,36 @@ pub fn colours(
                 let c = types.get(&b.part).copied().flatten().unwrap_or(Category::Other);
                 treemap::filetype::colour(c, theme)
             }
-            ColourMode::Folder => [0, 0, 0],
+            ColourMode::Folder => match b.part {
+                Part::Folder(n) => top_level_of(tree, view, n)
+                    .and_then(|(top, depth)| Some(folder_colour(*ranks.get(&top)?, depth, theme)))
+                    .unwrap_or(other),
+                Part::Files(_) | Part::Other { .. } => other,
+            },
         })
         .collect()
+}
+
+/// The subfolders of `view` by name (case-insensitive, then id): the position of each is its hue.
+/// Counts every subfolder, shown or merged, so a hue never moves when bands merge or split.
+fn top_level_ranks(tree: &Tree, view: NodeId) -> HashMap<NodeId, usize> {
+    let mut dirs: Vec<NodeId> = tree.children(view).filter(|&c| tree.node(c).is_dir).collect();
+    dirs.sort_by_key(|&c| (tree.name(c).to_lowercase(), c.0));
+    dirs.into_iter().enumerate().map(|(i, c)| (c, i)).collect()
+}
+
+/// The subfolder of `view` that holds folder `n` (`n` itself for one) and how deep `n` is below it
+/// (0 for a subfolder of `view`). `None` for `view` itself and for a folder outside `view`.
+fn top_level_of(tree: &Tree, view: NodeId, n: NodeId) -> Option<(NodeId, u16)> {
+    let (mut top, mut depth) = (n, 0);
+    while top != view {
+        let parent = tree.node(top).parent?;
+        if parent == view {
+            return Some((top, depth));
+        }
+        (top, depth) = (parent, depth + 1);
+    }
+    None
 }
 
 /// The parts of `g`'s bands whose file type is not in the cache `types`, in band order.
