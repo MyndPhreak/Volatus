@@ -384,7 +384,8 @@ fn every_component_guid_is_fixed_unique_and_a_guid() {
             assert!(guids.insert(guid.to_uppercase()), "{id}: {guid} is used twice");
         }
         // Exactly one key path: it tells Windows Installer whether the component is installed.
-        let key_paths = component.descendants().filter(|n| n.is_element() && attr(n, "KeyPath") == Some("yes")).count();
+        // A component with no file or registry value (the PATH entry) takes its folder as key path.
+        let key_paths = component.descendants().filter(|n| n.is_element() && (attr(n, "KeyPath") == Some("yes") || is(n, "CreateFolder"))).count();
         assert_eq!(key_paths, 1, "{id}: one key path");
         let refs: Vec<Node> = all(&doc, "ComponentRef").into_iter().filter(|r| attr(r, "Id") == Some(id)).collect();
         assert_eq!(refs.len(), 1, "{id} is in exactly one feature");
@@ -438,7 +439,7 @@ fn the_menu_is_a_feature_on_by_default_offered_on_first_install_only() {
     let next: Vec<&Node> = publish.iter().filter(|p| attr(p, "Dialog") == Some("OptionsDlg") && attr(p, "Control") == Some("Next")).collect();
     let event = |name: &str| -> Vec<(String, String, u32)> {
         next.iter()
-            .filter(|p| attr(p, "Event") == Some(name))
+            .filter(|p| attr(p, "Event") == Some(name) && (name == "NewDialog" || attr(p, "Value") == Some("ExplorerMenu")))
             .map(|p| (attr(p, "Value").unwrap_or_default().to_string(), condition(p), attr(p, "Order").map_or(0, |o| o.parse().unwrap())))
             .collect()
     };
@@ -506,6 +507,80 @@ fn ice69_is_not_suppressed() {
     let args: Vec<&str> = manifest.lines().filter(|l| l.trim_start().starts_with("linker-args")).collect();
     assert_eq!(args.len(), 1, "one linker-args line in [package.metadata.wix]");
     assert!(!args[0].contains("ICE69"), "{}", args[0]);
+}
+
+// ---- PATH ----
+
+const PATH_COMPONENT: &str = "PathEntry";
+const PATH_GUID: &str = "6B0E5C2A-9F47-4D1B-8A63-2C7E91D4F5A8";
+
+/// The PATH entry is its own feature, off by default: a feature above the install level (the
+/// default is 1) is not installed unless the options page, or `ADDLOCAL`, asks for it. It sits
+/// inside the exe's feature, because the folder it adds is only worth having with the exe in it.
+#[test]
+fn path_is_a_feature_off_by_default_inside_the_exe_feature() {
+    let source = source();
+    let doc = Document::parse(&source).unwrap();
+    let feature = by_id(&doc, "Feature", "AddToPath");
+    let level: u32 = attr(&feature, "Level").expect("Level").parse().unwrap();
+    assert!(level > 1, "above the default install level: off by default");
+    assert_ne!(attr(&feature, "Absent"), Some("disallow"), "it can be left out");
+    assert_eq!(feature.children().filter(|n| is(n, "Condition")).count(), 0, "no feature condition (see the_menu_feature_has_no_condition)");
+    let refs: Vec<&str> = feature.children().filter(|n| is(n, "ComponentRef")).filter_map(|r| attr(&r, "Id")).collect();
+    assert_eq!(refs, [PATH_COMPONENT]);
+    let exe_feature = component_feature(&doc, "VolatusExe");
+    assert!(feature.ancestors().any(|a| a == exe_feature), "inside the exe's feature");
+}
+
+/// One machine-wide PATH entry: the install folder added at the end, removed on uninstall. Nothing
+/// else in the environment is touched.
+#[test]
+fn path_entry_adds_the_install_folder_to_the_system_path_and_removes_it_on_uninstall() {
+    let source = source();
+    let doc = Document::parse(&source).unwrap();
+    let env = one(&doc, "Environment");
+    let got = ["Name", "Action", "Part", "System", "Value"].map(|a| attr(&env, a));
+    assert_eq!(got, [Some("PATH"), Some("set"), Some("last"), Some("yes"), Some("[INSTALLFOLDER]")]);
+    assert_ne!(attr(&env, "Permanent"), Some("yes"), "removed on uninstall");
+    let component = component(&env);
+    assert_eq!(attr(&component, "Id"), Some(PATH_COMPONENT));
+    assert_eq!(attr(&component, "Guid"), Some(PATH_GUID), "the GUID never changes");
+    assert_eq!(attr(&component, "Win64"), Some("yes"));
+    assert_eq!(component.children().filter(|n| is(n, "CreateFolder")).count(), 1, "the folder is the key path");
+}
+
+/// The checkbox is on the options page, unticked: its property has no value. Next applies the
+/// choice before the page changes, so a visit back to the page can also undo it.
+#[test]
+fn path_checkbox_is_unticked_on_the_options_page_and_applied_by_next() {
+    let source = source();
+    let doc = Document::parse(&source).unwrap();
+    let checkbox = by_id(&doc, "Property", "ADDTOPATH");
+    assert_eq!(attr(&checkbox, "Value"), None, "unticked by default");
+    assert_eq!(attr(&checkbox, "Secure"), Some("yes"), "reaches the elevated install");
+    let boxes: Vec<Node> = all(&doc, "Control")
+        .into_iter()
+        .filter(|c| attr(c, "Type") == Some("CheckBox") && attr(c, "Property") == Some("ADDTOPATH"))
+        .collect();
+    assert_eq!(boxes.len(), 1, "one checkbox");
+    assert_eq!(attr(&boxes[0], "CheckBoxValue"), Some("1"));
+    assert_eq!(attr(&boxes[0], "Text"), Some("Add Volatus to the PATH, to start it from a terminal"));
+    assert!(boxes[0].ancestors().any(|a| is(&a, "Dialog") && attr(&a, "Id") == Some("OptionsDlg")));
+
+    let next: Vec<Node> = all(&doc, "Publish")
+        .into_iter()
+        .filter(|p| attr(p, "Dialog") == Some("OptionsDlg") && attr(p, "Control") == Some("Next") && attr(p, "Value") == Some("AddToPath"))
+        .collect();
+    let order = |p: &Node| attr(p, "Order").map_or(0, |o| o.parse::<u32>().unwrap());
+    let by_event = |event: &str| next.iter().filter(|p| attr(p, "Event") == Some(event)).map(|p| (condition(p), order(p))).collect::<Vec<_>>();
+    let (add, remove) = (by_event("AddLocal"), by_event("Remove"));
+    assert_eq!(add.iter().map(|(c, _)| c.as_str()).collect::<Vec<_>>(), ["ADDTOPATH"]);
+    assert_eq!(remove.iter().map(|(c, _)| c.as_str()).collect::<Vec<_>>(), ["NOT ADDTOPATH"]);
+    let go_on = all(&doc, "Publish")
+        .into_iter()
+        .find(|p| attr(p, "Dialog") == Some("OptionsDlg") && attr(p, "Control") == Some("Next") && attr(p, "Event") == Some("NewDialog"))
+        .expect("Next goes on");
+    assert!(add[0].1 < order(&go_on) && remove[0].1 < order(&go_on), "the choice is applied before the page changes");
 }
 
 // ---- running copy and last page ----
